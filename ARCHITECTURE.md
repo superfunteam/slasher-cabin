@@ -249,6 +249,23 @@ the non-negotiables:
 - **The IKEA parody UI is flat, bright, and clinical** — a deliberate tonal knife-twist against
   the wet, dark 3D world. Helvetica-alike, thin black line art, one red accent.
 
+## 11b. Writing GLSL inside JS — two rules that have already bitten us
+
+Shaders live in tagged template literals (`` const NOISE = /* glsl */`...` ``). Two failure modes
+have already cost real time in this repo:
+
+1. **Never put a backtick in a GLSL comment.** A single `` ` `` inside the shader string
+   terminates the template literal, and everything after it is parsed as JavaScript. The error
+   surfaces hundreds of lines away and looks nothing like the cause. Use `'single quotes'` when
+   referring to a variable in a shader comment.
+2. **Never emit a placeholder marker and plan to come back.** A file written as
+   `// /*__PART2__*/` and finished in a second call is a file that ships half-written when the
+   second call does not happen. Write every method in the first pass — compact bodies are fine —
+   then deepen them with edits.
+
+Run `node tools/check.mjs` after writing any file. It catches both of these, plus truncation
+(a file that parses but is missing the API its contract promises).
+
 ## 12. Performance guardrails
 
 - No allocations in `update()`. Reuse scratch vectors (`const _v = new THREE.Vector3()` at

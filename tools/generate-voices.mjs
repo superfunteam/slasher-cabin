@@ -43,17 +43,21 @@ const FORMAT = 'mp3_44100_128';
  * Falls back to positional assignment for any speaker not listed.
  */
 const VOICE_BY_SPEAKER = {
-  // young women
-  sarah: 'EXAVITQu4vr4xnSDxMaL',   // clear, grounded — the one who notices first
-  laura: 'FGY2WhTYpPnrIDTdsKH5',   // quirky, bright — the talker
-  jessica: 'cgSgspJ2msm6clMCkdW9', // warm, playful
-  // young men
-  liam: 'TX3LPaxmHKxFdv7VOQHJ',    // energetic, carries
-  will: 'bIHbv24MWmeRgasZH58o',    // relaxed, low-key
-  harry: 'SOYHLrjzK2X1ezoPC6cr',   // sharper, more forceful
-  // older
-  callum: 'N2lVS1w4EtoT3dr4eOWO',  // husky, middle-aged — the head counselor
-  roger: 'CwhRBWXzGAHq8TQ4Fs17',
+  // Cast against the characterizations in Script.campers. Do not let this fall through to the
+  // positional fallback — it previously gave Teddy (a 16-year-old boy) a woman's voice and Bev
+  // (a 58-year-old woman) a man's.
+  robin: 'EXAVITQu4vr4xnSDxMaL',  // Sarah — young F, grounded and unperformed. Robin is 19,
+                                  // a boatyard kid; she states technical fact flatly. Never scared-sounding.
+  marg:  'FGY2WhTYpPnrIDTdsKH5',  // Laura — young F, bright and forward. Marg runs the dock
+                                  // like a small navy and narrates her own logistics.
+  coop:  'TX3LPaxmHKxFdv7VOQHJ',  // Liam — young M, energetic and carrying. Coop is the one
+                                  // doing bits; his voice has to project across the camp.
+  teddy: 'bIHbv24MWmeRgasZH58o',  // Will — young M, soft and low-key. Teddy is 16 and
+                                  // homesick; his voice explicitly "does not carry."
+  dale:  'CwhRBWXzGAHq8TQ4Fs17',  // Roger — older M, laid-back and resonant. Dale is 27, warm,
+                                  // a half-beat behind, two drinks in from nine o'clock.
+  bev:   'XrExE9yKIg1WjnnlVkGX',  // Matilda — middle-aged F, authoritative. Bev is 58 and has
+                                  // absolute authority at zero volume. She never raises it.
 };
 
 const FALLBACK_VOICES = [

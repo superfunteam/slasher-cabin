@@ -142,11 +142,14 @@ async function generate(img, apiKey, { size, force }) {
     return 'skipped';
   }
 
+  // gpt-image-2 costs ~55s at medium/1024² and 2-4min at high/1024x1536. Only the two hero
+  // illustrations justify 'high'; decals and reference plates are composited or downsampled
+  // in-engine anyway, so medium is indistinguishable there and roughly 3x faster.
   const body = {
     model: MODEL,
     prompt: img.prompt,
     size: size || img.size || '1024x1024',
-    quality: 'high',
+    quality: img.quality ?? 'medium',
     n: 1,
   };
 

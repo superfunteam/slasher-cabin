@@ -1,34 +1,159 @@
 # Slasher Cabin: Some Assembly Required — Story Bible & Script
 
-**Owner:** Story agent. Canonical source for `src/story/Script.js`.
-**Contract:** All beat ids here are emitted as `story:beat { id }` by `NightManager`. All VO ids
-here resolve to `public/audio/vo/<ID>.mp3` and are played via `audio:vo { id, position }` through
-`VoiceBank`. All flags here are written to `ctx.state.storyFlags`. Nothing in this document
-requires a system that does not exist in `ARCHITECTURE.md`.
-
-**The game must be fully playable, and fully sad, with the VO folder deleted.** Voice is weather.
+**Owner:** Story agent. Canonical source for `src/story/Script.js` and `src/story/Panels.js`.
+**Version 2.0.** Supersedes v1.0 entirely. v1.0 was a short story about a game. This is a
+specification for one.
 
 ---
 
-## 1. PREMISE & THEME
+## 0. CONTRACT, DIVISION OF LABOUR, AND WHAT CHANGED
+
+### 0.1 What this document is and is not
+
+This is the **narrative systems** doc. It owns: the fiction, the seven-night beat structure, the
+manual's authorship model, the site plan, the prop list, the VO bank, the title cards, and the
+endings. It does **not** own the stealth maths, the creak formula, the carry classes, the scoring
+formula, or the difficulty tables. Those live in `GAME_DESIGN.md` and are **binding on this
+document**.
+
+v1.0 claimed "nothing in this document requires a system that does not exist in
+`ARCHITECTURE.md`." That sentence was false. It is deleted. §14 is the honest list of everything
+this document needs that does not yet exist, written as diffs another agent can apply.
+
+### 0.2 Who owns which number
+
+| Question | Answered in | Do not re-answer here |
+|---|---|---|
+| What does a camper do when it sees me? | `GAME_DESIGN.md` §4.3, §8.1 | detection cones, FSM, rally points |
+| How long is a night? | `GAME_DESIGN.md` §1.1 (`nightDurationSeconds` 540→1320) | night lengths, stage counts, slot counts |
+| What ends a run? | `GAME_DESIGN.md` §8.2 (`night:failed` reasons) | fail reasons, game-over conditions |
+| How does a creak work? | `GAME_DESIGN.md` §3.1 (the `lambda` formula) | the formula |
+| What does a part weigh? | `GAME_DESIGN.md` §2.1 | mass, carry class, drop noise |
+| What is `Score`? | `GAME_DESIGN.md` §9 | the shape and the `satisfaction` formula |
+| What colour is anything? | `ART_DIRECTION.md` §2, §8.1 | palette, stroke weights, page spec |
+| What does breath sound like? | `AUDIO_DIRECTION.md` §4.19 | the synthesis model |
+| How does distance eat a voice? | `AUDIO_DIRECTION.md` §7.2 | the filter chain |
+
+Where this document states a number that also appears in a sibling doc, it is **restating**, not
+redefining, and the sibling wins on conflict. Every restatement below is tagged with its source.
+This document is written to be read alone by someone who then goes and reads the others; it is not
+written to be read *instead of* them.
+
+### 0.3 Cross-document collisions found while writing v2.0 — resolutions
+
+These are real contradictions between shipped docs. Nobody had noticed them. Each one is a
+blocking item for a named agent.
+
+| # | Collision | Resolution | Who must change |
+|---|---|---|---|
+| **C1** | `STORY` v1.0's night-by-night build order (uprights N2, trusses N3, wall panel N5) contradicts `GAME_DESIGN.md` §7 (joists N2, studs N3, trusses N5). | **`GAME_DESIGN.md` §7 wins.** This document's §6 is rebuilt on top of it, beat for beat. The story beats were re-anchored; none were lost. | Story (done, this doc) |
+| **C2** | `ART_DIRECTION.md` §8.4 draws the mascot's face as **a hockey mask with three breather holes**. This document's entire reveal is that Ansel's mask is a copy of a *drawing*, not that the drawing is a copy of a hockey mask. | **Blocking. The mascot's face is two filled `1.5 px` dots at 1.42× anatomical spacing. No breather holes, no eye slots, no mouth, ever.** If the figure already reads as Jason on Night One, the game is a pastiche and Night Six has nothing to reveal. See §3.3. | Art agent, `ART_DIRECTION.md` §8.4 |
+| **C3** | `ART_DIRECTION.md` §8.6 specifies fake-Swedish product names (`GRÖNSKÄR`, `VÄRNAMO`, `HÄLLESTAD`). The family is **Norwegian** (`VIK & SØN`, `HJEM`). | The assembly names are **real Norwegian building terms**, one per night (§12.1). The joke inverts and improves: a flat-pack manual's product names are meaningless brand words; these are the plain correct words, because a mother naming things for a boy who cannot read does not invent brands. | Art agent, `ART_DIRECTION.md` §8.6 |
+| **C4** | `AUDIO_DIRECTION.md` §7.4 names six campers — DENISE, RANDY, TAMMY, KEVIN "SPUD", MARCIA, BUD DIETZ — who are not the six campers in this document. | The **characters** are canonical here (`ARCHITECTURE.md` §9 assigns all narrative to Story). The **voice-parameter columns** are canonical in `AUDIO_DIRECTION.md`. §7.1 below is the mapping table. One profile changes materially: Bev is 58, not 22. | Audio agent, `AUDIO_DIRECTION.md` §7.4 |
+| **C5** | `AUDIO_DIRECTION.md` §7.2's `voLP` curve makes any voice past ~50 m inaudible mush, but `GAME_DESIGN.md` §11 opens the game on a laugh at 140 m and this document runs on distant calling. | Add a per-line **`projection`** field. Four values, four filter constants. §14.4. Without it, half the VO bank is unhearable and the atmosphere plan fails silently. | Audio agent |
+| **C6** | `ARCHITECTURE.md` §9 gives `CabinSite.js` "the build plot, foundation, slot layout." **Nobody owns the finished interior** — the money shot of the game. | `CabinSite.js` owns it. Ownership line must be amended and budgeted. §10.4. | Engine agent (ownership), Build agent (delivery) |
+| **C7** | v1.0's appendix listed beat `n6_bev_remembers` in the order but declared only `n6_robin_inside` on Night Six. | Both are declared on Night Six. Full ordered list in the Appendix. | Story (done) |
+
+### 0.4 Where the v1.0 review was wrong, and why — so this is not "corrected" back
+
+The senior review that prompted this rewrite was right about most things and this document
+implements almost all of it. Four items it got wrong, recorded here with reasoning so a later
+reader does not helpfully undo the fix:
+
+1. **"The game has no failure model at all" / "no numbers for the core loop" / "no weather
+   schedule" / "nothing on accessibility."** These are all specified — in `GAME_DESIGN.md` §8,
+   §3.1, §7 and §10 respectively, and in some detail. The reviewer read `STORY.md` in isolation.
+   The valid half of the complaint is that *this* document made claims that contradicted them and
+   asserted a completeness it did not have. Fixed by §0.2, by restating every load-bearing number
+   inline with a citation, and by §6, which is now built on `GAME_DESIGN.md` §7 rather than beside
+   it.
+2. **"`Score` is never defined anywhere."** It is defined, with a scoring formula, in
+   `GAME_DESIGN.md` §9. What is missing is a pointer from `ARCHITECTURE.md` §5, requested in §14.1.
+3. **"Dotted outlines must be the game's universal placement affordance from Night One."** No.
+   `GAME_DESIGN.md` §2.4 already assigns the dotted outline a meaning: *a part that is present but
+   occluded in this view* (grammar G3, taught Night Three). That meaning is strictly better for
+   the ending than "a slot." On the last page, the small seated figure drawn in dotted line is not
+   an instruction to put something there. It is the manual stating, in its own established
+   vocabulary, that **there is a person in that chair and you cannot see her from here.** We do not
+   redefine the glyph. The real defect the reviewer identified — that sitting is an untaught verb
+   used once as a terminal action — is fixed properly in §13.2: **sit is a taught, mechanically
+   useful verb from Night One.**
+4. **"The comedy engine is switched off 43% into the game."** The diagnosis was right and the v1.0
+   line "the comedy dies here and does not fully return" is deleted. But the fix is not "keep the
+   jokes coming." It is: **the form holds for all seven nights and the content curdles inside it.**
+   §6 now specifies, for every night without exception, a named missing part, a named location, a
+   named comic beat, and a named panel where both tones occupy the same frame (§6.9). Night Seven
+   is the funniest night in the game and that is the worst thing about it.
+
+### 0.5 Runtime
+
+The doc previously contained no playtime numbers at all. Derived from `GAME_DESIGN.md` §1.1:
+
+| | N1 | N2 | N3 | N4 | N5 | N6 | N7 | Total |
+|---|---|---|---|---|---|---|---|---|
+| `nightDurationSeconds` | 540 | 660 | 780 | 900 | 1020 | 1140 | 1320 | **6360 s = 106 min** |
+| Slots | 6 | 9 | 14 | 18 | 22 | 20 | 28 | 117 |
+| Slots per clock-minute | 0.67 | 0.82 | 1.08 | 1.20 | 1.29 | 1.05 | 1.27 | — |
+| Briefing + dawn (clock-free) | 95 s each night | | | | | | | 665 s = 11 min |
+
+**Minimum clean runtime: 1 h 57 m.** Realistic first playthrough, with searching, two failed
+nights and the Night Six hunt for a part that does not exist: **3 h 05 m – 3 h 40 m.**
+
+The slots-per-minute curve rises monotonically **except at Night Six**, which deliberately dips to
+1.05 — fewer slots, more time. That dip is the design: Night Six is not hard because there is more
+work. It is hard because the instructions are wrong and the woods are empty.
+
+### 0.6 The one rule that generates all the others
+
+**The game renders what Ansel can perceive.** He cannot read. Therefore:
+
+- **All printed lexical text in the 3D world renders as grey blur** — a legible *form*, an
+  illegible *content*. County notices, camp signs, forms, labels, newspaper. The player sees a
+  document and cannot read it, because the man holding the lantern cannot.
+- **Numerals, dates and article numbers render sharply.** Marit taught him numbers. He knows
+  `1953`. He does not know it is a year.
+- **Handwriting renders as shape** — legible as *someone wrote this*, never as words.
+- **One word in the game is legible: `HJEM`.** It is on the manual's cover. It is the only word
+  his mother ever taught him to read.
+
+This is why there is no world text, no lore collectible and no readable document in the game. Not
+as a style rule. As a point of view. Every agent can implement it with one shader branch and one
+material flag (`Materials.blurredPrint`), and it is the cheapest characterisation in the project.
+
+---
+
+## 1. PREMISE, THEME, AND THE THING THAT CHANGED IN 1984
+
+### 1.1 The pitch, one sentence
 
 A man is building a house in the woods, at night, from a set of wordless instructions, and he is
 doing it correctly.
 
-That is the whole game. The comedy is that a slasher-movie monster has a *process* — that he
-sorts his hardware, that he reads ahead, that he is annoyed by a missing bracket. The horror is
-that the process is *good*. He is not improvising. He is not raving. He measures twice.
+The comedy is that a slasher-movie monster has a *process* — that he sorts his hardware, that he
+reads ahead, that he is annoyed by a missing bracket. The horror is that the process is *good*. He
+is not improvising. He is not raving. He measures twice.
 
-Underneath the gag: **this is a story about a man following the last instructions anyone ever
-gave him, long past the point where they mean anything.**
+Underneath the gag: **this is a story about a man following the last instructions anyone ever gave
+him, long past the point where they mean anything.**
+
+**Theme, stated plainly, once, here, and never again anywhere in the game:** grief that has been
+given a task will do the task forever. Craft is a way of not stopping. He is patient, careful and
+proud, and every one of those virtues is a symptom.
+
+No character says this. No panel draws it. If a line of dialogue in §8 can be summarised by the
+paragraph above, cut the line. (Six lines were cut on exactly this test — see §8.2.)
+
+### 1.2 Marit
 
 Ansel Vik cannot read. His mother, Marit, drew him his life instead. How to tie a boot. How to
-bank a stove. How to be silent between the hours of six and nine when his father was home. She
-drew in flat, patient, wordless panels — arrows, numbers, a little round-shouldered figure with
-two dots for a face — and in the corner of every page she printed a maker's mark, **VIK & SØN**,
-because a boy who can't read school should at least be able to believe he has a trade.
+bank a stove. How to be silent between six and nine when his father was home. She drew in flat,
+patient, wordless panels — arrows, numbers, a round-shouldered figure with two dots for a face —
+and in the corner of every page she printed a maker's mark, **VIK & SØN**, because a boy who
+cannot read school should at least be able to believe he has a trade.
 
 The last thing she ever drew him was a house.
+
+### 1.3 1962
 
 He is not building a murder shack. He is rebuilding the house that stood on this shoreline until
 1962, when the Wanaka Pines Land Company condemned it and let the volunteer fire brigade burn it
@@ -36,709 +161,916 @@ down as a training exercise, because that was cheaper than demolition. Ansel was
 stood in the road with the neighbours and watched men in canvas coats practise putting out his
 kitchen.
 
-Camp Wanaka Pines is built on top of where he lived. The mess hall is on the garden. The
-archery range is the orchard. The counselors' cabins sit across the footprint of the barn.
-Nobody there has done anything wrong. Nobody there knows. That is precisely the problem: they
-are not villains, they are *tenants*, and they have no idea the landlord came home.
+Marit died that October. There is a burn permit stamped **14 OCT 1962** nailed inside the
+boathouse (§9, prop 14) and she is not on it, because she was not a structure.
 
-**Theme, stated plainly, once, and never again in the game itself:** grief that has been given a
-task will do the task forever. Craft is a way of not stopping. He is patient, careful, and proud,
-and every one of those virtues is a symptom.
+Camp Wanaka Pines is built on top of where he lived. The mess hall is on the garden. The archery
+range is the orchard. The counselors' cabins sit across the footprint of the barn. Nobody there has
+done anything wrong. Nobody there knows. That is precisely the problem: they are not villains, they
+are *tenants*, and they have no idea the landlord came home.
 
-**The joke we earn and then take away:** for six nights the running gag is *you are always one
-part short*. On the seventh night the missing part is a person.
+### 1.4 The inciting incident — why 1984 and not any of the twenty-two years before it
+
+v1.0 had no answer to this, and a slasher with no trigger is a monster rather than a character.
+The answer is a piece of orange plastic ribbon.
+
+**In March 1984 the Wanaka Pines Land Company sold the lease.** The camp is being expanded: two
+new cabins, a new well, a widened access road. In April, a county surveyor walked the shoreline and
+drove **ten steel stakes with orange ribbon** across the point. Four of them stand inside the
+footprint of Marit's kitchen. One is in the doorway.
+
+He has drawn this house for twenty-two years and never built it, because it was still there —
+under the duff, in the stones, in a shape you could walk. The stakes mean it is about to stop being
+there. **He is not starting. He is being evicted a second time.**
+
+This is delivered three ways, all diegetic, none of them narration:
+
+| Channel | Where | First playthrough? |
+|---|---|---|
+| **Mechanical** | Night One, first player action: the chalked slot for pier P-01 has a county stake standing in it. The player must `build:remove` the stake before the slot becomes snappable. It takes 1.1 s and it is silent. Then they set a pier where it stood. | **Unmissable — it is the tutorial's first input.** |
+| **Environmental** | Prop 6: two sets of stakes, visibly different ages, on the same ground. Ten steel-and-ribbon (1984, county). Fifty-one wooden, carpenter's pencil, numbered from 1953 (his). | Passive |
+| **Verbal** | `BEV_IDLE_08` and `BEV_LATE_02` (§8). Bev is annoyed about the survey because it means paperwork. | Passive |
+
+The player pulls a government stake out of the ground and builds on the hole. That is the whole
+motive, in the first ninety seconds, without a word.
+
+### 1.5 The joke we earn and then take away
+
+For six nights the running gag is **you are always one part short**. On the seventh night the
+missing part is a person, and the manual is still doing bits about it, and that is the horror.
 
 ---
 
-## 2. THE SLASHER
+## 2. ANSEL VIK
 
-**Name:** Ansel Vik. Born 1949. Thirty-five in the summer of 1984. Nobody says his name in the
-game. Bev Ranczak comes within one syllable of it on Night Six and stops.
+**Born 1949. Thirty-five in the summer of 1984.** Nobody in the game says his name. Bev gets to
+"His name was—" and stops (§8.11). The only time the player is given the name is the maker's mark
+on the final card, wordless and earned.
 
-**Silhouette:** 6'6", 280 lb, sloped through the shoulders like a man who has spent his life
-ducking through doorframes built for someone else. Canvas coveralls gone black with water.
-A lumber strap across the chest. A leather tool roll on the right hip, rolled and tied — never
-loose, never rattling. A 28 oz framing hammer with a milled face, carried head-down. No machete.
-No blade at all until Night Four, and then only a handsaw, and he hates using it because it is
-loud and it dulls.
+### 2.1 Silhouette
 
-The manual lives in an oilcloth wallet tucked into the front of his coveralls, against his chest,
-where the rain cannot get it.
+6'6", 280 lb (127 kg), sloped through the shoulders like a man who has spent his life ducking
+through doorframes built for someone else. Canvas coveralls gone black with water. A lumber strap
+across the chest. A leather tool roll on the right hip, rolled and tied — never loose, never
+rattling. A 28 oz framing hammer with a milled face, carried head-down.
 
-**The mask.** It is not a mask in the horror sense. It is a portrait.
+No machete. No blade at all until Night Three, and then only a handsaw, and he hates using it
+because it is loud and it dulls.
+
+The manual lives in an oilcloth wallet inside the front of his coveralls, against his chest, where
+the rain cannot get it.
+
+Player capsule radius is 0.42 m against a typical 0.30 (`GAME_DESIGN.md` §5.1) — he clips
+undergrowth constantly and emits `brush` noise doing it. **He is too big for this forest** and that
+is a number, not an animation.
+
+### 2.2 The mask — corrected optics
+
+It is not a mask in the horror sense. It is a portrait.
 
 In his mother's drawings his face was a flat oval with two dots — the way you draw a person when
 you are drawing quickly for a child who needs to recognise himself on the page. When the house
-burned, the only thing Ansel salvaged from the wreck was the porcelain splash-back panel from
-behind the kitchen sink. He cut an oval from it with a tile nipper and drilled two eyes with a
-hand brace, and he set the eyes where they were on the page — which is to say, too far apart for
-a human skull.
+burned, the only thing Ansel salvaged was the **porcelain splash-back panel from behind the kitchen
+sink.**
 
-So the mask is cold, off-white, glazed, hairline-cracked, and *wrong*, and Ansel has to tilt his
-head to bring a single eyehole onto a target. **That head-tilt is his tell.** It is how the
-player recognises him in a photograph on Night Six. It is how Robin describes him, and it is why
-nobody believes her, because "he looks at you sideways" is not a description of a man, it is a
-description of a bird.
+v1.0 said he "cut an oval from it and drilled two eyes with a hand brace, and set the eyes too far
+apart for a human skull." Both halves of that were wrong. A hand brace on fired glaze shatters it,
+and eyeholes wider than the interpupillary distance do not produce a head tilt — they produce
+near-total blindness, in a man whose characterisation is millimetre-accurate night carpentry. The
+head tilt is the best detail in the fiction and it was resting on a physical impossibility.
 
-**Why he builds:** because he was told to be quiet and useful, and the instructions did not end,
-and no one ever came to check the work.
+**What is actually true, and it is better, because the object causes the gesture instead of the
+gesture being asserted:**
 
-**He never speaks.** Not a grunt of exertion, not a roar. The loudest sound he makes all game is
-the moment on Night Seven when his breath catches. `AudioEngine` should treat his breathing as a
-tracked emitter at all times so the absence of a voice is *audible*.
+| Property | Spec | Consequence |
+|---|---|---|
+| Material | Fired white glaze on vitreous china, hairline-crazed, 6 mm | Cold, off-white `#e8e4dc`, near-zero roughness in the crazing valleys — it catches the moon at grazing angles and vanishes head-on |
+| **It is curved** | It is the sink's splash radius: a section of a 210 mm cylinder | **It cannot sit flat on a face.** It rides proud on the left cheekbone and stands 19 mm off the right. The mask does not fit him and never has |
+| Left eye | An oval **nipped**, not drilled — tile nippers, four hours, a chipped scalloped edge you can see from 1 m | Correctly placed. He can see through it |
+| Right eye | **Not cut at all.** It is the sink's original factory overflow slot — 26 × 9 mm, off-axis, 31 mm too low | Useless. It looks at his own cheek |
+| Therefore | **He sights one-eyed, down the long side of the mask** | He tilts his head and looks along the object the way a carpenter sights down a board to check it for wind |
 
-### His one specific, humanising, awful habit
+**That gesture is a craftsman's and a bird's at the same time, and it is now caused.** It is how
+the player recognises him in a 1971 photograph on Night Six (§9, prop 16). It is how Robin
+describes him, and it is why nobody believes her: "he looks at you sideways" is not a description
+of a man.
 
-**Before he touches the manual, he wipes his hands on his thighs.** Every single time. Two
-strokes, palms flat, unhurried — the way you'd dry your hands before picking up a baby.
+The rectangle missing from the splash-back is still in the world, on the sink, 60 m from the site,
+and the player installs that sink into the kitchen on Night Six (§10.1).
+
+### 2.3 He never speaks — and the breath mix, in numbers
+
+Not a grunt of exertion, not a roar, not a laugh.
+
+v1.0 asked for his breath to be "a tracked emitter at all times so the absence of a voice is
+audible" *and* claimed the loudest sound he makes all game is one breath catching on Night Seven.
+A payoff cannot compete against six hours of the same signal. Both can be true only with a mix
+spec, so here is one. It amends `AUDIO_DIRECTION.md` §4.19 by adding a bus-level filter, not by
+changing the synthesis model.
+
+| | Nights 1–6 | Night Seven, one breath |
+|---|---|---|
+| States in use | `CALM` / `WALK` / `HEAVY` / `FEAR` / `HELD` per `AUDIO_DIRECTION.md` §4.19 | one hand-authored cycle |
+| Bus filter | `lowpass f=900, Q=0.5`, always | **filter opens to `f=6000` over 180 ms** |
+| Level | `−32 dBFS` ceiling on the `body` bus breath layer | **`−14 dBFS`** |
+| Mask colouration | `+6 dB @ 680 Hz`, `−8 dB` shelf above 4 k (§4.19) | **bypassed — the mask is off** |
+| Reads as | body. Weight. Not a voice. | **the only unfiltered airway in the game** |
+
+The 900 Hz lowpass is doing the work: it removes every consonant-band component from the breath,
+so for six hours the player hears a large mammal and not a person. When it opens once, it is a
+person. Nothing else in the mix changes. Do not add music to it.
+
+### 2.4 The habit
+
+**Before he touches the manual, he wipes his hands on his thighs.** Every single time. Two strokes,
+palms flat, unhurried — the way you dry your hands before picking up a baby.
 
 He does it when they are wet. He does it when they are muddy. On Night Four he does it when they
-are covered in Dale Pruitt, and the animation does not change, and the timing does not change,
-and that is the most frightening second in the game, because the priority is not the blood, the
+are covered in Dale Pruitt, and the animation does not change, and the timing does not change, and
+that is the most frightening second in the game, because the priority is not the blood. The
 priority is *the paper*.
 
-By Night Seven his hands are split open from a week of cold work and the wipe stops working. He
-marks a page. He stops. He looks at the mark for a full second and forty frames. Then he turns
-it anyway. It is the only grief the game shows you, and it is over before you are sure it
-happened.
+By Night Seven his hands are split from a week of cold work and the wipe stops working. He marks a
+page. He stops. He looks at the mark for 40 frames. Then he turns it anyway.
 
-**Implementation note:** the wipe is a mandatory 0.9 s lockout on `ui:blueprint-open` from
-Night One. Never skippable. It is a design cost the player pays ninety times so that one instance
-of it can pay off.
+#### 2.4.1 The wipe's duration is a function of his hands — corrected timing
+
+v1.0 made the wipe a mandatory **0.9 s lockout on every `ui:blueprint-open`**, and estimated the
+player would pay it "ninety times." That estimate was out by an order of magnitude. Night Three
+alone is 14 slots across 4 stages; realistic opens across a playthrough are **380–780**. At 0.9 s
+that is six to twelve minutes of watching an animation, applied to the tightest feedback loop in
+the game (check diagram → check join → check diagram).
+
+The idea was never "make the player wait." The idea was **his hands**. So the duration is his
+hands:
+
+```js
+// BlueprintUI.js. Reads Player.handState (new read-only property, §14.1).
+handState: 'dry' | 'wet' | 'muddy' | 'bloodied' | 'split'
+
+wipeDuration =
+    0.18                                   // baseline: this IS the page-unfold in ART_DIRECTION §8.7
+  + (isFirstOpenOfNight        ? 0.72 : 0) // 0.90 s
+  + (handState !== lastWipedState ? 0.72 : 0) // 0.90 s
+  + (night === 7 && handState === 'split' ? 1.22 : 0) // 1.40 s, once
+```
+
+| Situation | Duration | Times per playthrough |
+|---|---|---|
+| Ordinary open | **0.18 s** | ~370–770 |
+| First open of a night | 0.90 s | 7 |
+| First open after hands change state | 0.90 s | ~9 |
+| **Night Four, first open after Dale** | **0.90 s**, animation and timing identical | 1 |
+| **Night Seven, hands split** | **1.40 s**, and it fails | 1 |
+
+Total animation time across a full playthrough: **≈ 82 seconds**, against v1.0's implied 6–12
+minutes. The payoff survives; the loop does not die.
+
+**The lockout lives in `BlueprintUI.js` (UI agent), not `BuildSystem`.** `HUD` emits
+`ui:blueprint-open`; `BlueprintUI` plays the wipe; `BlueprintUI` emits `ui:blueprint-ready` when
+the page is legible (§14.1). Nothing else may gate on `ui:blueprint-open`.
+
+**The world does not pause while the manual is open.** `GAME_DESIGN.md` §2.4 states this and it is
+load-bearing for the horror: you are reading a piece of paper with your back to a forest. Say it in
+every doc. There is no "manual stays pinned" toggle at `standard` difficulty because the manual
+*does* stay open while walking at `story` and `standard` (`GAME_DESIGN.md` §10.1) — only `gristle`
+makes you stop.
+
+### 2.5 Why he builds
+
+Because he was told to be quiet and useful, and the instructions did not end, and no one ever came
+to check the work.
 
 ---
 
 ## 3. THE MANUAL AS NARRATOR
 
-The manual is the only character in this game with a personality, a sense of humour, and an
-opinion. It has no words. It has an *attitude*, expressed entirely through:
+The manual is the only character in this game with a personality, a sense of humour and an opinion.
+It has no words. It has an *attitude*, expressed entirely through what it bothers to draw, the
+mascot, the warnings, the article numbers, and **the linework itself.**
 
-- **what it bothers to draw** (and what it assumes you already know),
-- **the mascot** — the round-shouldered little man with the flat face and the hammer,
-- **the warnings** — a circled panel, a red diagonal, a small exclamation,
-- **the article numbers**, which are the only "text" and which are *not* random,
-- **the linework itself.**
+One word appears in the entire game: the cover reads **HJEM**. The player parses it as a flat-pack
+product name, the way you parse KALLAX. It is not a product name (§0.6).
 
-One word appears in the entire game: the cover reads **HJEM**. The player will parse it as a
-flat-pack product name, the way you'd parse KALLAX or BILLY. It is not a product name. It is the
-only word Marit ever taught Ansel to read.
+### 3.1 The linework tell — the actual narrative device
 
-### The linework tell (the real narrative device)
+There are two hands in this manual and the player is never told this.
 
-There are two hands in this manual and the player is not told this.
-
-- **Marit's hand:** single confident stroke, closed corners, even weight, mascot always drawn
-  with rounded shoulders and a slight forward lean, as if listening.
-- **Ansel's hand:** doubled-back lines, over-corrected corners, visible erasure ghosts, mascot
+- **Marit's hand:** single confident stroke, closed corners, even weight, the figure drawn with
+  rounded shoulders and a slight forward lean, as if listening.
+- **Ansel's hand:** doubled-back lines, over-corrected corners, visible erasure ghosts, the figure
   drawn *taller*, shoulders square, no lean.
 
-The manual does not "get darker." **Ansel starts drawing the pages he needs it to say.** By
-Night Five roughly a third of the panels are his. By Night Six, most. That is the actual arc, and
-`Blueprint.js` should expose it as a per-panel `authorship: 'marit' | 'ansel'` field driving line
-jitter, stroke doubling, and eraser ghosting in the procedural diagram generator.
+The manual does not "get darker." **Ansel starts drawing the pages he needs it to say.**
 
-### The seven-stage evolution
+| Night | Panels in Ansel's hand | Cumulative |
+|---|---|---|
+| 1 | 0 of 9 | 0% |
+| 2 | 1 of 11 | 4% |
+| 3 | 2 of 14 | 5% |
+| 4 | 5 of 16 | 16% |
+| 5 | 9 of 18 | **31%** |
+| 6 | 13 of 17 | **59%** |
+| 7 | 1 of 1 (the fold-out's telephone inset) — every other mark is hers, and the last mark she ever made | — |
+
+### 3.2 `authorship` as a four-parameter struct — the tech spec
+
+v1.0 asked `Blueprint.js` to "expose `authorship` as a per-panel field driving line jitter, stroke
+doubling and eraser ghosting in the procedural diagram generator," which is a subordinate clause
+describing a specialist's year of work, and it is the entire narrative device. Here is a spec that
+a Build agent can implement in a week.
+
+**Panels are parametric stroke lists**, not images:
+
+```js
+Stroke = {
+  pts:      Float32Array,   // [x0,y0, x1,y1, ...] in page units (page height = 900)
+  weight:   'hairline'|'thin'|'medium'|'heavy',  // ART_DIRECTION §8.2 — 0.75/1.5/2.5/4.0 px
+  closed:   bool,
+  seed:     int,            // per-stroke, from Rand — deterministic per ARCHITECTURE §6
+}
+Panel = { id:'6.8', strokes:[Stroke], authorship:'marit'|'ansel', hero:bool }
+```
+
+**`authorship` is a struct of four numbers plus three derived ones.** These are the shipping
+values; a balance pass changes only this object.
+
+```js
+const HANDS = {
+  marit: {
+    wobbleAmp:       0.22,  // px of perpendicular deviation, page-height 900
+    cornerOvershoot: 0.00,  // px past the vertex before the turn
+    strokeRepeat:    1.00,  // expected passes per stroke
+    ghostAlpha:      0.00,  // alpha of erased strokes left under the final line
+    // derived
+    wobbleFreq:      0.9,   // cycles per 100 px of arc length
+    pressureVar:     0.06,  // ± fraction of nominal weight along the stroke
+    closureError:    0.0,   // px gap at a closed corner
+  },
+  ansel: {
+    wobbleAmp:       0.95,
+    cornerOvershoot: 1.80,
+    strokeRepeat:    1.70,  // 70% of strokes doubled, offset 0.6–1.4 px, second pass at 0.72 alpha
+    ghostAlpha:      0.14,
+    wobbleFreq:      3.4,
+    pressureVar:     0.28,
+    closureError:    0.9,
+  },
+};
+```
+
+`wobbleAmp` and `wobbleFreq` drive a 1-D value-noise offset along each stroke's normal, seeded from
+`Stroke.seed` so a panel is identical every time it is drawn. `cornerOvershoot` extends the
+incoming segment past the vertex before the outgoing segment starts — the single most legible
+"drawn by someone who is trying hard" tell. `strokeRepeat > 1` re-draws the stroke with a
+per-pass offset. `ghostAlpha` draws a discarded variant underneath at that alpha, at
+`weight − 1` step.
+
+**Nobody has to consciously read this.** The one panel where the difference must be *conspicuous*
+is 5.4, and 5.4 is hand-authored (§3.5).
+
+### 3.3 The figure
+
+Internal id **`BJØRN`** (Norwegian Ø, correcting `ART_DIRECTION.md` §8.6's Swedish Ö). Never shown
+to the player. Construction per `ART_DIRECTION.md` §8.4 — 4.0 px continuous outline, head a perfect
+`3U` circle, 4.5 heads tall, `#14181a` on `#f2efe6`, hammer grip the only red — **with one blocking
+correction and one addition:**
+
+| | `ART_DIRECTION.md` §8.4 says | Corrected |
+|---|---|---|
+| Face | "A hockey mask… three `1.5 px` breather holes in a triangle and two `1.5 px` almond eye slots" | **Two filled `1.5 px` dots. Spacing `1.42×` anatomical. Nothing else. No mouth, ever, except Panel 2.6.** |
+| Why | — | If the drawing already looks like a hockey mask, the mask is a reference to a movie instead of a copy of a drawing, and Night Six reveals nothing. The whole fiction runs backwards through this one detail. **This is C2 and it is blocking.** |
+| Poses | 9 fixed poses | **Add exactly one: `arms-at-sides`.** It is used twice in the game: Panel 6.9, and Ending A. |
+
+`ART_DIRECTION.md` §8.4's comic rule stands and is the engine of the whole thing: **BJØRN is never
+in danger and never reacts to anything frightening.** A camper's silhouette may appear in a panel;
+BJØRN carries on. The horror is in the diagram and the diagram does not care.
+
+### 3.4 Baking — zero panel renders per frame
+
+| Step | When | Cost |
+|---|---|---|
+| Build stroke lists for the night | `night:begin` | < 4 ms, no allocation in `update()` |
+| Rasterise **one** page to an `OffscreenCanvas` at **1448 × 2048** (A4 1:1.414, ≥ 2× the 62%-of-viewport display size in `ART_DIRECTION.md` §8.1) | on demand | 6–9 ms |
+| Cache | at most **3** baked pages (current, previous, next) = **35.6 MB** | — |
+| Re-bake on page turn | during the 0.30 s page-turn animation | 6–9 ms, amortised |
+| Per-frame canvas draws | **zero** — the DOM layer shows the baked bitmap | 0 |
+| Dispose | `night:complete` | — |
+
+Do not bake all pages up front: 14 pages × 11.9 MB is 166 MB of texture memory for a piece of
+paper. Paper fibre, fold creases and the drop shadow (`ART_DIRECTION.md` §8.1) are CSS/canvas
+layers composited over the bitmap, not baked into it.
+
+**Ending A's "the panel updates in real time" is not a live generator.** Both states — the panel,
+and the panel with the red diagonal — are baked at Night Seven's `night:begin`. The "redraw" is a
+0.9 s crossfade plus a 0.6 s `clip-path` reveal animated along the diagonal's own stroke path. Two
+bitmaps and a CSS animation.
+
+### 3.5 Hand-authored hero panels — the carve-out
+
+`ARCHITECTURE.md` §1 mandates **zero binary art assets**. Several of the most important panels in
+the game are drawings, not generatable diagrams, and nobody had noticed the collision.
+
+**The carve-out:** hero panels ship as **code-authored stroke data** — JS arrays of polylines with
+per-vertex pressure — in a new Story-owned file, `src/story/Panels.js` (§14.2). This is legal under
+the no-binary-assets rule: it is source code, it diffs, it has no fetch.
+
+**Exactly nine panels are hand-authored. Everything else is procedural.**
+
+| Panel | What it is | Hand | Strokes (budget) |
+|---|---|---|---|
+| `0.0` | The cover. **HJEM**, the house in three-quarter elevation, `VIK & SØN` | marit | 210 |
+| `1.9` | The contents inset — and the boot (§6.9) | marit | 96 |
+| `4.9` | The figure standing over a horizontal shape with shoes, dimensioned `1.78 m` | ansel | 78 |
+| `5.4` | The second figure: erased, redrawn, erased, redrawn smaller. Three ghosts under the final line | marit, then ansel over it | 190 |
+| `5.7` | The counterweight, drawn as a dotted standing human outline, with the "approximate" tilde and **no number** | ansel | 64 |
+| `6.5` | Article `0000-000`, confident arrow, empty slot | ansel | 44 |
+| `6.8` | The kitchen wall elevation: window over a sink, four pencil marks on a doorframe — with a bunk bed drawn over it in a second hand and erased | marit + ansel | **340** |
+| `6.9` | The figure, alone, centre of an empty page, `arms-at-sides` | ansel | 52 |
+| `7.1` | The fold-out. Every step ticked. Parts bracket: `1`. The telephone icon, and the payphone drawn *in situ* 160 m away, with a dotted path | marit — **except the telephone inset, which is ansel** | 520 |
+
+Total hand-authored stroke budget: **1,594 strokes ≈ 46 KB of source.** That is one focused week,
+not a specialist's year.
+
+**Typography.** `ART_DIRECTION.md` §8.6 already specifies a CSS stack with fallbacks, so the
+reviewer's "resolves to Arial on Windows" is half-answered. The remaining risk is *metrics*, and
+the manual's typography is the comedy. Two guards:
+
+1. **Metric probe at init.** `BlueprintUI` measures the advance width of `HAMBURGEFONS` at 100 px
+   in the resolved font. Reference (Helvetica Neue Medium): **704.0 px**. If the measured value
+   differs by more than 1.5%, apply compensating `letter-spacing` and a `transform: scaleX()`
+   clamped to ±3%. Log via `Log.debug`.
+2. **Nothing large is type.** The cover word, the seven assembly names, and the night-end card
+   headline are **stroke data**, not text. Total font failure cannot break the joke; it can only
+   make three-character part codes slightly wide.
+
+### 3.6 The seven-stage evolution
 
 **Night 1 — HELPFUL.** Warm, over-explains, delighted with you.
-> *Panel 1.1:* the mascot waving, both hands, from the corner of the page.
-> *Panel 1.4:* a bolt going into a hole. Then the same bolt, larger. Then the same bolt again
-> with a magnifying glass over it, in case you missed the bolt.
-> *Panel 1.7:* the mascot standing on the finished pier, arms up, one small drawn sparkle.
+> *1.1:* the figure waving, both hands, from the corner of the page.
+> *1.4:* a bolt going into a hole. Then the same bolt, larger. Then the same bolt again with a
+> magnifier over it, in case you missed the bolt.
+> *1.7:* the figure standing on the finished foundation, `thumbs-up`, one drawn sparkle.
 
 **Night 2 — PEDANTIC.** It has decided you're competent and now it's fussy.
-> *Panel 2.3:* a bracket at 90°, ticked. The same bracket at 88°, crossed out in red. The same
-> bracket at 89.5°, **also** crossed out in red.
-> *Panel 2.6:* a hand tightening a bolt. An arrow labelled with a small dial. A second panel
-> showing the same hand, over-tightened, and the mascot with one flat line for a mouth.
-> The mascot has never had a mouth before. He does not have one again for three nights.
+> *2.3:* a bracket at 90°, ticked. The same bracket at 88°, ✗ in red. The same bracket at 89.5°,
+> **also** ✗ in red.
+> *2.6:* a hand tightening a bolt, with the spiral-torque arrow. Then the same hand,
+> over-tightened, and the figure with one flat line for a mouth. **The figure has never had a
+> mouth. He does not have one again for five nights, and the next time is Ending A.**
 
 **Night 3 — IMPATIENT.** Steps get combined. It skips things.
-> *Panel 3.2:* eleven sub-assemblies collapsed into one drawing with fourteen arrows and no
-> intermediate states. Good luck.
-> *Panel 3.5:* an entire step rendered as a single downward arrow and the number **×6**.
-> *Panel 3.8:* the mascot, arms folded, tapping one foot — drawn with motion ticks. It is
-> waiting for you. It is the first time the manual is a *presence* and not a document.
+> *3.2:* eleven sub-assemblies collapsed into one drawing with fourteen arrows and no intermediate
+> states. Good luck.
+> *3.5:* an entire step rendered as one downward arrow and `×6`.
+> *3.8:* the figure, `standing-neutral`, with three motion ticks beside one foot. It is tapping.
+> It is waiting for you. **First time the manual is a presence and not a document.**
 
 **Night 4 — KNOWING.** It begins illustrating things it should not know about.
-> *Panel 4.1:* the hinge you need, drawn in isolation. Then drawn *in situ* — screwed to the
-> camp boathouse door. The manual knows where the camp is.
-> *Panel 4.6:* a cone of light on the ground. The mascot outside the cone. A dotted path.
-> This is the first panel that is about *them* and not about the house.
-> *Panel 4.9 (Ansel's hand, and the player will not consciously notice):* the mascot standing
-> over a horizontal shape. The shape is not a joist. It has shoes.
+> *4.1:* the hinge you need, in isolation. Then *in situ* — screwed to the camp boathouse door,
+> drawn correctly, including the oar propped against it. **The manual knows where the camp is.**
+> *4.6:* a cone of light on the ground. The figure outside the cone. A ghost-trail dotted path.
+> First panel that is about *them* and not about the house.
+> *4.9:* **hero.** The figure standing over a horizontal shape. The shape is not a joist. It has
+> shoes, and a double-headed dimension arrow reading `1.78 m`. The manual measured him.
 
 **Night 5 — COMPLICIT.** It stops pretending this is only carpentry.
-> *Panel 5.1:* the standard flat-pack warning icon — **THIS STEP REQUIRES TWO PERSONS** — two
-> mascots, one at each end of a wall panel. Both drawn in Marit's hand. Both drawn twenty-two
-> years ago.
-> *Panel 5.4:* the second mascot, erased. Redrawn. Erased. Redrawn smaller. The eraser ghosts
-> are visible under the final line. Three attempts. This panel has no arrows, no numbers, and
-> no instruction. It should not be in a manual at all.
-> *Panel 5.7:* a counterweight diagram. The counterweight is a rectangle with a number on it.
-> The number is a weight in kilograms. It is 71 kg.
+> *5.1:* the standard warning icon — **THIS STEP REQUIRES TWO PERSONS** — two figures, one at each
+> heel of a truss. Both in Marit's hand. Both drawn twenty-two years ago.
+> *5.4:* **hero.** The second figure, erased, redrawn, erased, redrawn smaller. Three ghosts under
+> the final line. No arrows, no numbers, no instruction. **It should not be in a manual at all.**
+> *5.7:* **hero.** The counterweight diagram. The counterweight is a **dotted outline of a standing
+> person** with the "approximate" tilde and no number at all (§6.5.1 explains why the number is
+> gone and why that is better).
 
-**Night 6 — WRONG.** Not sinister-wrong. *Broken*-wrong. Which is worse.
-> *Panel 6.2:* step 14 before step 9. Step 9 does not appear.
-> *Panel 6.5:* an article number that does not exist and cannot be found — **0000-000** — with
-> a confident arrow pointing at an empty slot. The player will search for twenty minutes. It
-> is not out there.
-> *Panel 6.8:* a wall elevation drawn in perfect Marit line — a kitchen, a window over a sink,
-> pencil marks on a doorframe at four ascending heights — and then, drawn over the top of it in
-> Ansel's scratched hand, a *bunk bed*. He is trying to make his mother's house fit a camp.
-> It doesn't. He erases the bunk. The ghost stays.
-> *Panel 6.9:* the mascot, alone, in the middle of an otherwise empty page. Not doing anything.
+**Night 6 — WRONG.** Not sinister-wrong. *Broken*-wrong, which is worse.
+> *6.2:* step 14 before step 9. Step 9 does not appear.
+> *6.5:* **hero.** Article `0000-000`, a confident arrow, an empty slot. It is not in the world. It
+> has never been in the world. The slot it points at is beside the kitchen table.
+> *6.8:* **hero.** A kitchen wall elevation in perfect Marit line — a window over a sink, four
+> pencil marks on a doorframe at ascending heights — and drawn over the top of it in Ansel's
+> scratched hand, a **bunk bed**. He is trying to make his mother's house fit a camp. It doesn't.
+> He erases the bunk. The ghost stays at `ghostAlpha 0.14`.
+> *6.9:* **hero.** The figure, alone, centre of an empty page, `arms-at-sides`. Not doing anything.
 
-**Night 7 — GONE.** `BlueprintUI` opens to a blank spread. The wipe animation still plays.
-> There is exactly one mark on the final page: a **dotted outline** of a small seated figure,
-> in a chair, at a table. Child-sized. Drawn in Marit's hand, in 1962, on the last page she
-> finished.
-> Above it, the flat-pack convention every player knows on sight: the parts-list bracket, and
-> inside the bracket, nothing.
+**Night 7 — GONE.** `BlueprintUI` opens to a blank spread. The wipe still plays. It takes 1.40 s
+and it does not work.
+> *7.1:* **hero, fold-out.** Every step of the house, ticked, in her hand. In the parts bracket:
+> `1`. Beside it, in *his* hand, the telephone icon — the parody "contact customer service" — and
+> the camp payphone drawn *in situ*, 160 m away, correct to the alcove, with a dotted ghost-trail
+> path from the front door to it.
+> The last page: a **dotted outline** of a small seated figure, in a chair, at a table.
+> Child-sized. Marit's hand, 1962, on the last page she finished. Dotted, in this manual's
+> established grammar (`GAME_DESIGN.md` §2.4, G3), means: **present, but occluded in this view.**
+> Above it, the parts bracket, and inside the bracket, nothing.
 > **Some assembly required.**
 
 ---
 
-## 4. THE SEVEN NIGHTS
+## 4. THE SITE — one plan, from which every distance in the game derives
 
-Escalation runs on three independent curves: **build complexity** (parts/slots/tolerance),
-**camper density** (`Campers` count and patrol overlap), and **tone**. They are deliberately
-out of phase — Night 4 spikes tone before it spikes density, Night 6 drops density to almost
-nothing and is the most frightening night in the game.
+v1.0 contained eleven distances chosen one at a time and most of them were "about eighty metres."
+Here is the plan they should have come from. **`Terrain.js`, `Forest.js`, `Navmesh.js`,
+`Props.js`, `CabinSite.js` and `NoiseSystem.js` all read these numbers.**
 
----
+### 4.1 Playable area
 
-### NIGHT ONE — FOUNDATION (A)
-*Beat id:* `n1_thumbs_up` · *Flag:* `sawIntroPanel`
-
-- **Build:** six stone piers, six sill beams, twenty-four lag bolts. Two-part join, generous
-  snap tolerance, torque is forgiving.
-- **Missing:** one shim. Pier D sits 11 mm low. The manual's fix panel is a rectangle with an
-  arrow. It does not care what the rectangle is.
-- **What goes wrong:** nothing. Genuinely nothing. He gets it right.
-- **New mechanic:** carry (`build:pickup`/`build:drop`), place (`build:place`), torque-hold, and
-  the creak (`build:creak`) as pure comedy — a wrong join groans like a bad chair and a loon
-  answers it from across the water.
-- **Camper density:** one. Dale Pruitt, four hundred metres off, drunk, singing half a song and
-  giving up on it twice.
-- **Story beat:** the player finds the shim themselves — a 1961 Minnesota licence plate, folded
-  in three, wedged under a stump. It fits perfectly. It has always been the shim. It was under
-  the old house too.
-- **Emotional turn:** competence as comedy. The player laughs at a monster doing homework.
-- **Closing image:** rain on six perfectly level piers, a spirit level's bubble dead centre, and
-  the manual's last panel — the little masked man on the foundation with both arms up.
-
----
-
-### NIGHT TWO — UPRIGHTS (B ×4), SUPPORT WHILE FIXING
-*Beat id:* `n2_robin_hears` · *Flag:* `robinSuspicious`
-
-- **Build:** four wall frames, corner brackets, diagonal bracing. Order matters now — brace
-  before you release.
-- **Missing:** bracket **H**. Four needed, three in the pile. The fourth is a gag: the manual's
-  parts-list panel shows four, and the player will count them three times.
-- **What goes wrong:** the third wall goes up out of plumb by two degrees. It stands. It creaks
-  in wind. `Weather` gusts now trigger `build:creak` on any join with `correct:false`.
-- **New mechanic:** noise and light. `NoiseSystem` propagation, camper flashlight cones, crouch,
-  line-of-sight break. First `player:spotted` risk.
-- **Camper density:** three (Dale, Marg, Coop) unloading a truck by the road.
-- **Story beat:** Robin Osei-Hall, alone at the canoe rack, hears a mallet. Four strikes, even,
-  spaced. She stops moving. `ROB_HEAR_01`.
-- **Emotional turn:** the joke gets a witness.
-- **Closing image:** her torch beam crawls over the frame at eighty metres, holds on it for a
-  second and a half, and moves on. She does not understand what she's looking at, because it is
-  a house, and there is not supposed to be a house.
-
----
-
-### NIGHT THREE — DO NOT OVERTIGHTEN
-*Beat id:* `n3_not_believed` · *Flag:* `robinDismissed`
-
-- **Build:** roof trusses. Six identical assemblies, each requiring a prop-and-hold while the
-  ridge is pinned.
-- **Missing:** nothing is missing. The **ridge beam is 340 mm too long**. You must cut it. The
-  handsaw is in the tool roll and has been the whole time.
-- **What goes wrong:** cutting is the loudest sustained noise in the game — a continuous
-  `noise:emit` with `kind:'saw'`, radius 90 m, that you must break into passes between patrols.
-  The comedy: you cannot rush a saw. The monster is hostage to the physics of a saw.
-- **New mechanic:** sustained-noise budgeting; `suspicion` becomes a persistent camp-wide value
-  that carries into Night Four.
-- **Camper density:** four. Bev arrives.
-- **Story beat:** Robin tells Bev about the mallet. Bev tells her the sound carries across the
-  water from the state campground, six kilometres, happens every year. Bev is not being
-  dismissive. Bev is being *correct about a thing that is usually true.* `BEV_ARG_02`.
-- **Emotional turn:** the first cruelty in the script is committed by the campers, gently, to
-  each other.
-- **Closing image:** the ember of Bev's cigarette at the treeline, held, unmoving, for eleven
-  seconds — a person standing in the dark deciding whether to walk out and look. She doesn't.
-
----
-
-### NIGHT FOUR — IF PARTS ARE MISSING, DO NOT RETURN TO STORE
-*Beat id:* `n4_dale` · *Flag:* `firstBlood`
-
-- **Build:** subfloor, then the door. The door is the first piece that is obviously *domestic*.
-- **Missing:** hinges. There are no hinges in the woods. There are three good brass hinges on
-  the camp boathouse door, ninety metres inside the lit perimeter.
-- **What goes wrong:** Dale Pruitt walks up the fire road to piss and finds a house that was not
-  there in June. He is not scared. He is *confused*, and he says "…the hell is this, chief" out
-  loud to nobody, and he reaches out and knocks on it, twice, politely, the way you knock on a
-  thing to see if it's real.
-- **New mechanic:** infiltration into a lit, occupied space. Stealing an object the campers will
-  notice is gone. Consequence persists — the boathouse door hangs open for the rest of the game.
-- **Camper density:** five, but concentrated. The forest is emptier than it has ever been.
-- **Story beat:** the first kill, off-camera, in a single hard cut to black with no music sting
-  and no scream — only the sound of a hammer set down carefully on wood.
-- **Emotional turn:** **the comedy dies here and does not fully return.** Nights 1–3 have jokes
-  in the ambient VO; Night 4 onward, the campers stop being funny on purpose and start being
-  funny by accident, which is unbearable.
-- **Closing image:** Dale's torch on the ground, still lit, still rolling in a slow quarter-arc,
-  its beam sweeping across a wall that is *plumb, square and true.*
-
----
-
-### NIGHT FIVE — THIS STEP REQUIRES TWO PERSONS
-*Beat id:* `n5_two_persons` · *Flag:* `sawSecondFigure`
-
-- **Build:** the long north wall panel, 4.8 m, mass 71 kg. Lift, walk, seat, pin.
-- **Missing:** **a second person.** The panel physically cannot be seated by one man; `Physics`
-  refuses the placement and the wall slides. The manual's warning icon shows two mascots.
-- **What goes wrong:** the player must improvise a counterweight and a lever from the world —
-  Dale's canoe, a rope, a stump, a ladder. The solution is ugly. It is the first thing Ansel
-  builds that his mother did not draw.
-- **New mechanic:** rigging. Multi-object physical assembly with no snap points and no correct
-  answer, only a working one. `build:place` fires with `correct:true` for a join the manual never
-  specified — the only time in the game.
-- **Camper density:** five, actively searching in pairs. Nobody goes anywhere alone after Dale.
-- **Story beat:** Panel 5.4. The erased-and-redrawn second figure. The player will open the
-  manual to check a measurement, land on it, and there will be no measurement on the page.
-- **Emotional turn:** loneliness, delivered as a UI element. This is the night the game stops
-  being about a monster.
-- **Closing image:** the wall stands. Ansel puts one hand flat against it and leaves it there
-  longer than the animation needs. Rain. The other end of the wall is held up by a canoe.
-
----
-
-### NIGHT SIX — SOLD SEPARATELY
-*Beat id:* `n6_robin_inside` · *Flag:* `robinSaw`, `bevRemembered`
-
-- **Build:** roof battens, shingles, and the interior — a sink, a stove flue, a doorframe.
-- **Missing:** article **0000-000**. It is not in the world. It has never been in the world.
-  The game will let you look for it for as long as you like.
-- **What goes wrong:** the manual is broken. Steps out of order, a missing step 9, a wall
-  elevation that contradicts the floor plan. **The only reliable reference is the ground:** the
-  old foundation stones of the Vik house are still under the site, and the new house lines up
-  with them exactly. To finish the night the player must stop reading and start *remembering* —
-  a mechanic that is also a thesis.
-- **New mechanic:** blueprint unreliability. `Blueprint.js` serves deliberately contradictory
-  panels; correctness is validated against `CabinSite` ruin anchors instead.
-- **Camper density:** **two.** The camp has called the county. Most of them are at the road,
-  waiting on headlights that take four hours to arrive. The woods are the emptiest they have
-  ever been and it is the worst night of the game.
-- **Story beat, part one:** Robin finds the site. She goes inside. She is not attacked, because
-  Ansel is on the roof and she is standing in his mother's kitchen and he does not know what to
-  do about that. She sees the sink with a rectangle of missing porcelain behind it. She sees the
-  doorframe: four pencil marks, ascending, dated in a woman's handwriting, 1953 to 1957. She
-  puts her hand flat on the top one. It is above her head.
-- **Story beat, part two:** Bev, at the road, in the headlights of her own truck, says the thing
-  she has been circling for three nights — that there was a family on this shore, that the boy
-  was big and quiet and used to fix the dock for nothing, that his name was Ansel V— and she
-  stops, because saying it makes it a real person, and she has spent twenty-two years not doing
-  that. `BEV_LATE_04`.
-- **Emotional turn:** the audience knows everything. Ansel knows nothing. The gap is the horror.
-- **Closing image:** Robin's hand on the doorframe, at the height of a boy's head in 1957, and
-  a shadow across the window that does not move.
-
----
-
-### NIGHT SEVEN — SOME ASSEMBLY REQUIRED
-*Beat id:* `n7_final` · *Flag:* `ending_<a|b|c>`
-
-- **Build:** nothing structural remains. The house is finished. It is beautiful. It is, by any
-  standard the game has taught you, **perfect work.**
-- **Missing:** see §8.
-- **New mechanic:** everything is taken away. No HUD, no reticle, no prompts, no objective
-  marker, no creak feedback. `settings.subtitles` still works; nothing speaks.
-- **Camper density:** one. Then none.
-- **Closing image:** see §8.
-
----
-
-## 5. THE CAMPERS
-
-Six people who arrived a week early to open a summer camp, which is a genuinely nice thing to
-volunteer for. None of them are stupid. None of them are cruel. Two of them are in love in a
-low-stakes, slightly embarrassing way. All of them are good at their jobs. The player should be
-actively annoyed when the game requires them to be hurt.
-
-**Casting note for `tools/generate-voices.mjs`:** six distinct ElevenLabs voices, all pitched
-*young and tired* except Bev. No "horror movie" delivery, ever. If a line sounds like a line, cut
-it and re-record it flatter.
-
----
-
-**ROBIN OSEI-HALL — 19 — Arts & Crafts.**
-Second summer. Grew up in her father's boatyard in Duluth; she has heard ten thousand hours of
-tools and she knows the difference between a woodpecker and a mallet the way you know your own
-name. That is her tragedy: she is right for a technical reason nobody else can evaluate.
-*Verbal tic:* restarts her own sentences — "Okay so — okay, no, listen." Never finishes the
-first attempt.
-*Relationship:* older-sister energy toward Teddy; she checks he's eaten.
-**She is the one who notices, on Night Two, and is not believed.** She is also the only one who
-gets inside the house and understands what it is.
-
-**DALE PRUITT — 27 — Maintenance.**
-Sixth summer. Fixes everything, resents nothing, drinks a little more than he'd like you to know.
-Calls everyone *chief* or *champ* and trails off mid-thought with "…anyway." Kind in a way that
-costs him something. He could corroborate Robin on Night Three and doesn't, because
-corroborating means a report, and a report means the county, and the county means his job.
-*Relationship:* Robin's reluctant almost-ally. Their unfinished conversation is the saddest
-thing in the VO bank.
-*Dies Night Four, politely, mid-sentence, having knocked first.*
-
-**MARGUERITE "MARG" TOTH — 21 — Waterfront Director.**
-Third summer. Runs the dock like a small navy. Counts out loud — "one, two, and — okay" — and
-narrates her own logistics because it's how she thinks. Competent, warm, a little bossy, and the
-first to organise a proper search on Night Five instead of a panic.
-*Relationship:* with Coop, three months, hasn't told her mother.
-
-**COOPER "COOP" VANCE — 20 — Sports & Rec.**
-Second summer. Loud, plays four chords badly, turns everything into a bit and then apologises for
-the bit thirty seconds later — "sorry, that was — yeah, sorry." Write him kind. His bits are how
-he checks whether people are okay. On Night Six he stops doing bits and it is genuinely alarming.
-*Relationship:* Marg; and he has appointed himself Teddy's guy.
-
-**TEDDY NAKAGAWA — 16 — Counselor-in-Training.**
-First summer away from home. Says *sorry* as punctuation. Asks permission to do things he has
-already been told to do. Homesick in the specific 16-year-old way where you'd rather die than
-mention it, and he mentions it exactly once, to Robin, at 2 a.m., and then changes the subject.
-*Relationship:* orbits Coop; is looked after by Robin.
-
-**BEVERLY "BEV" RANCZAK — 58 — Camp Director.**
-Here since 1971. Chain-smokes Winstons. Speaks in fragments with the articles removed — "Get the
-tarps. Both of 'em. Now." Loves this place with a fierceness she would never say out loud.
-*Relationship:* everyone's boss; Dale's oldest friend on site.
-**She is the living link.** She bought a camp that came with a burned foundation and a story she
-never asked about. On Night Six she remembers the family's name and it is the closest the game
-comes to explaining anything.
-
----
-
-## 6. AMBIENT VO SCRIPT
-
-**Rules.** Heard at distance, in 3D, through trees, through rain, usually half-caught. Never a
-narrator. Never plot-critical — every line is deniable. Most under twelve words. `VoiceBank`
-applies distance low-pass and occlusion; **write for the words that survive the filter.**
-
-**Voice settings columns:** `S` = stability, `Sim` = similarity_boost, `St` = style. Low
-stability = more variance, more human. Nothing above 0.60 stability except Bev.
-
-### 6.1 Idle chatter — banal, overlapping, funny by accident
-
-| ID | Speaker | Line | State | Delivery | S / Sim / St |
-|---|---|---|---|---|---|
-| `MRG_IDLE_01` | Marg | "One, two — and that's the last of the tarps." | content | to herself, counting | .45 / .80 / .20 |
-| `MRG_IDLE_02` | Marg | "Whoever loaded this truck hates me personally." | wry | half-laugh at the end | .40 / .80 / .30 |
-| `COO_IDLE_01` | Coop | "I'm just saying, powdered eggs are a *choice*." | jokey | mid-bit, no punchline | .35 / .78 / .40 |
-| `COO_IDLE_02` | Coop | "Sorry, that was — yeah. Sorry." | sheepish | apologising to nobody | .40 / .78 / .35 |
-| `COO_IDLE_03` | Coop | "Does this look level to you? Don't lie." | casual | genuinely asking | .45 / .78 / .30 |
-| `DAL_IDLE_01` | Dale | "Third year that pump's gone out. Anyway." | tired | trails off, no ending | .50 / .82 / .20 |
-| `DAL_IDLE_02` | Dale | "You want it done or you want it done right, champ." | dry | old joke, said flat | .50 / .82 / .25 |
-| `DAL_IDLE_03` | Dale | "Ah — nope. That's a hornet situation." | alarmed-mild | retreating, unbothered | .40 / .80 / .35 |
-| `ROB_IDLE_01` | Robin | "Okay so — okay, no. Start over." | focused | correcting herself | .40 / .80 / .30 |
-| `ROB_IDLE_02` | Robin | "Teddy. Teddy. Did you eat? Don't lie to me." | warm | sisterly, insistent | .40 / .80 / .35 |
-| `TED_IDLE_01` | Teddy | "Sorry — is this the right shed? Sorry." | anxious | over-polite | .35 / .78 / .40 |
-| `TED_IDLE_02` | Teddy | "My mom packed like nine cans of soup." | shy | small laugh at himself | .35 / .78 / .35 |
-| `BEV_IDLE_01` | Bev | "Rain by Thursday. Get the canvas up." | brisk | no articles, no warmth | .60 / .85 / .15 |
-| `BEV_IDLE_02` | Bev | "Twenty-two summers. Never once on schedule." | fond | almost affectionate | .55 / .85 / .20 |
-
-### 6.2 Calling out to each other — across distance, the loudest lines in the game
-
-| ID | Speaker | Line | State | Delivery | S / Sim / St |
-|---|---|---|---|---|---|
-| `MRG_CALL_01` | Marg | "Coop! Other end! Other *other* end!" | busy | shouted, laughing | .30 / .78 / .45 |
-| `COO_CALL_01` | Coop | "Yeah — hang on — yeah!" | busy | half-shouted, muffled | .30 / .78 / .40 |
-| `ROB_CALL_01` | Robin | "Dale? You up by the shed?" | neutral | carrying voice, unworried | .40 / .80 / .30 |
-| `DAL_CALL_01` | Dale | "Yeah, chief, I'm here!" | neutral | shouted from far off | .35 / .82 / .35 |
-| `BEV_CALL_01` | Bev | "Everybody. Mess hall. Ten minutes." | commanding | flat, absolute | .60 / .85 / .15 |
-| `TED_CALL_01` | Teddy | "Coop? Was that you?" | uncertain | too quiet to carry | .30 / .78 / .40 |
-| `MRG_CALL_02` | Marg | "Say again? You're breaking up in the trees!" | neutral | cupped hands | .35 / .80 / .40 |
-| `ROB_CALL_02` | Robin | "Nothing! Never mind!" | resigned | giving up on being heard | .40 / .80 / .35 |
-
-### 6.3 Campfire stories — Nights 1–3 only
-
-| ID | Speaker | Line | State | Delivery | S / Sim / St |
-|---|---|---|---|---|---|
-| `COO_FIRE_01` | Coop | "…and *that's* why we don't swim past the raft." | performative | doing a voice, badly | .30 / .78 / .55 |
-| `MRG_FIRE_01` | Marg | "That's not true. None of that is true." | amused | interrupting | .40 / .80 / .35 |
-| `COO_FIRE_02` | Coop | "It's *emotionally* true, Marguerite." | jokey | mock-wounded | .30 / .78 / .50 |
-| `DAL_FIRE_01` | Dale | "There was a house out on the point. Before." | flat | throwaway, no weight | .55 / .82 / .15 |
-| `MRG_FIRE_02` | Marg | "Before what?" | curious | genuine, small | .45 / .80 / .30 |
-| `DAL_FIRE_02` | Dale | "Before the camp. Burned, I think. Anyway." | disinterested | he does not care yet | .55 / .82 / .15 |
-| `TED_FIRE_01` | Teddy | "Is it okay if I sit here? Sorry." | shy | barely audible | .35 / .78 / .40 |
-| `ROB_FIRE_01` | Robin | "Sit down, Teddy. God." | warm | laughing at him kindly | .40 / .80 / .35 |
-
-### 6.4 Arguments — small, domestic, real
-
-| ID | Speaker | Line | State | Delivery | S / Sim / St |
-|---|---|---|---|---|---|
-| `MRG_ARG_01` | Marg | "I *asked* you to do it before dark." | irritated | tired, not angry | .40 / .80 / .40 |
-| `COO_ARG_01` | Coop | "And I said I would, and I'm doing it." | defensive | flat, hurt | .35 / .78 / .40 |
-| `BEV_ARG_01` | Bev | "Not tonight. Both of you." | final | zero volume, total authority | .60 / .85 / .15 |
-| `BEV_ARG_02` | Bev | "Sound carries over the water. Happens every year." | dismissive | kind, and wrong | .55 / .85 / .20 |
-| `ROB_ARG_01` | Robin | "It wasn't the water. It was — okay. Fine." | frustrated | giving up mid-sentence | .35 / .80 / .45 |
-| `DAL_ARG_01` | Dale | "If we call it in, it's a report. Anyway." | evasive | won't meet her eye | .50 / .82 / .25 |
-| `ROB_ARG_02` | Robin | "So that's a no. That's a no, Dale." | quiet-angry | very controlled | .35 / .80 / .45 |
-| `TED_ARG_01` | Teddy | "Are you guys — sorry. Never mind." | uncomfortable | backing out of a room | .30 / .78 / .40 |
-
-### 6.5 "I heard something"
-
-| ID | Speaker | Line | State | Delivery | S / Sim / St |
-|---|---|---|---|---|---|
-| `ROB_HEAR_01` | Robin | "Shh — shh. There. That." | alert | dead still, whispered | .30 / .78 / .50 |
-| `ROB_HEAR_02` | Robin | "That's a mallet. That's somebody driving a stake." | certain | technical, unsettling | .40 / .80 / .35 |
-| `MRG_HEAR_01` | Marg | "Okay, I heard that one. I heard that." | unnerved | conceding, not scared | .35 / .80 / .40 |
-| `COO_HEAR_01` | Coop | "Deer. That's deer. That's a deer thing." | reassuring | reassuring himself | .30 / .78 / .45 |
-| `DAL_HEAR_01` | Dale | "Huh." | neutral | one syllable, thoughtful | .55 / .82 / .20 |
-| `TED_HEAR_01` | Teddy | "Something moved. Over — there. Sorry." | frightened | pointing, small voice | .25 / .78 / .55 |
-| `BEV_HEAR_01` | Bev | "Quiet. Everybody. Quiet." | hard | drops to nothing | .55 / .85 / .25 |
-| `MRG_HEAR_02` | Marg | "It stopped. Why did it stop." | tense | not a question | .30 / .80 / .50 |
-| `ROB_HEAR_03` | Robin | "Four hits. Even. Nothing hits four times even." | insistent | building an argument | .35 / .80 / .45 |
-| `COO_HEAR_02` | Coop | "Okay that's — okay, that's not funny now." | rattled | bit collapsing in real time | .30 / .78 / .50 |
-
-### 6.6 Searching
-
-| ID | Speaker | Line | State | Delivery | S / Sim / St |
-|---|---|---|---|---|---|
-| `MRG_SRCH_01` | Marg | "Pairs. Nobody goes out alone, I mean it." | organised | commanding, steady | .45 / .80 / .30 |
-| `MRG_SRCH_02` | Marg | "One, two — Robin, that's three, where's Coop?" | counting | rising | .35 / .80 / .40 |
-| `COO_SRCH_01` | Coop | "Dale? Buddy? You messing with us?" | hopeful | wants to be pranked | .30 / .78 / .45 |
-| `ROB_SRCH_01` | Robin | "Check the boathouse. The door's open." | focused | flat, professional | .40 / .80 / .35 |
-| `BEV_SRCH_01` | Bev | "Torches low. Watch the roots." | practical | still doing her job | .55 / .85 / .20 |
-| `TED_SRCH_01` | Teddy | "How far do we go? Sorry — how far?" | scared | asking permission again | .25 / .78 / .55 |
-| `COO_SRCH_02` | Coop | "Dale! Come on, man!" | strained | shouting into trees | .25 / .78 / .55 |
-| `ROB_SRCH_02` | Robin | "Stop. Everybody stop. Listen." | tight | commanding for the first time | .30 / .80 / .50 |
-| `MRG_SRCH_03` | Marg | "We've been past that stump twice." | worried | quiet realisation | .35 / .80 / .40 |
-| `BEV_SRCH_02` | Bev | "Back to the road. Now. Move." | urgent | no fear in it, only speed | .55 / .85 / .25 |
-
-### 6.7 False alarms — the comedy that stops being comedy
-
-| ID | Speaker | Line | State | Delivery | S / Sim / St |
-|---|---|---|---|---|---|
-| `COO_FALSE_01` | Coop | "AH — okay. Okay. Raccoon. It's a raccoon." | startled | genuine fright, fast recovery | .25 / .78 / .60 |
-| `MRG_FALSE_01` | Marg | "You screamed. You actually screamed." | teasing | relieved laughing | .35 / .80 / .45 |
-| `TED_FALSE_01` | Teddy | "Sorry! Sorry, that was me, sorry." | embarrassed | mortified | .30 / .78 / .45 |
-| `ROB_FALSE_01` | Robin | "It's fine. It's fine. Everyone breathe." | steadying | doesn't believe it | .40 / .80 / .35 |
-| `COO_FALSE_02` | Coop | "See? Nothing. Told you. Nothing." | hollow | the bit isn't working | .30 / .78 / .50 |
-| `DAL_FALSE_01` | Dale | "Little guy's got more right to be here than us." | fond | about the raccoon | .50 / .82 / .25 |
-
-### 6.8 Finding evidence
-
-| ID | Speaker | Line | State | Delivery | S / Sim / St |
-|---|---|---|---|---|---|
-| `ROB_EVID_01` | Robin | "These are sawdust. In June. From what?" | analytical | crouched, close | .40 / .80 / .35 |
-| `MRG_EVID_01` | Marg | "The hinges are gone. Off the *door*." | baffled | not yet scared | .35 / .80 / .40 |
-| `COO_EVID_01` | Coop | "Somebody took the hinges. Who takes hinges." | uneasy | trying to make it funny | .30 / .78 / .45 |
-| `ROB_EVID_02` | Robin | "There's a path here. Somebody's worn a path." | cold | the moment it becomes real | .35 / .80 / .45 |
-| `BEV_EVID_01` | Bev | "That's not camp lumber. That's milled." | grim | recognising work | .55 / .85 / .25 |
-| `TED_EVID_01` | Teddy | "It's Dale's. That's Dale's torch. That's his." | breaking | voice going thin | .20 / .78 / .65 |
-| `MRG_EVID_02` | Marg | "Don't touch it. Don't — Teddy, don't touch it." | urgent | protective | .25 / .80 / .55 |
-| `ROB_EVID_03` | Robin | "Somebody's *building* something out there." | horrified | saying it out loud at last | .30 / .80 / .50 |
-
-### 6.9 Genuine fear
-
-| ID | Speaker | Line | State | Delivery | S / Sim / St |
-|---|---|---|---|---|---|
-| `TED_FEAR_01` | Teddy | "I want to go home. I'm sorry. I want to go home." | breaking | whispered, no performance | .20 / .78 / .65 |
-| `ROB_FEAR_01` | Robin | "Okay. Okay. Okay okay okay." | managing | self-soothing, fast | .25 / .80 / .55 |
-| `COO_FEAR_01` | Coop | "Marg. Marg, look at me. Look at me." | frightened | trying to hold her together | .25 / .78 / .55 |
-| `MRG_FEAR_01` | Marg | "I counted five. There were five of us." | numb | flat, wrong-sounding | .35 / .80 / .40 |
-| `BEV_FEAR_01` | Bev | "Twenty-two years. Never. Not once." | shaken | first crack in her | .45 / .85 / .35 |
-| `ROB_FEAR_02` | Robin | "He looks at you sideways. Like a bird." | disturbed | trying to describe it | .30 / .80 / .50 |
-| `COO_FEAR_02` | Coop | "I'm not — I can't do a joke. I don't have one." | lost | genuinely undone | .25 / .78 / .55 |
-| `TED_FEAR_02` | Teddy | "Is he still there? Is he still — " | terrified | cut off by his own breath | .20 / .78 / .70 |
-| `MRG_FEAR_02` | Marg | "Run to the road. Don't stop at the truck." | resolute | commander to the last | .30 / .80 / .50 |
-| `ROB_FEAR_03` | Robin | "It's not a shack. It's a *house*." | stunned | the realisation, quiet | .35 / .80 / .45 |
-
-### 6.10 Very late game — Nights 6 and 7 only
-
-| ID | Speaker | Line | State | Delivery | S / Sim / St |
-|---|---|---|---|---|---|
-| `BEV_LATE_01` | Bev | "County's four hours out. Four hours." | grim | reporting a fact | .55 / .85 / .25 |
-| `BEV_LATE_02` | Bev | "There was a family on this shore. Before us." | quiet | dawning | .50 / .85 / .30 |
-| `BEV_LATE_03` | Bev | "Boy was big. Quiet. Fixed the dock for nothing." | soft | remembering a kindness | .50 / .85 / .30 |
-| `BEV_LATE_04` | Bev | "His name was Ansel V—" | stopped | stops herself dead | .45 / .85 / .35 |
-| `ROB_LATE_01` | Robin | "There's marks on the door. Pencil. Somebody's kid." | shaken | inside the house, whispering | .30 / .80 / .50 |
-| `ROB_LATE_02` | Robin | "Fifty-three. Fifty-five. Fifty-seven." | hollow | reading dates aloud | .35 / .80 / .40 |
-| `ROB_LATE_03` | Robin | "Oh. Oh, you poor — " | pitying | cut off, and never finished | .25 / .80 / .60 |
-| `TED_LATE_01` | Teddy | "The buses come at nine. They're gonna come at nine." | dazed | shock, repeating | .25 / .78 / .55 |
-
-**Total: 90 lines.** Bank size is deliberately small; `VoiceBank` should aggressively vary
-distance, occlusion, pitch (±3 %) and delay so no line is ever heard "the same way twice."
-
----
-
-## 7. ENVIRONMENTAL STORYTELLING — 20 OBJECTS
-
-Each is placed by `Props.js` or `CabinSite.js` and is inert — no pickup prompt, no lore entry, no
-audio sting. If a player never notices one, that is fine. That is the point.
-
-1. **The 1961 licence plate shim** (Night 1, under a stump 30 m east). *Implies:* somebody
-   levelled something here before. *Replay:* it was under the original house. He kept it.
-2. **A ring of foundation stones**, black at the edges, visible only when the player's lantern
-   rakes across at a low angle (build site). *Implies:* a fire. *Replay:* he is building exactly
-   on the footprint. Every pier lands on an old one.
-3. **A porcelain sink**, cracked, propped against a birch 60 m from the site with a
-   rectangular section missing from its splash-back. *Replay:* that rectangle is on his face.
-4. **A child's boot**, size 3, hung on a nail at head height on a tree by the fire road. Not
-   dropped — *hung*. Deliberately. Years ago. *Replay:* it is his own.
-5. **A tool roll**, spread flat under an oilcloth, tools laid in descending size, each in its
-   own stitched pocket, a gap where the handsaw goes. *Implies:* order. *Replay:* one pocket is
-   too small for anything he owns — a child's hammer used to live there.
-6. **Fifty-one wooden survey stakes**, driven in a perfect grid across the site, each numbered in
-   carpenter's pencil. *Implies:* planning. *Replay:* he surveyed this before the campers came.
-   The numbering starts at 1953.
-7. **A stack of ruined manual pages** in a tin under a rock, weighted, dry. Twelve attempts at
-   the same panel, each worse than the last. *Replay:* he has been trying to draw his mother's
-   hand and failing since long before Night One.
-8. **A carpenter's pencil sharpened to 8 mm**, replaced every night with an identical one.
-   *Implies:* nothing on first look. *Replay:* he has been here for weeks.
-9. **The Wanaka Pines Land Company survey marker**, 1962, brass, in the ground at the property
-   line, polished bright by something rubbing it. *Replay:* he cleans it. Every night.
-10. **Bev's ashtray on the office porch** — a hubcap, forty butts, all crushed the same
-    direction. *Implies:* a woman who sits in the same chair every night. *Replay:* the chair
-    faces the point where the house used to be.
-11. **The boathouse door**, hinges gone from Night Four onward, propped with an oar, never fixed.
-    *Implies:* the camp is losing.
-12. **Dale's torch**, still lit on Night Five and Six, battery dying, beam browning. On Night
-    Seven it is off, and it has been moved eleven metres — *toward* the house, and set down neatly.
-13. **A canoe**, upside down, one gunwale crushed under a wall panel. *Implies:* improvisation.
-    *Replay:* it's Dale's canoe. He is holding up the wall.
-14. **A hand-drawn floor plan carved into a rock face** near the ridge, weathered, at least a
-    decade old. *Replay:* he has drawn this house in a dozen places over twenty years and never
-    built it until now.
-15. **A rusted swing seat** hanging from one chain in a tree that is now inside the archery
-    range. *Implies:* somebody's yard. *Replay:* his.
-16. **A camp photo board** in the mess hall — twenty-two summers of group photos. In 1971, at the
-    back edge of the frame, out of focus, a very large man at the treeline with his head tilted.
-17. **A grave**, unmarked, small, well-kept, forty metres uphill of the site, with the grass cut
-    by hand. *Implies:* somebody buried something. *Replay:* Marit. He mows it.
-18. **A single set of pencil marks on a birch trunk** — four horizontal notches at 91, 108, 124
-    and 141 cm. Matches the doorframe inside the finished house exactly.
-19. **A folded blanket and a tin cup** on a stump at the site, arranged for a second person.
-    Dry, brushed off, refreshed nightly. Nobody ever sits there.
-20. **Two chairs**, hand-made, identical, inside the finished house on Night Seven. One is
-    adult-sized. One is not.
-
----
-
-## 8. THE ENDING
-
-The house is finished at 03:40 on the seventh night. The rain has stopped. It is the first time
-in the game the world is quiet.
-
-The player walks the interior with no HUD. Every surface is correct. The floor does not creak
-anywhere — the player has spent seven nights learning what a creak means, and its total absence
-is more frightening than any sound the game has made. There is a sink with a window over it. A
-stove flue. A doorframe with four pencil marks. A table. **Two chairs.**
-
-The player opens the manual. The wipe animation plays. The pages are blank.
-
-On the last page: a dotted outline of a small figure, seated, at a table. Child-sized. The
-parts-list bracket beside it, and inside the bracket, an empty space where an article number
-should be.
-
-The game gives the player exactly one interaction verb: **place**.
-
-### Ending A — "RETURN TO STORE" (the monstrous ending)
-
-The player goes and gets Robin. She is at the treeline; she has been coming back every night.
-The game lets you take her inside. It is not a chase and there is no struggle scene — the screen
-does not cut away, and she says `ROB_LATE_03` and does not finish it.
-
-Then the player opens the manual to confirm the step, and the panel updates in real time, in
-Ansel's scratched, doubled hand — and the manual draws a **red diagonal across it.**
-
-The only red mark ever aimed at the player. The only judgement the manual has ever passed. The
-mascot is drawn with its arms at its sides. Marit never told him to do this. He has been
-extrapolating for twenty-two years and the page finally says so.
-
-Then the pages go blank again. All of them. Including the ones he drew. `ending_a`.
-
-### Ending B — "DO NOT FORCE" (the refusal)
-
-The player walks out and does not come back. The camera holds on the house from the treeline for
-ninety seconds while the sky greys. Nothing happens. Nothing has ever happened here.
-Buses at nine. `ending_b`. Bleak, honest, and correct — but it is not the true one.
-
-### Ending C — "SOME ASSEMBLY REQUIRED" (the ending)
-
-There is one part in the world that fits a child-sized dotted outline.
-
-The player sits down.
-
-That is the last thing the player does in this game: they sit in the small chair, at the table,
-in the finished house, and the game does not tell them to. There is no prompt. It is available
-from the moment the house is done and most players will find it because seven nights have taught
-them to look for the slot that fits.
-
-When he sits, the mask comes off. The camera does not show his face — the mask simply enters the
-frame, set down on the table, glazed, cracked, two holes too far apart. His hands are on the
-table and they are ruined.
-
-The manual is open beside it, blank, and it stays blank, because she died in 1962 and she never
-drew what comes after the house is finished.
-
-Outside, at 6:15, the first bus turns off the county road. You can hear it through the wall,
-because he built the wall correctly, and a correctly built wall carries sound from a road exactly
-this way.
-
-Kids. A lot of them. Screaming the good way.
-
-He does not get up.
-
-**Last panel.** Over black, the game draws one final diagram in Marit's confident single-stroke
-hand — the finished house, in three-quarter elevation, exactly as the player built it, with a
-tick beside it. And in the corner, where the maker's mark goes on every page in the game:
-
-**VIK & SØN**
-
-Fade. `ending_c`. Achievement name, in the flat-pack voice: **"NO PARTS REMAINING."**
-
----
-
-## 9. TITLE CARDS & CHAPTER NAMES
-
-Rendered by `Menu.js` / `HUD.js` at `night:begin` in the manual's typeface — thin black Helvetica-alike on flat white, one `#d92b2b` accent rule, held for 2.4 s with no music. The tonal knife-twist against the wet dark is the entire point.
-
-| # | Title card | Sub-line (small, bottom-left) |
+| Property | Value | Why |
 |---|---|---|
-| **NIGHT ONE** | **FOUNDATION (A)** | *Check contents before beginning.* |
-| **NIGHT TWO** | **UPRIGHTS (B ×4) — SUPPORT WHILE FIXING** | *Two persons recommended.* |
-| **NIGHT THREE** | **DO NOT OVERTIGHTEN** | *Damage caused this way is not covered.* |
-| **NIGHT FOUR** | **IF PARTS ARE MISSING, DO NOT RETURN TO STORE** | *Obtain locally.* |
-| **NIGHT FIVE** | **THIS STEP REQUIRES TWO PERSONS** | — |
-| **NIGHT SIX** | **SOLD SEPARATELY** | *Illustration may differ from product.* |
-| **NIGHT SEVEN** | **SOME ASSEMBLY REQUIRED** | — |
+| Extent | **448 m (E–W) × 384 m (N–S)** = 17.2 ha | Fog far plane is 140 m (`ART_DIRECTION.md` §5) — you never see more than a third of it. Big enough that the camp is a rumour; small enough for one navmesh |
+| Heightfield | 449 × 385 vertices, **1.0 m spacing**, `Float32Array` 692 KB | One chunk grid of 7 × 6 chunks at 64 m; `Forest` instances per chunk |
+| Origin / datum | **The centre of the Vik house ruin footprint**, `(0, 0, 0)` | Every story object is placed relative to the house, because everything is |
+| Axes | `+X` east, `+Z` south, `Y` up (`−Z` forward per `ARCHITECTURE.md` §2) | |
+| Boundaries | N: the lake. S: the county road at `Z = +186`. W: the ridge crest at `X = −130` (+19 m). E: marsh at `X > +196` | Four different kinds of "you can't go that way," none of them a wall |
+| Elevation range | −2 m (shoreline) to +19 m (ridge) | The ridge is where `skylineFraction` gets you killed (`GAME_DESIGN.md` §4.1) |
 
-Night Five and Night Seven have no sub-line. The player will notice. Nights One through Four
-have a joke at the bottom of the card and then, twice, there just isn't one, and the silence
-where the joke goes does more work than the joke ever did.
+### 4.2 Landmark table — the single source of truth for positions
+
+| # | Landmark | X | Z | Dist. from datum | Bearing | Tier |
+|---|---|---|---|---|---|---|
+| 1 | **Ruin footprint / build site** (11.6 × 7.8 m, long axis E–W) | 0 | 0 | **0** | — | — |
+| 2 | Rest stump + folded blanket + tin cup | +7 | +9 | 11.4 | SE | — |
+| 3 | The birch with four notches | −9 | +12 | 15.0 | SSW | — |
+| 4 | Brass survey marker, 1962 | +16 | +15 | 21.9 | SE | — |
+| 5 | Supply pallet | −14 | +26 | 29.5 | SSW | **1** |
+| 6 | Fallen log — pier 6, the mallet, the 1961 plate | −26 | −18 | 31.6 | NW | **1** |
+| 7 | Fire road, nearest point | +45 | 0 | 45.0 | E | — |
+| 8 | **The dock** (1962, his) | −28 | −41 | 49.6 | NNW | — |
+| 9 | Woodpile (shims) | −36 | +46 | 58.4 | SW | **2** |
+| 10 | The porcelain sink, against a birch | −52 | −30 | 60.0 | WNW | **2** |
+| 11 | **Canoe rack — nearest lit camp edge** | +68 | +22 | 71.5 | ESE | **2** |
+| 12 | The lean-to (the boot, on its shelf) | −74 | −22 | 77.2 | WNW | **2** |
+| 13 | **Boathouse** | +86 | −52 | 100.5 | ENE | **2** |
+| 14 | The grave — a mowed rectangle (+14 m elev.) | −112 | +34 | 117.0 | WSW | — |
+| 15 | Tool shed | +118 | +40 | 124.6 | ESE | **3** |
+| 16 | Archery range (the orchard) | +58 | +112 | 126.1 | SSE | **3** |
+| 17 | Ridge crest | −130 | 0 | 130.0 | W | — |
+| 18 | Counselors' cabins (the barn footprint) | +104 | +96 | 141.6 | SE | **3** |
+| 19 | **Mess hall** (the garden) | +132 | +74 | 151.3 | ESE | **3** |
+| 20 | Camp office porch — Bev's chair, hubcap ashtray | +146 | +60 | 157.9 | ESE | **3** |
+| 21 | **Payphone alcove** | +138 | +82 | 160.6 | ESE | **3** |
+| 22 | County road (nearest point) | +20 | +186 | 186.0 | S | — |
+| 23 | Camp entrance sign — **which is his front door** | +96 | +178 | 202.2 | SSE | — |
+
+Spawn tiers now *derive* instead of being asserted: `GAME_DESIGN.md` §2.5 defines Tier 1 as
+20–45 m, Tier 2 as 60–110 m, Tier 3 as 120–190 m. Every landmark above lands in its stated tier.
+The supply pallet is 29.5 m, the boathouse is 100.5 m, the mess hall is 151.3 m. Nothing was
+rounded to fit.
+
+### 4.3 Distance matrix
+
+| | Site | Canoe rack | Boathouse | Mess hall | Payphone | Dock | County rd |
+|---|---|---|---|---|---|---|---|
+| **Site** | — | 71.5 | 100.5 | 151.3 | 160.6 | 49.6 | 186.0 |
+| **Canoe rack** | 71.5 | — | 76.2 | 82.5 | 90.0 | 111.0 | 164.4 |
+| **Boathouse** | 100.5 | 76.2 | — | 134.1 | 138.0 | 114.5 | 242.4 |
+| **Mess hall** | 151.3 | 82.5 | 134.1 | — | 10.0 | 190.5 | 112.0 |
+| **Payphone** | 160.6 | 90.0 | 138.0 | 10.0 | — | 200.0 | 104.0 |
+| **Dock** | 49.6 | 111.0 | 114.5 | 190.5 | 200.0 | — | 227.6 |
+
+### 4.4 Numbers re-derived from the plan
+
+Everything below was an arbitrary number in v1.0 and is now a consequence.
+
+| Thing | v1.0 | v2.0 | Derivation |
+|---|---|---|---|
+| **The saw's noise radius (Night Three)** | "radius 90 m" (asserted) | **90 m — and now it means something** | 90 m from the datum reaches the fire road (45), the dock (49.6), the canoe rack (71.5). It does **not** reach the boathouse (100.5), the mess hall (151.3) or the payphone (160.6). **Robin hears the saw. Bev cannot.** That is Night Three's entire argument, and it is geometry |
+| Robin's torch sweeping the frame (N2) | "at eighty metres" | **71.5 m**, from the canoe rack | Landmark 11 |
+| The boathouse is "inside the lit perimeter" | "ninety metres inside" | **29 m inside the lamp line**, 100.5 m from the site, 76.2 m from the canoe rack | Landmarks 11, 13 |
+| Dale, Night One | "four hundred metres off" | **impossible** — the map is 448 m wide and fog far is 140 m. Corrected: Night One's single counselor runs a fixed loop whose **closest approach to the plot is 31 m**, at `(+32, +12)`, every **96 s**. His singing is heard at 96–140 m | `GAME_DESIGN.md` §7: "on a fixed loop that never reaches the plot." 31 m is not reaching it |
+| The scripted first creak (`GAME_DESIGN.md` §11, t=4:39) | camper "reacts" at unstated range | Creak severity 0.45 → radius `14 + 46×0.45 =` **34.7 m**. Scripted to fire on the loop's 31 m approach | `GAME_DESIGN.md` §3.1 |
+| The sink | "60 m from the site" | **60.0 m** | Landmark 10 |
+| The 1961 plate shim | "30 m east" | **31.6 m NW**, at the fallen log — the same log as pier 6 and the mallet in `GAME_DESIGN.md` §11 | Landmark 6. One trip, three finds, the joke lands three times |
+| The grave | "forty metres uphill" | **117.0 m WSW**, on the ridge shoulder, +14 m | Landmark 14. Far enough that finding it is an expedition |
+| Dale's torch, moved on Night Seven | "eleven metres" | **8.5 m**, from the stump at `(+46, −4)` to `(+38, −7)` — *toward the house* | §9, prop 12 |
+| Bev's chair faces | "the point where the house used to be" | bearing **293°** from `(+146, +60)`, which is the datum | Landmarks 1, 20 |
+
+### 4.5 The name of the lake
+
+"Lake Wanaka Pines," Minnesota, 1984. **Wanaka is a Māori place name from Otago, New Zealand.** It
+is not a Minnesota toponym and it does not belong to any regional Dakota or Ojibwe naming pattern.
+
+We are keeping it, because **the fakeness is the point and it is now load-bearing:**
+
+> The Wanaka Pines Land Company invented the name in **1958**, from a travel brochure, because it
+> sounded outdoorsy and it sold lots. The brochure is still in a file tin in the boathouse (§9,
+> prop 15) with photographs of a lake in Otago that is not this lake. The name is stamped on the
+> 1962 brass survey marker that Ansel polishes.
+
+**We do not invent an Ojibwe or Dakota name for what it was called before.** Two reasons, and both
+must survive future edits:
+
+1. We are not qualified to coin one, and a plausible-sounding fake Indigenous toponym invented by
+   a game studio is precisely the act the fiction is criticising. We would be the Land Company.
+2. The erasure *is* the fact. On the 1958 plat in the boathouse tin the older name is under the
+   Land Company's overprint and is not recoverable. The game refuses to supply what the Land
+   Company took, and it refuses on camera.
+
+A company renamed a lake to sell it, then condemned a house on it, then rented the ground to
+children. Ansel is the fourth thing on that list.
 
 ---
 
-## APPENDIX — STORY FLAGS & BEAT IDS (canonical, for `NightManager` + `Script.js`)
+## 5. THE WEATHER SCHEDULE — the difficulty curve, as a table
 
-```
-storyFlags:
-  sawIntroPanel, foundShim, robinSuspicious, robinDismissed, stoleHinges,
-  firstBlood, sawSecondFigure, riggedCounterweight, foundRuinAnchors,
-  robinSaw, bevRemembered, manualBlank, ending_a | ending_b | ending_c
+Wind sets how often the player's mistakes are published to the AI. It *is* the difficulty knob and
+v1.0 had no table. This restates `GAME_DESIGN.md` §7's weather column, adds gust structure, and
+computes the consequence.
 
-story:beat ids (in order):
-  n1_thumbs_up, n2_robin_hears, n3_not_believed, n4_dale,
-  n5_two_persons, n6_robin_inside, n6_bev_remembers, n7_final
-```
+**Method.** `GAME_DESIGN.md` §3.1: `lambda = 6.0·(w + 0.30s)·(0.40 + 0.90L)·Mw·Mt·Md` creaks/min.
+The reference case below is **one Rotated join** (`w = 0.35`), perfectly torqued (`s = 0`), at
+rated load (`L = 1.0`), no creak debt (`Md = 1`), at mid-night (`Mt = 1.25`). That gives a constant
+`3.4125 × Mw`, with `Mw = 1 + 0.60·wind + 0.20·rain`.
 
-**Non-negotiables for every other agent.** No narrator. No lore collectibles. No text in the
-world except article numbers and the word HJEM. The slasher never speaks. The campers are never
-stupid. The manual is the only comedian and it stops being funny on Night Four.
+`maskFloor = 0.30·rain` (`GAME_DESIGN.md` §3.3). "Heard" is `lambda × (1 − effective mask)`.
+
+| Night | Rain | Wind base | Gust amp | Gust period | Fog | Strikes | `Mw` | λ / min (1 wrong join) | Effective mask | **Heard / min** | What it feels like |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| **1** | 0.00 | 0.05 | — | — | 0.20 | 0 | 1.03 | 3.52 | 0.00 | **3.5** | Still. Clear. Your mistake is the only sound in the county |
+| **2** | 0.00 | 0.25 | 0.18 | 28 s | 0.30 | 0 | 1.15 | 3.92 | 0.00 | **3.9** | The trees move. Nothing covers you |
+| **3** | 0.40 | 0.35 | 0.25 | 22 s | 0.45 | 1 | 1.29 | 4.40 | 0.12 | **3.9** | First rain. First mercy. It is not much |
+| **4** | 0.60 | 0.40 | 0.30 | 18 s | 0.55 | 2 | 1.36 | 4.64 | 0.18 | **3.8** | Wet. Loud world. The best night to be loud in |
+| **5** | 0.70 | 0.75 | 0.45 | 11 s | 0.40 | **6** | 1.59 | 5.42 | 0.26 | **4.0** | Storm. Thunder masking is mandatory (`GAME_DESIGN.md` §7). You hammer on the count |
+| **6** | **0.00** | **0.20** | **0.04** | **90 s** | **0.80** | **0** | 1.12 | 3.82 | **0.00** | **3.8, every one of them heard** | **Dead air.** Fog to 0.80 and not a breath of wind. Nothing hides you and nothing hides them |
+| **7a** (`t < 0.8`) | 0.55 | 0.65 | 0.50 | 9 s | 0.35 | 4 | 1.50 | 5.12 | 0.17 | 4.3 | The storm breaking |
+| **7b** (`t ≥ 0.8`) | 0.00 | 0.03 | 0.00 | — | 0.25 | 0 | 1.02 | 4.04 (`Mt` = 1.45) | **0.00** | **4.0, in silence** | It stops raining. **The last 20% of the game has zero masking** (`GAME_DESIGN.md` §7) |
+
+**The headline the table makes visible:** raw creak rate barely moves across the game (3.5 → 5.4).
+What collapses is *cover*. Nights Three through Five give you weather to hide in and teach you to
+rely on it; Night Six takes it away without changing anything else, and Night Seven takes it away
+mid-sentence.
+
+**Night Six's wind is 0.20 with a gust amplitude of 0.04 and a 90-second period.** That satisfies
+`GAME_DESIGN.md` §7's stated `wind 0.2` while being, in practice, dead still — one slow breath of
+air a minute and a half. `Weather.js` must not treat 0.20 as "light breeze" and generate ordinary
+gust structure on Night Six. This is the single most important line in the weather schedule.
+
+---
+
+## 6. THE SEVEN NIGHTS
+
+Rebuilt on `GAME_DESIGN.md` §7's build schedule (collision **C1**). Escalation runs on three
+independent curves — **build complexity**, **camper density**, and **tone** — and they are
+deliberately out of phase. Night Four spikes tone before it spikes density. Night Six drops
+density to two and is the worst night in the game.
+
+### 6.0 Master table
+
+| | **N1** | **N2** | **N3** | **N4** | **N5** | **N6** | **N7** |
+|---|---|---|---|---|---|---|---|
+| **Assembly name** | GRUNNMUR | BJELKELAG | REISVERK | KLEDNING | TAKSTOL | VINDU & DØR | HJEM |
+| **Build target** (`GAME_DESIGN.md` §7) | 6 piers + sill beams | 9 floor joists | 14 studs + corner posts | 18 sheathing panels | 22 trusses + purlins | 20 glazing, door, hinges, **sink, doorframe** | 28: hearth stone, porch, roof cap, **two chairs** |
+| Stages / slots / seconds | 3 / 6 / 540 | 3 / 9 / 660 | 4 / 14 / 780 | 4 / 18 / 900 | 5 / 22 / 1020 | 5 / 20 / 1140 | 6 / 28 / 1320 |
+| **Grammar introduced** | G1 axonometric | G2 mirroring | G3 hidden parts | G4 ambiguous scale | G5 sequence | G6 errata | G7 continuation + all |
+| **Named missing part** | the **mallet** (+ pier 6) | **4 L-brackets** | **2 gusset plates** (+ the saw problem) | **1 sheathing board** + the **hand brace** | **3 truss pins** + tallow (+ **a second person**) | **errata slip** + **hinge set** + a short bag (+ **article `0000-000`**) | Tier-3 item + errata slip + a bag short by 3 (+ **a person**) |
+| **Named location** | fallen log, 31.6 m NW | woodpile, 58.4 m SW | boathouse eave, 100.5 m ENE | mess hall, 151.3 m ESE / the **boathouse door leaf** | counselor's truck, 141.6 m SE | boathouse **again**, 100.5 m | payphone alcove, 160.6 m ESE |
+| Campers | 1 | 2 | 3 | 4 | 5 | **2** | 7 + Ranger |
+| Weather (§5) | still, clear | wind 0.25 | rain 0.40 | rain 0.60 | **storm** | **dead air, fog 0.80** | storm → **dead calm** |
+| Beat id | `n1_thumbs_up` | `n2_robin_hears` | `n3_not_believed` | `n4_dale` | `n5_two_persons` | `n6_robin_inside`, `n6_bev_remembers` | `n7_final` |
+| Panels in Ansel's hand | 0/9 | 1/11 | 2/14 | 5/16 | 9/18 | 13/17 | the telephone |
+
+---
+
+### NIGHT ONE — **GRUNNMUR** — *FOUNDATION (A)*
+*Beats:* `n1_stake_pulled`, `n1_thumbs_up` · *Flags:* `pulledCountyStake`, `foundPlateShim`,
+`sawIntroPanel`
+
+**Build.** Six stone piers, six sill beams, twenty-four lag bolts. Two-part join, generous snap
+tolerance (0.65 m / 28°, `GAME_DESIGN.md` §2.2), forgiving torque. The first five minutes are
+scripted beat-for-beat in `GAME_DESIGN.md` §11 and this document does not contradict a single line
+of it. Two additions only, both at the front:
+
+**t = 0:38 — the inciting incident, as an input.** The chalked square for pier **P-01** has a
+county survey stake standing in it: 12 mm steel rod, orange plastic ribbon, driven in April.
+`CabinSite` marks P-01 unsnappable while the stake is present. The player must `build:remove` it:
+**1.1 s, silent, no prompt, no toast.** The ghost preview for the pier is drawn at 15% opacity in
+`#d92b2b` until it clears — the game's existing "dependency not met" language (`GAME_DESIGN.md`
+§2.2), used here for its only non-structural dependency in the whole game.
+
+Then they set a stone where it stood. Flag `pulledCountyStake`. Nine more ribboned stakes remain
+standing across the point for the rest of the game, and the player will walk past them ninety times.
+
+**Missing.** The **mallet** — Tier 1, at the fallen log, 31.6 m NW, half-buried beside the sixth
+pier (`GAME_DESIGN.md` §7, §11 at 2:40). *The joke lands twice: the player did not know they were
+missing a mallet, because they had been using their hands.*
+
+**The third thing at the log — the shim.** Pier D seats 11 mm low. The manual's fix panel (1.6) is
+a rectangle with an arrow into a gap. It does not care what the rectangle is. Lying under the log
+is a **1961 Minnesota licence plate, folded in three.** It is a class-A consumable, silent, 2.5 s
+to place, `s −= 0.35` (`GAME_DESIGN.md` §3.3). It fits perfectly. It has always been the shim. It
+was under the old house too. Flag `foundPlateShim` → the manual redraws the fix panel's red outline
+in black with a tick.
+
+**The comic beat: THE MAGNIFIER.** Panel 1.4 draws a bolt going into a hole. Then the same bolt,
+larger. Then the same bolt again, with a magnifier over it. Three panels, one bolt. The manual
+thinks you might not have got it.
+
+**The collision panel — 1.9 (hero).** The contents inset: six piers and six beams on a pallet,
+drawn in dimetric, each with an article number. At the pallet's edge, drawn to the same scale, with
+the same care, in the same hand: **a boot.** Size 3. No article number. No arrow. It is in the
+contents.
+
+**What goes wrong.** Nothing. Genuinely nothing. He gets it right, and the player laughs at a
+monster doing homework, and that is the last time the game is only funny.
+
+**Taught this night:** carry, place, torque-hold, the creak, crouch (discovered, not instructed —
+`GAME_DESIGN.md` §11 at 3:20), **and sit** (§13.2). The rest stump at 11.4 m SE has a wide flat
+seat; sitting on it regenerates stamina at 19.0/s against 11.0 standing. Most players will sit on
+it in the first ten minutes because they are exhausted and it is the only comfortable-looking thing
+in the forest. Beside it, on a smaller stump, a **folded blanket and a tin cup**, brushed off,
+dry. That seat is not sittable. The game refuses it silently — no ghost, no prompt, no toast — for
+six nights.
+
+**Closing image.** Rain has not started yet. Six piers, dead level. The spirit level's bubble is
+centred and the manual's last panel is the little masked figure standing on the foundation with
+both arms up. Behind him, at the frame's edge, nine orange ribbons in a line.
+
+**Night-end card headline:** `ASSEMBLY REPORT — GRUNNMUR — STEP 1 OF 7`. Figure posture:
+`thumbs-up`.
+
+---
+
+### NIGHT TWO — **BJELKELAG** — *UPRIGHTS (B ×4), SUPPORT WHILE FIXING*
+*Beat:* `n2_robin_hears` · *Flags:* `robinSuspicious`
+
+**Build.** Nine floor joists across the sill. **Order matters now** — G2 mirroring: the manual
+draws the *left* bay only, with the mirror glyph, and the right bay is its reflection with bracket
+handedness flipped (`GAME_DESIGN.md` §2.4).
+
+**Missing.** **Four L-brackets, three supplied.** Tier 2 — the woodpile at 58.4 m SW, in a coffee
+can, under a tarp that is holding six litres of rainwater.
+
+**The comic beat: THE MANUAL COUNTS FOR YOU, SMUGLY.** v1.0 said "the player will count them three
+times," which is a prediction, not a design. It is not how the game works: `GAME_DESIGN.md` §2.5
+says the manifest flags the shortfall in red **at t = 0**. So the joke is not that you discover the
+shortfall. The joke is the *presentation*: the parts-list panel draws four brackets in a neat row,
+numbers them `H-1 H-2 H-3 H-4`, and then puts a red outline and a 40 × 40 m contour inset around
+the fourth one, as though the manual has always known, as though this is a normal thing for a
+manual to do, as though somewhere a Norwegian woman in 1962 wrote "and the fourth one is in the
+woods."
+
+**The collision panel — 2.7.** The `THIS STEP REQUIRES TWO PERSONS` icon appears for the first
+time. Two figures, one at each end of a joist. The second figure has no hammer, no tool roll, and
+is drawn at **0.62× scale.** It is not an adult. Nobody remarks on it. It will be back on Night
+Five, and on Night Five it will have been erased three times.
+
+**What goes wrong.** The mirrored bay. Joist **J-06** goes in handed wrong — `Rotated`, `w = 0.35`
+(`GAME_DESIGN.md` §2.3). It seats. It sits 6 mm proud. And it **rings** instead of knocking (§13.3)
+on every hammer tap, from the moment it goes in, and the player has been hearing dead-flat knocks
+for a night and a half.
+
+Then the wind gets to it: 0.25 base, 0.18 gusts, 28-second period. **3.9 creaks per minute, and
+nothing to mask them** (§5).
+
+**New mechanic.** Noise and light. `NoiseSystem` propagation, flashlight cones, crouch, LOS break.
+First real `player:spotted` risk — and what that *means* is in §6.10 and it is not a reload.
+
+**Story beat — `n2_robin_hears`.** Robin Osei-Hall, alone at the canoe rack at **71.5 m**, hears a
+mallet. Four strikes, even, spaced. She stops moving. `ROB_HEAR_01` → `ROB_HEAR_03`. Flag
+`robinSuspicious`; from Night Three, `Campers` adds the plot to her patrol graph.
+
+She has heard ten thousand hours of tools in her father's boatyard. **She is right for a technical
+reason nobody else on site can evaluate**, and that is her whole tragedy.
+
+**Closing image.** Her torch beam crawls over the frame at 71.5 m, holds on it for a second and a
+half, and moves on. She does not understand what she is looking at, because it is a house, and
+there is not supposed to be a house.
+
+**Night-end card:** `BJELKELAG`. Posture `standing-neutral` unless she never heard you, in which
+case `thumbs-up`.
+
+---
+
+### NIGHT THREE — **REISVERK** — *DO NOT OVERTIGHTEN*
+*Beat:* `n3_not_believed` · *Flags:* `robinDismissed`, `cutTheGroundSill`
+
+**Build.** Fourteen wall studs and four corner posts. G3: the bag icon says eight gussets, the
+drawing shows six. Two are behind the visible geometry and the player must reason about occlusion
+in the axonometric to find where (`GAME_DESIGN.md` §2.4).
+
+**Missing.** **Two gusset plates**, Tier 2, on the boathouse eave at 100.5 m ENE — reachable
+without entering the lit perimeter, but you have to stand on Dale's ladder to get them, and the
+ladder is against the boathouse, and the boathouse has a window.
+
+**The second problem, which is not a missing part: THE SAW.** The ground rises **340 mm** across
+the footprint from the south-west corner to the north-east. It always did; the old house was built
+to it. The corner posts ship at a uniform 2.4 m. Post **C-NE must be cut to 2.06 m.** Nothing is
+missing. The piece is *too long*, which is worse, because you cannot go and find your way out of
+it.
+
+The handsaw is in the tool roll and has been since Night One.
+
+**Cutting is the loudest sustained thing in the game.** `noise:emit { kind:'saw', radius: 90,
+intensity: 0.55 }`, re-emitted every 0.5 s for the duration of the cut (§14.1 — `saw` is a new
+`kind`). A full cut is **31 seconds** of it. You must break it into passes between patrols.
+
+**The comedy is that you cannot rush a saw.** A 127 kg man who can shoulder a 62 kg beam is
+completely hostage to the physics of a saw blade, and the game gives him no way to be strong at it.
+Push harder and the blade binds: the cut rate *drops* 40% and the pitch goes up 300 Hz. The only
+technique is patience, which is the one thing that costs time, which is the one currency
+(`GAME_DESIGN.md` §6.3).
+
+**And 90 m is exactly the right number** (§4.4): the saw reaches the fire road, the dock and the
+canoe rack. It does not reach the boathouse, the mess hall or the payphone. **Robin hears it. Bev,
+151 m away in the office, cannot.** Night Three's argument is decided by acoustics before anyone
+opens their mouth.
+
+**The collision panel — 3.6.** The cut panel. A hand, a board, a cut line, and the standard
+double-headed dimension arrow measuring the board against **the figure's own forearm** — a
+carpenter's trick, and a mother's, and completely charming. Then the same forearm drawn again
+beside it at **0.55× scale**, with the same measurement on it. She measured him against the board
+in 1957 and wrote the number down. The forearm grew. The number didn't.
+
+**New mechanic.** Sustained-noise budgeting. Class-D hauling. Shims. **The grab** (`GAME_DESIGN.md`
+§8.3) — 4.5 s of contact from behind an unaware camper, silent, and it creates three problems, one
+of which is that from the next stage onward the manual quietly adds a small figure in the corner of
+every page: BJØRN, standing, with a red slash-circle over a second small figure. It is a safety
+warning. It is never acknowledged.
+
+**Story beat — `n3_not_believed`.** Robin tells Bev about the mallet. Bev tells her that sound
+carries across the water from the state campground, six kilometres, that it happens every year, and
+that it is usually a generator. `BEV_ARG_02`.
+
+**Bev is not being dismissive. Bev is being correct about a thing that is usually true.** The first
+cruelty in the script is committed by the campers, gently, to each other, out of ordinary
+competence. Dale could corroborate — he heard it too, from the shed — and he doesn't, because
+corroborating means a report, and a report means the county, and the county means his job.
+`DAL_ARG_01`. Flag `robinDismissed`: from Night Four, Robin patrols alone, because she has stopped
+telling people.
+
+**Closing image.** Bev at the treeline with a cigarette, deciding whether to walk out and look —
+**cut.** That image (a held ember, eleven seconds) is the smoking-veteran-who-almost-investigates
+beat from every one of these films since 1979 and we are not doing it.
+
+Instead: **the woodpile tarp.** Robin walks back past it at 02:50 and it is folded. Not thrown
+back — folded, in three, and squared to the woodpile's edge, because a man who needed a coffee can
+out from under it put the tarp back the way a tarp goes back. She looks at it for two seconds. She
+does not know what is wrong with it. Nothing is wrong with it. That is what is wrong with it.
+
+**Night-end card:** `REISVERK`. New line, deadpan: `CUTS MADE ON SITE — 1`. `WE WOULD PREFER
+YOU DID NOT.`
+
+---
+
+### NIGHT FOUR — **KLEDNING** — *IF PARTS ARE MISSING, DO NOT RETURN TO STORE*
+*Beat:* `n4_dale` · *Flags:* `tookBoathouseDoor`, `firstBlood`
+
+**Build.** Eighteen sheathing panels. G4 ambiguous scale: two boards differ only in length —
+2.4 m and 2.6 m — and **no dimensions are printed anywhere on the sheet.** The only scale reference
+on the page is BJØRN, who is 1.7 m, which is the player's own eye height, which means the player
+must measure a drawing against their own body and then measure a board against their own body.
+Getting it wrong seats fine and floats at the far end and is not discovered until Stage 4.
+
+**Missing — two, per `GAME_DESIGN.md` §2.5.**
+
+1. **The hand brace.** Tier 3, mess hall shelf, **151.3 m ESE**, two campers in the room, one of
+   them static. The most dangerous errand in the first four nights. (It is also the tool he used to
+   drill nothing, because you cannot drill fired glaze — §2.2.)
+2. **One sheathing board**, 0.2 × 2.4 m, milled. And there is no milled lumber in a forest.
+
+**Where the board is: the boathouse door.** It is the only milled panel of that dimension inside
+1 km. It is 100.5 m ENE, hung on **three good brass hinges**, 29 m inside the lamp line.
+
+He takes the **door leaf**. He leaves the hinges on the frame, because the manual did not ask for
+hinges, and he is not a thief, he is short a part.
+
+Consequence persists permanently: `tookBoathouseDoor`. `Props.js` removes the leaf for the rest of
+the game; the frame stands empty; the campers prop the gap with an oar and never fix it. On Night
+Six he comes back for the hinges, off the same frame, and that escalation is the whole reason the
+door and the hinges are two nights apart instead of one.
+
+**The comic beat: THE MANUAL KNOWS WHERE THE CAMP IS.** Panel 4.1 draws the part he needs in
+isolation — and then draws it *in situ*, screwed to a door, correctly, including the oar propped
+against it. The manual has never been to the camp. The manual was finished in 1962. The manual
+drew the oar.
+
+**The collision panel — 4.9 (hero).** BJØRN, `standing-neutral`, over a horizontal shape. The shape
+is not a joist: it has shoes. A double-headed dimension arrow runs its length: **`1.78 m`**. The
+manual measured him. There is no red mark, no warning lozenge, no exclamation. It is a dimension.
+It is drawn with exactly the care every other dimension in the manual is drawn with.
+
+**Story beat — `n4_dale`.** Dale Pruitt walks up the fire road to piss at 01:20 and finds a house
+that was not there in June. He is not scared. He is *confused*. He says
+`DAL_EVID_04` — "…the hell is this, chief" — out loud, to nobody, and then he reaches out and
+**knocks on it, twice, politely**, the way you knock on a thing to see if it's real.
+
+The first kill is off camera. One hard cut to black. No music sting, no scream, no impact sound.
+The only thing on the audio bus is a hammer being **set down carefully on wood** — the
+`join_seat` sample, the sound the game has spent three nights teaching the player means *correct*.
+
+`firstBlood` → `Player.handState = 'bloodied'`. The next `ui:blueprint-open` therefore costs
+**0.90 s** (§2.4.1), and the animation is byte-identical to Night One's, and the timing is
+identical, and the priority is the paper.
+
+**Emotional turn.** v1.0 said "the comedy dies here and does not fully return." That line is
+deleted (§0.4.4). The comedy does not die. **The campers stop being funny on purpose and start
+being funny by accident**, which is unbearable, and the manual goes on doing bits for three more
+nights without breaking stride.
+
+**Closing image.** v1.0 used Dale's torch on the ground, still lit, rolling in a slow quarter-arc —
+which is every slasher film since 1980, and which is worse than the version this document already
+contained in its own prop list.
+
+**The real closing image: the torch stood upright on a stump, lens-up, still on.** Because he
+needed both hands, and there was a stump, and you put a light where it will be useful. It throws a
+20 m cone straight up into the rain. It is on for the whole of Night Five and most of Night Six,
+browning as the battery dies, and it is visible from the canoe rack, and nobody comes.
+
+**Night-end card:** `KLEDNING`. And, for the first time, one extra line, last, in `#d92b2b`:
+`PLEASE ASSEMBLE ALONE.` (`GAME_DESIGN.md` §9 already specifies this line at any kill count > 0.
+Night Four is where it first appears and nobody should soften it.)
+
+---
+
+### NIGHT FIVE — **TAKSTOL** — *THIS STEP REQUIRES TWO PERSONS*
+*Beat:* `n5_two_persons` · *Flags:* `riggedTruss`, `sawSecondFigure`
+
+**Build.** Twenty-two roof trusses and purlins. Ladder, height, **skyline exposure** — standing on
+the top plate sets `skylineFraction` toward 1.0 and a lightning flash forces `exposeF = 2.0` for
+0.25 s (`GAME_DESIGN.md` §4.1). The storm you are hammering under is the storm that silhouettes
+you.
+
+**Weather: the storm.** wind 0.75, rain 0.70, **6 strikes** (§5). Thunder masking stops being a
+trick and becomes the schedule: 8 truss joins × 6 taps is 48 discrete `hammer` emits at radius 34,
+and `Weather.nextStrikeIn()` is the only reason any of them are survivable.
+
+**Missing.** Three truss pins and a tallow tin, Tier 3, in the counselor's truck bed at 141.6 m SE
+(`GAME_DESIGN.md` §7). Standard errand, at the worst possible time, in the rain.
+
+**And the fourth missing thing, which is not a part.**
+
+#### 6.5.1 THIS STEP REQUIRES TWO PERSONS — corrected from mass to geometry
+
+v1.0's version: a 4.8 m wall panel of mass 71 kg that `Physics` "refuses" to let one man place.
+That fails on contact with the fiction. Ansel is 127 kg and has spent four nights solo-shouldering
+62 kg beams and 55 kg trusses. **A 71 kg panel is a shrug for him**, every player will feel the
+game refusing for narrative reasons, and the beat dies. Worse: v1.0's Panel 5.7 put `71 kg` on the
+counterweight too, so the number the doc wanted read as *a person's weight* was trivially
+explained as *the panel's weight*, and the reveal defused itself.
+
+**The obstacle is geometry. Nothing in this game is ever prevented by the player being too weak.**
+
+Truss **T-01** is the first truss up. Every later truss ties to the one before it through a purlin;
+T-01 has nothing to tie to. It is a 4.0 m span (`GAME_DESIGN.md` §2.1) and to pin it:
+
+| Requirement | Value | Ansel |
+|---|---|---|
+| Must be held within | **±2° of plumb** | — |
+| At two points, separated by | **4.1 m** (heel to heel) | — |
+| While the ridge pin is driven — 4 taps, 2.4 s | both hands | — |
+| **His reach, fingertip to fingertip** | — | **1.9 m** |
+
+`Physics` does not refuse anything. The player *can* pick it up, *can* stand it, and it *falls*,
+every time, because holding one heel plumb rotates the other out past 2° in 1.4 s and there is no
+third arm. The failure is legible, physical, repeatable, and completely fair, and every player will
+try it at least twice.
+
+**The solution is rigging.** Multi-object physical assembly with **no snap points and no correct
+answer, only a working one**: Dale's canoe, a rope, the fallen log, the ladder, a stump. Ballast is
+the lake's own stones, and the player has to keep adding them until it holds — the game never
+states a mass and never will. `build:place` fires with `correct: true` for a join the manual never
+specified. **It is the only time in the game that happens**, and it is the first thing Ansel builds
+that his mother did not draw. Flag `riggedTruss`.
+
+**The collision panel — 5.7 (hero).** The counterweight diagram. The counterweight is drawn as a
+**dotted outline of a standing person**, with the flat-pack "approximate" tilde beside it, and
+**no number at all.**
+
+Not `71 kg`. Not any number. Two reasons, both load-bearing:
+
+1. A number invites arithmetic and arithmetic defuses it. An empty box beside a human outline is
+   the manual being *polite*, and politeness about this is the joke and the horror in the same
+   mark.
+2. The dotted outline of a person is planted **here**, on Night Five, in the manual's established
+   G3 grammar — *present, but occluded in this view*. When the last page of the game shows a small
+   seated figure in dotted line, it is the second time the player has seen the manual do this, not
+   the first (§0.4.3).
+
+**The comic beat: THE MANUAL IS UNHELPFUL IN THE EXACT REGISTER OF A REAL MANUAL.** Panel 5.1 is
+the genuine flat-pack safety icon — two little men, one at each end, `THIS STEP REQUIRES TWO
+PERSONS` — and every human being who has ever assembled furniture alone has laughed bitterly at
+that icon, and the game is counting on it, and it is the last time the joke is only a joke.
+
+**Story beat — `n5_two_persons`.** Panel **5.4 (hero)**. The player opens the manual to check a
+purlin spacing, lands on 5.4, and there is no measurement on the page.
+
+The second figure. Drawn in Marit's hand. Erased. Redrawn. Erased. Redrawn smaller. Three eraser
+ghosts visible under the final line at `ghostAlpha 0.14`. No arrows, no numbers, no step badge, no
+instruction. **It should not be in a manual at all.** Flag `sawSecondFigure`.
+
+She drew the house for two people and then spent an afternoon in 1962 trying to work out how big to
+make the other one, and could not decide, and made him smaller each time.
+
+**Story beat, quiet.** Marg organises a proper search in pairs rather than a panic — `MRG_SRCH_01`.
+Nobody goes anywhere alone after Dale. The forest gets *harder* because the campers got
+*competent*, and that is the correct direction for this game to escalate in.
+
+**Closing image.** The truss stands. Ansel puts one hand flat on the bottom chord and leaves it
+there four seconds longer than the animation needs — no music, no camera move, no zoom. Rain.
+
+The other end is held up by a canoe full of stones.
+
+**Night-end card:** `TAKSTOL`. New line, and it is the funniest and worst line on any card:
+`IMPROVISATION — NOTED.`
+
+---

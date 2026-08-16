@@ -177,7 +177,6 @@ const _box3 = new THREE.Box3();
 const _mcP = new THREE.Vector3();
 const _mcV = new THREE.Vector3();
 const _mcN = new THREE.Vector3();
-const _mcT = new THREE.Vector3();
 
 // carried-part sim
 const _carPos = new THREE.Vector3();
@@ -185,7 +184,10 @@ const _carQ = new THREE.Quaternion();
 const _carA = new THREE.Vector3();
 const _carB = new THREE.Vector3();
 const _carC = new THREE.Vector3();
+const _carD = new THREE.Vector3();
+const _carE = new THREE.Vector3();
 const _carQ2 = new THREE.Quaternion();
+const _carRot = new THREE.Quaternion();
 
 // scalar narrow-phase results (numbers only — impossible to alias)
 const _ray = { t: 0, nx: 0, ny: 1, nz: 0, hit: false };
@@ -572,6 +574,13 @@ export class Physics {
 
     this._slopeCos = Math.cos(TUNING.slopeLimitDeg * DEG);
     this._disposed = false;
+
+    // So a system holding only the instance can write `physics.MASK.SIGHT` without importing.
+    this.LAYER = LAYER;
+    this.LAYERS = LAYER;
+    this.MASK = MASK;
+    this.KINDS = KINDS;
+    this.TUNING = TUNING;
   }
 
   // -------------------------------------------------------------------------- lifecycle
@@ -1535,26 +1544,56 @@ export class Physics {
     return res;
   }
 
+  /**
+   * Resolve the capsule against the heightfield. Mutates p and v.
+   * @param {boolean} settle also close a sub-centimetre gap (used on the final pass only)
+   */
+  _groundClamp(p, v, res, settle) {
+    const gh = this.heightAt(p.x, p.z);
+
+    if (p.y >= gh) {
+      // Sliding along a wall on a slope leaves a few millimetres of air. Close it, or the
+      // player micro-bounces at the seam for as long as they lean on the wall.
+      if (settle && res.grounded && res.groundKind === 'terrain' && p.y - gh < 0.05) p.y = gh;
+      return;
+    }
+
+    this.normalAt(p.x, p.z, _mcN);
+
+    if (_mcN.y >= this._slopeCos) {
+      p.y = gh;
+      if (v.y < 0) v.y = 0;
+      res.grounded = true;
+      res.normal.copy(_mcN);
+      res.groundKind = 'terrain';
+    } else {
+      // Too steep to stand on — treat it as a wall, not as ground.
+      //
+      // Lifting the capsule to the surface (or even depenetrating perpendicular to it) lets the
+      // player climb a cliff simply by holding forward: the projected step still has an uphill
+      // component. So we depenetrate HORIZONTALLY, back down the gradient, by exactly enough to
+      // undo the height gained, and we refuse to let the slope hand back any upward velocity.
+      // Gravity then does what gravity does.
+      const gap = gh - p.y;
+      const nh = Math.hypot(_mcN.x, _mcN.z);
+      if (nh > 1e-4) {
+        const s = (gap * _mcN.y) / nh;          // horizontal distance that clears `gap`
+        p.x += (_mcN.x / nh) * s;
+        p.z += (_mcN.z / nh) * s;
+      } else {
+        p.y = gh;                               // degenerate; cannot happen for a real slope
+      }
+      const d = v.x * _mcN.x + v.y * _mcN.y + v.z * _mcN.z;
+      if (d < 0) { v.x -= _mcN.x * d; v.y -= _mcN.y * d; v.z -= _mcN.z * d; }
+      if (v.y > 0) v.y = 0;                     // no free height off an unwalkable face
+      res.sliding = true;
+      res.normal.copy(_mcN);
+    }
+  }
+
   /** One depenetration pass: terrain first, then primitives, then step-up. Mutates p and v. */
   _resolveCapsule(p, v, r, h, res) {
-    // ---- terrain
-    const gh = this.heightAt(p.x, p.z);
-    if (p.y < gh) {
-      this.normalAt(p.x, p.z, _mcN);
-      p.y = gh;
-      if (_mcN.y >= this._slopeCos) {
-        if (v.y < 0) v.y = 0;
-        res.grounded = true;
-        res.normal.copy(_mcN);
-        res.groundKind = 'terrain';
-      } else {
-        // too steep to stand on: strip the into-surface component and let gravity carry you down
-        const d = v.x * _mcN.x + v.y * _mcN.y + v.z * _mcN.z;
-        if (d < 0) { v.x -= _mcN.x * d; v.y -= _mcN.y * d; v.z -= _mcN.z * d; }
-        res.sliding = true;
-        res.normal.copy(_mcN);
-      }
-    }
+    this._groundClamp(p, v, res, false);
 
     // ---- primitives
     const skin = TUNING.skin;
@@ -1614,6 +1653,10 @@ export class Physics {
       }
       if (!resolved) break;
     }
+
+    // Sliding along a wall moves us horizontally, and horizontal movement on a slope changes the
+    // ground height under our feet. Re-clamp so the feet never end a step buried in the hillside.
+    this._groundClamp(p, v, res, true);
   }
 
   /** Convenience: the standing surface directly beneath a world point ('wood' on the build). */
@@ -1775,21 +1818,58 @@ export class Physics {
 
     if (deepest > 0) {
       st.contact = true;
-      st.position.x += dnx * deepest;
-      st.position.y += dny * deepest;
-      st.position.z += dnz * deepest;
 
-      // velocity at the contact point includes the swing — this is what makes a long beam
-      // clatter when you turn, even though your hands barely moved.
+      // Speed at the contact point = linear + swing. The swing term is the whole point: a 3.2 m
+      // beam whose end fouls a trunk is moving fast there even when your hands barely moved.
       _carB.set(dcx - st.position.x, dcy - st.position.y, dcz - st.position.z);
       _carA.copy(st.angular).cross(_carB).add(st.velocity);
       const closing = -(_carA.x * dnx + _carA.y * dny + _carA.z * dnz);
       st.impactSpeed = closing;
 
-      if (closing > 0) {
-        const j = (1 + TUNING.carryRestitution) * closing;
+      // --- resolve. A carried part is held at its middle: when one END fouls something it must
+      // PIVOT in the hands, not teleport sideways. Rotate about the grip whenever the contact is
+      // out along the shaft; only translate for contacts right at the hands.
+      _carD.set(dcx - _carPos.x, dcy - _carPos.y, dcz - _carPos.z);
+      const arm = _carD.length();
+      let rotated = false;
+
+      if (arm > 0.30) {
+        _carE.set(dnx, dny, dnz);
+        _carD.cross(_carE);                                   // axis = (contact - grip) × normal
+        const al = _carD.length();
+        if (al > 1e-6) {
+          _carD.multiplyScalar(1 / al);
+          _carRot.setFromAxisAngle(_carD, Math.min(deepest / arm, 0.30));
+          st.quaternion.premultiply(_carRot).normalize();
+          _carE.set(st.position.x - _carPos.x, st.position.y - _carPos.y, st.position.z - _carPos.z)
+            .applyQuaternion(_carRot);
+          st.position.set(_carPos.x + _carE.x, _carPos.y + _carE.y, _carPos.z + _carE.z);
+          // kill the spin that was driving the contact into the surface
+          const wa = st.angular.dot(_carD);
+          if (wa < 0) st.angular.addScaledVector(_carD, -wa * (1 + TUNING.carryRestitution));
+          rotated = true;
+        }
+      }
+      if (!rotated) {
+        st.position.x += dnx * deepest;
+        st.position.y += dny * deepest;
+        st.position.z += dnz * deepest;
+      }
+
+      // linear response uses only the linear closing speed — the swing was handled above
+      const linClosing = -(st.velocity.x * dnx + st.velocity.y * dny + st.velocity.z * dnz);
+      if (linClosing > 0) {
+        const j = (1 + TUNING.carryRestitution) * linClosing;
         st.velocity.x += dnx * j; st.velocity.y += dny * j; st.velocity.z += dnz * j;
-        st.angular.multiplyScalar(1 - TUNING.carryFriction);
+      }
+      st.angular.multiplyScalar(1 - TUNING.carryFriction);
+
+      // the leash outranks the contact: the part never visually detaches from the hands
+      _carA.set(st.position.x - _carPos.x, st.position.y - _carPos.y, st.position.z - _carPos.z);
+      const lag2 = _carA.length();
+      if (lag2 > TUNING.carryMaxLag) {
+        const k = TUNING.carryMaxLag / lag2;
+        st.position.set(_carPos.x + _carA.x * k, _carPos.y + _carA.y * k, _carPos.z + _carA.z * k);
       }
 
       if (closing > TUNING.carryImpactSpeed && st.cooldown <= 0) {
@@ -1947,6 +2027,7 @@ function shapeFromName(name) {
 
 // Handy statics so other modules do not have to import the loose exports.
 Physics.LAYER = LAYER;
+Physics.LAYERS = LAYER;
 Physics.MASK = MASK;
 Physics.KINDS = KINDS;
 Physics.TUNING = TUNING;

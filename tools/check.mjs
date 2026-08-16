@@ -76,6 +76,18 @@ function parseCheck(src) {
   return loc ? `${line.replace(/^SyntaxError:\s*/, '')} (${loc.trim()})` : line;
 }
 
+/**
+ * Remove block comments, line comments, and template literals so identifier checks only see
+ * real code. Template literals matter here because every shader in this project lives in one
+ * and is full of function definitions that are not JavaScript.
+ */
+function stripNonCode(src) {
+  return src
+    .replace(/\/\*[\s\S]*?\*\//g, ' ')
+    .replace(/(^|[^:])\/\/[^\n]*/g, '$1')
+    .replace(/`(?:\\.|[^`\\])*`/g, '``');
+}
+
 async function main() {
   const argv = process.argv.slice(2);
   const withVite = argv.includes('--vite');
@@ -101,15 +113,28 @@ async function main() {
     const isStub = /STATUS: STUB/.test(src);
     if (isStub) { add('info', 'stub', `${lines} lines — not yet implemented`); continue; }
 
-    // Truncation detection: contract methods that never appear.
+    // Truncation detection: contract methods that are never DEFINED.
+    //
+    // This must look for a real definition, not a mention. An earlier version matched the name
+    // anywhere in the file and was satisfied by a doc comment ("heightAt() never evaluates
+    // noise") while the method did not exist — the exact failure it was built to catch.
+    // So: strip comments and template literals (shader source is full of identifiers), then
+    // require a method-definition, field-assignment, or getter form.
     const required = REQUIRED_API[rel];
     if (required) {
+      const code = stripNonCode(src);
       const missing = required.filter((m) => {
-        const re = new RegExp(`(^|[^\\w.])(${m})\\s*[(=:]|\\bget\\s+${m}\\b|this\\.${m}\\s*=`, 'm');
-        return !re.test(src);
+        const def = new RegExp(
+          `^\\s*(?:static\\s+)?(?:async\\s+)?(?:get\\s+|set\\s+)?${m}\\s*\\(` +   // method(){}
+          `|^\\s*${m}\\s*=`                                                   +   // class field =
+          `|this\\.${m}\\s*=`                                                 +   // this.x =
+          `|\\bget\\s+${m}\\s*\\(`,                                               // get x()
+          'm',
+        );
+        return !def.test(code);
       });
       if (missing.length) {
-        add('fatal', 'truncated', `missing contract API: ${missing.join(', ')}`);
+        add('fatal', 'truncated', `contract API never defined: ${missing.join(', ')}`);
       }
     }
 

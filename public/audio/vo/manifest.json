@@ -1,0 +1,637 @@
+{
+  "generated": true,
+  "model": "eleven_multilingual_v2",
+  "format": "mp3_44100_128",
+  "lines": [
+    {
+      "id": "BEV_ARG_01",
+      "speaker": "bev",
+      "category": "argue",
+      "text": "Not tonight. Both of you.",
+      "bytes": 30973
+    },
+    {
+      "id": "BEV_ARG_02",
+      "speaker": "bev",
+      "category": "argue",
+      "text": "Sound carries over the water. Happens every year.",
+      "bytes": 50199
+    },
+    {
+      "id": "BEV_CALL_01",
+      "speaker": "bev",
+      "category": "call",
+      "text": "Everybody. Mess hall. Ten minutes.",
+      "bytes": 38914
+    },
+    {
+      "id": "BEV_EVID_01",
+      "speaker": "bev",
+      "category": "evidence",
+      "text": "That's not camp lumber. That's milled.",
+      "bytes": 41839
+    },
+    {
+      "id": "BEV_FEAR_01",
+      "speaker": "bev",
+      "category": "fear",
+      "text": "Twenty-two years. Never. Not once.",
+      "bytes": 43511
+    },
+    {
+      "id": "BEV_HEAR_01",
+      "speaker": "bev",
+      "category": "heard",
+      "text": "Quiet. Everybody. Quiet.",
+      "bytes": 31391
+    },
+    {
+      "id": "BEV_IDLE_01",
+      "speaker": "bev",
+      "category": "idle",
+      "text": "Rain by Thursday. Get the canvas up.",
+      "bytes": 38914
+    },
+    {
+      "id": "BEV_IDLE_02",
+      "speaker": "bev",
+      "category": "idle",
+      "text": "Twenty-two summers. Never once on schedule.",
+      "bytes": 45601
+    },
+    {
+      "id": "BEV_LATE_01",
+      "speaker": "bev",
+      "category": "late",
+      "text": "County's four hours out. Four hours.",
+      "bytes": 35152
+    },
+    {
+      "id": "BEV_LATE_02",
+      "speaker": "bev",
+      "category": "late",
+      "text": "There was a family on this shore. Before us.",
+      "bytes": 44765
+    },
+    {
+      "id": "BEV_LATE_03",
+      "speaker": "bev",
+      "category": "late",
+      "text": "Boy was big. Quiet. Fixed the dock for nothing.",
+      "bytes": 55214
+    },
+    {
+      "id": "BEV_LATE_04",
+      "speaker": "bev",
+      "category": "late",
+      "text": "His name was Ansel V—",
+      "bytes": 27629
+    },
+    {
+      "id": "BEV_SRCH_01",
+      "speaker": "bev",
+      "category": "search",
+      "text": "Torches low. Watch the roots.",
+      "bytes": 32226
+    },
+    {
+      "id": "BEV_SRCH_02",
+      "speaker": "bev",
+      "category": "search",
+      "text": "Back to the road. Now. Move.",
+      "bytes": 33898
+    },
+    {
+      "id": "COO_ARG_01",
+      "speaker": "coop",
+      "category": "argue",
+      "text": "And I said I would, and I'm doing it.",
+      "bytes": 42675
+    },
+    {
+      "id": "COO_CALL_01",
+      "speaker": "coop",
+      "category": "call",
+      "text": "Yeah — hang on — yeah!",
+      "bytes": 33062
+    },
+    {
+      "id": "COO_EVID_01",
+      "speaker": "coop",
+      "category": "evidence",
+      "text": "Somebody took the hinges. Who takes hinges.",
+      "bytes": 48527
+    },
+    {
+      "id": "COO_FALSE_01",
+      "speaker": "coop",
+      "category": "falsealarm",
+      "text": "AH — okay. Okay. Raccoon. It's a raccoon.",
+      "bytes": 53124
+    },
+    {
+      "id": "COO_FALSE_02",
+      "speaker": "coop",
+      "category": "falsealarm",
+      "text": "See? Nothing. Told you. Nothing.",
+      "bytes": 61066
+    },
+    {
+      "id": "COO_FEAR_01",
+      "speaker": "coop",
+      "category": "fear",
+      "text": "Marg. Marg, look at me. Look at me.",
+      "bytes": 44347
+    },
+    {
+      "id": "COO_FEAR_02",
+      "speaker": "coop",
+      "category": "fear",
+      "text": "I'm not — I can't do a joke. I don't have one.",
+      "bytes": 52288
+    },
+    {
+      "id": "COO_FIRE_01",
+      "speaker": "coop",
+      "category": "campfire",
+      "text": "…and that's why we don't swim past the raft.",
+      "bytes": 64827
+    },
+    {
+      "id": "COO_FIRE_02",
+      "speaker": "coop",
+      "category": "campfire",
+      "text": "It's emotionally true, Marguerite.",
+      "bytes": 37660
+    },
+    {
+      "id": "COO_HEAR_01",
+      "speaker": "coop",
+      "category": "heard",
+      "text": "Deer. That's deer. That's a deer thing.",
+      "bytes": 47273
+    },
+    {
+      "id": "COO_HEAR_02",
+      "speaker": "coop",
+      "category": "heard",
+      "text": "Okay that's — okay, that's not funny now.",
+      "bytes": 52288
+    },
+    {
+      "id": "COO_IDLE_01",
+      "speaker": "coop",
+      "category": "idle",
+      "text": "I'm just saying, powdered eggs are a choice.",
+      "bytes": 41004
+    },
+    {
+      "id": "COO_IDLE_02",
+      "speaker": "coop",
+      "category": "idle",
+      "text": "Sorry, that was — yeah. Sorry.",
+      "bytes": 35152
+    },
+    {
+      "id": "COO_IDLE_03",
+      "speaker": "coop",
+      "category": "idle",
+      "text": "Does this look level to you? Don't lie.",
+      "bytes": 41004
+    },
+    {
+      "id": "COO_SRCH_01",
+      "speaker": "coop",
+      "category": "search",
+      "text": "Dale? Buddy? You messing with us?",
+      "bytes": 42675
+    },
+    {
+      "id": "COO_SRCH_02",
+      "speaker": "coop",
+      "category": "search",
+      "text": "Dale! Come on, man!",
+      "bytes": 28465
+    },
+    {
+      "id": "DAL_ARG_01",
+      "speaker": "dale",
+      "category": "argue",
+      "text": "If we call it in, it's a report. Anyway.",
+      "bytes": 40586
+    },
+    {
+      "id": "DAL_CALL_01",
+      "speaker": "dale",
+      "category": "call",
+      "text": "Yeah, chief, I'm here!",
+      "bytes": 22613
+    },
+    {
+      "id": "DAL_FALSE_01",
+      "speaker": "dale",
+      "category": "falsealarm",
+      "text": "Little guy's got more right to be here than us.",
+      "bytes": 38914
+    },
+    {
+      "id": "DAL_FIRE_01",
+      "speaker": "dale",
+      "category": "campfire",
+      "text": "There was a house out on the point. Before.",
+      "bytes": 37660
+    },
+    {
+      "id": "DAL_FIRE_02",
+      "speaker": "dale",
+      "category": "campfire",
+      "text": "Before the camp. Burned, I think. Anyway.",
+      "bytes": 41004
+    },
+    {
+      "id": "DAL_HEAR_01",
+      "speaker": "dale",
+      "category": "heard",
+      "text": "Huh.",
+      "bytes": 10911
+    },
+    {
+      "id": "DAL_IDLE_01",
+      "speaker": "dale",
+      "category": "idle",
+      "text": "Third year that pump's gone out. Anyway.",
+      "bytes": 38914
+    },
+    {
+      "id": "DAL_IDLE_02",
+      "speaker": "dale",
+      "category": "idle",
+      "text": "You want it done or you want it done right, champ.",
+      "bytes": 42675
+    },
+    {
+      "id": "DAL_IDLE_03",
+      "speaker": "dale",
+      "category": "idle",
+      "text": "Ah — nope. That's a hornet situation.",
+      "bytes": 41004
+    },
+    {
+      "id": "MRG_ARG_01",
+      "speaker": "marg",
+      "category": "argue",
+      "text": "I asked you to do it before dark.",
+      "bytes": 30973
+    },
+    {
+      "id": "MRG_CALL_01",
+      "speaker": "marg",
+      "category": "call",
+      "text": "Coop! Other end! Other other end!",
+      "bytes": 38914
+    },
+    {
+      "id": "MRG_CALL_02",
+      "speaker": "marg",
+      "category": "call",
+      "text": "Say again? You're breaking up in the trees!",
+      "bytes": 38914
+    },
+    {
+      "id": "MRG_EVID_01",
+      "speaker": "marg",
+      "category": "evidence",
+      "text": "The hinges are gone. Off the door.",
+      "bytes": 35988
+    },
+    {
+      "id": "MRG_EVID_02",
+      "speaker": "marg",
+      "category": "evidence",
+      "text": "Don't touch it. Don't — Teddy, don't touch it.",
+      "bytes": 44765
+    },
+    {
+      "id": "MRG_FALSE_01",
+      "speaker": "marg",
+      "category": "falsealarm",
+      "text": "You screamed. You actually screamed.",
+      "bytes": 38914
+    },
+    {
+      "id": "MRG_FEAR_01",
+      "speaker": "marg",
+      "category": "fear",
+      "text": "I counted five. There were five of us.",
+      "bytes": 38914
+    },
+    {
+      "id": "MRG_FEAR_02",
+      "speaker": "marg",
+      "category": "fear",
+      "text": "Run to the road. Don't stop at the truck.",
+      "bytes": 37660
+    },
+    {
+      "id": "MRG_FIRE_01",
+      "speaker": "marg",
+      "category": "campfire",
+      "text": "That's not true. None of that is true.",
+      "bytes": 35152
+    },
+    {
+      "id": "MRG_FIRE_02",
+      "speaker": "marg",
+      "category": "campfire",
+      "text": "Before what?",
+      "bytes": 18016
+    },
+    {
+      "id": "MRG_HEAR_01",
+      "speaker": "marg",
+      "category": "heard",
+      "text": "Okay, I heard that one. I heard that.",
+      "bytes": 37660
+    },
+    {
+      "id": "MRG_HEAR_02",
+      "speaker": "marg",
+      "category": "heard",
+      "text": "It stopped. Why did it stop.",
+      "bytes": 31391
+    },
+    {
+      "id": "MRG_IDLE_01",
+      "speaker": "marg",
+      "category": "idle",
+      "text": "One, two — and that's the last of the tarps.",
+      "bytes": 36824
+    },
+    {
+      "id": "MRG_IDLE_02",
+      "speaker": "marg",
+      "category": "idle",
+      "text": "Whoever loaded this truck hates me personally.",
+      "bytes": 41004
+    },
+    {
+      "id": "MRG_SRCH_01",
+      "speaker": "marg",
+      "category": "search",
+      "text": "Pairs. Nobody goes out alone, I mean it.",
+      "bytes": 41004
+    },
+    {
+      "id": "MRG_SRCH_02",
+      "speaker": "marg",
+      "category": "search",
+      "text": "One, two — Robin, that's three, where's Coop?",
+      "bytes": 43511
+    },
+    {
+      "id": "MRG_SRCH_03",
+      "speaker": "marg",
+      "category": "search",
+      "text": "We've been past that stump twice.",
+      "bytes": 33062
+    },
+    {
+      "id": "ROB_ARG_01",
+      "speaker": "robin",
+      "category": "argue",
+      "text": "It wasn't the water. It was — okay. Fine.",
+      "bytes": 47273
+    },
+    {
+      "id": "ROB_ARG_02",
+      "speaker": "robin",
+      "category": "argue",
+      "text": "So that's a no. That's a no, Dale.",
+      "bytes": 41839
+    },
+    {
+      "id": "ROB_CALL_01",
+      "speaker": "robin",
+      "category": "call",
+      "text": "Dale? You up by the shed?",
+      "bytes": 30973
+    },
+    {
+      "id": "ROB_CALL_02",
+      "speaker": "robin",
+      "category": "call",
+      "text": "Nothing! Never mind!",
+      "bytes": 22613
+    },
+    {
+      "id": "ROB_EVID_01",
+      "speaker": "robin",
+      "category": "evidence",
+      "text": "These are sawdust. In June. From what?",
+      "bytes": 47691
+    },
+    {
+      "id": "ROB_EVID_02",
+      "speaker": "robin",
+      "category": "evidence",
+      "text": "There's a path here. Somebody's worn a path.",
+      "bytes": 44765
+    },
+    {
+      "id": "ROB_EVID_03",
+      "speaker": "robin",
+      "category": "evidence",
+      "text": "Somebody's building something out there.",
+      "bytes": 39750
+    },
+    {
+      "id": "ROB_FALSE_01",
+      "speaker": "robin",
+      "category": "falsealarm",
+      "text": "It's fine. It's fine. Everyone breathe.",
+      "bytes": 45601
+    },
+    {
+      "id": "ROB_FEAR_01",
+      "speaker": "robin",
+      "category": "fear",
+      "text": "Okay. Okay. Okay okay okay.",
+      "bytes": 38078
+    },
+    {
+      "id": "ROB_FEAR_02",
+      "speaker": "robin",
+      "category": "fear",
+      "text": "He looks at you sideways. Like a bird.",
+      "bytes": 39750
+    },
+    {
+      "id": "ROB_FEAR_03",
+      "speaker": "robin",
+      "category": "fear",
+      "text": "It's not a shack. It's a house.",
+      "bytes": 35988
+    },
+    {
+      "id": "ROB_FIRE_01",
+      "speaker": "robin",
+      "category": "campfire",
+      "text": "Sit down, Teddy. God.",
+      "bytes": 27629
+    },
+    {
+      "id": "ROB_HEAR_01",
+      "speaker": "robin",
+      "category": "heard",
+      "text": "Shh — shh. There. That.",
+      "bytes": 26375
+    },
+    {
+      "id": "ROB_HEAR_02",
+      "speaker": "robin",
+      "category": "heard",
+      "text": "That's a mallet. That's somebody driving a stake.",
+      "bytes": 44347
+    },
+    {
+      "id": "ROB_HEAR_03",
+      "speaker": "robin",
+      "category": "heard",
+      "text": "Four hits. Even. Nothing hits four times even.",
+      "bytes": 65663
+    },
+    {
+      "id": "ROB_IDLE_01",
+      "speaker": "robin",
+      "category": "idle",
+      "text": "Okay so — okay, no. Start over.",
+      "bytes": 44347
+    },
+    {
+      "id": "ROB_IDLE_02",
+      "speaker": "robin",
+      "category": "idle",
+      "text": "Teddy. Teddy. Did you eat? Don't lie to me.",
+      "bytes": 66499
+    },
+    {
+      "id": "ROB_LATE_01",
+      "speaker": "robin",
+      "category": "late",
+      "text": "There's marks on the door. Pencil. Somebody's kid.",
+      "bytes": 47273
+    },
+    {
+      "id": "ROB_LATE_02",
+      "speaker": "robin",
+      "category": "late",
+      "text": "Fifty-three. Fifty-five. Fifty-seven.",
+      "bytes": 52288
+    },
+    {
+      "id": "ROB_LATE_03",
+      "speaker": "robin",
+      "category": "late",
+      "text": "Oh. Oh, you poor — ",
+      "bytes": 20942
+    },
+    {
+      "id": "ROB_SRCH_01",
+      "speaker": "robin",
+      "category": "search",
+      "text": "Check the boathouse. The door's open.",
+      "bytes": 34316
+    },
+    {
+      "id": "ROB_SRCH_02",
+      "speaker": "robin",
+      "category": "search",
+      "text": "Stop. Everybody stop. Listen.",
+      "bytes": 33062
+    },
+    {
+      "id": "TED_ARG_01",
+      "speaker": "teddy",
+      "category": "argue",
+      "text": "Are you guys — sorry. Never mind.",
+      "bytes": 35988
+    },
+    {
+      "id": "TED_CALL_01",
+      "speaker": "teddy",
+      "category": "call",
+      "text": "Coop? Was that you?",
+      "bytes": 23449
+    },
+    {
+      "id": "TED_EVID_01",
+      "speaker": "teddy",
+      "category": "evidence",
+      "text": "It's Dale's. That's Dale's torch. That's his.",
+      "bytes": 47691
+    },
+    {
+      "id": "TED_FALSE_01",
+      "speaker": "teddy",
+      "category": "falsealarm",
+      "text": "Sorry! Sorry, that was me, sorry.",
+      "bytes": 32226
+    },
+    {
+      "id": "TED_FEAR_01",
+      "speaker": "teddy",
+      "category": "fear",
+      "text": "I want to go home. I'm sorry. I want to go home.",
+      "bytes": 57722
+    },
+    {
+      "id": "TED_FEAR_02",
+      "speaker": "teddy",
+      "category": "fear",
+      "text": "Is he still there? Is he still — ",
+      "bytes": 36824
+    },
+    {
+      "id": "TED_FIRE_01",
+      "speaker": "teddy",
+      "category": "campfire",
+      "text": "Is it okay if I sit here? Sorry.",
+      "bytes": 43511
+    },
+    {
+      "id": "TED_HEAR_01",
+      "speaker": "teddy",
+      "category": "heard",
+      "text": "Something moved. Over — there. Sorry.",
+      "bytes": 52288
+    },
+    {
+      "id": "TED_IDLE_01",
+      "speaker": "teddy",
+      "category": "idle",
+      "text": "Sorry — is this the right shed? Sorry.",
+      "bytes": 41839
+    },
+    {
+      "id": "TED_IDLE_02",
+      "speaker": "teddy",
+      "category": "idle",
+      "text": "My mom packed like nine cans of soup.",
+      "bytes": 35152
+    },
+    {
+      "id": "TED_LATE_01",
+      "speaker": "teddy",
+      "category": "late",
+      "text": "The buses come at nine. They're gonna come at nine.",
+      "bytes": 56886
+    },
+    {
+      "id": "TED_SRCH_01",
+      "speaker": "teddy",
+      "category": "search",
+      "text": "How far do we go? Sorry — how far?",
+      "bytes": 42675
+    }
+  ]
+}

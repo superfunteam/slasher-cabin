@@ -59,7 +59,7 @@
 
 import * as THREE from 'three';
 import { Log } from '../core/Log.js';
-import { Rand, fbm2, valueNoise2, ridged2, hashStr } from '../core/Rand.js';
+import { Rand, hashStr } from '../core/Rand.js';
 
 /* ======================================================================================
  * Module-scope scratch — ARCHITECTURE.md §12: no allocation in update().
@@ -606,6 +606,15 @@ normal = normalize(mix(normal, nonPerturbedNormal, scPuddle * 0.92));
 /** Appended to <lights_physical_fragment>: the grazing-angle sheen half of the wetness model. */
 const GLSL_WET_SPEC = /* glsl */`
 {
+  // Specular antialiasing (Toksvig / normal-variance). three only derives geometryRoughness
+  // from the *geometric* normal, so a strong detail normal over a low roughness sparkles into
+  // white noise. Feed the perturbed normal's screen-space variance back into roughness.
+  #if defined( SC_DETAIL_NORMAL ) || defined( SC_TRIPLANAR )
+    vec3 scNd = max(abs(dFdx(normal)), abs(dFdy(normal)));
+    float scNVar = max(max(scNd.x, scNd.y), scNd.z);
+    material.roughness = min(1.0, material.roughness + scNVar * (0.45 + uDetailParams.y * 0.55));
+  #endif
+
   // 4. WETNESS — F0 0.02 -> 0.06 where it is properly wet, F90 pushed to 1.0 so the
   //    grazing angles blow out. Metals are excluded; a water film on steel is a puddle,
   //    not a change of conductor.
@@ -752,88 +761,157 @@ function makeCanvas(size) {
   return null;
 }
 
-/** Height field for a family. Tileable-ish (we wrap the noise domain). */
+/*
+ * Fast, SEAMLESSLY TILEABLE value noise, local to the bakery.
+ *
+ * Rand.js's fbm2/valueNoise2 are the canonical world-space noise and must stay that way,
+ * but they are hash-heavy and do not wrap — baking eight families through them cost 4.2 s
+ * and left a visible seam on every tile. These wrap the integer lattice at the octave
+ * period, so a 1 m plank texture repeats without a hairline.
+ */
+function fhash(xi, yi, seed) {
+  let h = Math.imul(xi | 0, 0x27d4eb2d) ^ Math.imul(yi | 0, 0x165667b1) ^ (seed | 0);
+  h ^= h >>> 15;
+  h = Math.imul(h, 0x85ebca6b);
+  h ^= h >>> 13;
+  return (h >>> 0) * 2.3283064365386963e-10;
+}
+
+/** Value noise on a lattice that wraps every `period` cells. Coordinates pre-scaled. */
+function tnoise(x, y, period, seed) {
+  const xi = Math.floor(x), yi = Math.floor(y);
+  const xf = x - xi, yf = y - yi;
+  const u = xf * xf * (3 - 2 * xf);
+  const v = yf * yf * (3 - 2 * yf);
+  const x0 = ((xi % period) + period) % period;
+  const y0 = ((yi % period) + period) % period;
+  const x1 = (x0 + 1) % period;
+  const y1 = (y0 + 1) % period;
+  const a = fhash(x0, y0, seed), b = fhash(x1, y0, seed);
+  const c = fhash(x0, y1, seed), d = fhash(x1, y1, seed);
+  const top = a + (b - a) * u;
+  const bot = c + (d - c) * u;
+  return top + (bot - top) * v;
+}
+
+/** Tileable fbm over u,v in [0,1). `freq` is the base repeat count and must be an integer. */
+function tfbm(u, v, freq, oct, seed) {
+  let amp = 0.5, f = 1, sum = 0, norm = 0;
+  for (let i = 0; i < oct; i++) {
+    const p = Math.max(1, Math.round(freq * f));
+    sum += amp * tnoise(u * p, v * p, p, seed + i * 131);
+    norm += amp;
+    amp *= 0.5;
+    f *= 2;
+  }
+  return sum / norm;
+}
+
+/** Tileable ridged multifractal — plate edges, fissures, erosion channels. */
+function tridged(u, v, freq, oct, seed) {
+  let amp = 0.5, f = 1, sum = 0, norm = 0;
+  for (let i = 0; i < oct; i++) {
+    const p = Math.max(1, Math.round(freq * f));
+    const n = 1 - Math.abs(tnoise(u * p, v * p, p, seed + i * 977) * 2 - 1);
+    sum += amp * n * n;
+    norm += amp;
+    amp *= 0.5;
+    f *= 2;
+  }
+  return sum / norm;
+}
+
+const TAU = Math.PI * 2;
+
+/** Height field for a material family. Seamless in both axes. */
 function bakeHeight(size, kind, seed) {
   const h = new Float32Array(size * size);
-  const s = seed * 0.017 + 3.1;
+  const s = seed | 0;
   const inv = 1 / size;
   for (let y = 0; y < size; y++) {
+    const v = y * inv;
     for (let x = 0; x < size; x++) {
-      const u = x * inv, v = y * inv;
+      const u = x * inv;
       let n;
       switch (kind) {
         case 'bark': {
-          // vertical fissures: stretch the domain hard in y, ridged for plate edges
-          const w = fbm2(u * 5.0 + s, v * 1.1 + s, 3) * 0.35;
-          n = ridged2((u * 26.0) + w * 6.0 + s, v * 3.2 + s, 4) * 0.72
-            + fbm2(u * 60.0 + s, v * 14.0 + s, 3) * 0.28;
+          // vertical fissures: warp the domain, then ridge it for plate edges
+          const w = tfbm(u, v, 4, 2, s) * 0.5 - 0.25;
+          n = tridged(u + w * 0.10, v * 0.25, 24, 3, s) * 0.66
+            + tfbm(u, v, 48, 2, s + 7) * 0.34;
           break;
         }
         case 'wood': {
-          // grain rings along x, plus saw kerf micro-grooves
-          const g = fbm2(u * 2.2 + s, v * 22.0 + s, 4);
-          const rings = Math.abs(Math.sin((v * 9.0 + g * 2.2) * Math.PI));
-          n = rings * 0.55 + fbm2(u * 90.0 + s, v * 9.0 + s, 2) * 0.25
-            + (Math.sin(v * size * 0.28) * 0.5 + 0.5) * 0.20;
+          // grain rings across the board plus saw-kerf micro-grooves along the cut
+          const g = tfbm(u, v, 3, 3, s) * 0.5;
+          const rings = Math.abs(Math.sin((v * 8 + g * 1.6) * Math.PI));
+          const kerf = Math.sin(v * TAU * Math.round(size / 6)) * 0.5 + 0.5;
+          n = rings * 0.50 + tfbm(u, v, 32, 2, s + 3) * 0.28 + kerf * 0.22;
           break;
         }
         case 'ground': {
-          n = fbm2(u * 7.0 + s, v * 7.0 + s, 5) * 0.62
-            + ridged2(u * 21.0 + s, v * 21.0 + s, 3) * 0.23
-            + fbm2(u * 64.0 + s, v * 64.0 + s, 2) * 0.15;
+          n = tfbm(u, v, 6, 4, s) * 0.60
+            + tridged(u, v, 20, 2, s + 11) * 0.24
+            + tfbm(u, v, 48, 1, s + 19) * 0.16;
           break;
         }
         case 'stone': {
-          n = fbm2(u * 4.0 + s, v * 4.0 + s, 4) * 0.42
-            + valueNoise2(u * 48.0 + s, v * 48.0 + s) * 0.30
-            + valueNoise2(u * 128.0 + s, v * 128.0 + s) * 0.28;
+          // three-tone speckle: feldspar / quartz / biotite grain at ~2 mm
+          n = tfbm(u, v, 4, 3, s) * 0.40
+            + tnoise(u * 40, v * 40, 40, s + 5) * 0.32
+            + tnoise(u * 96, v * 96, 96, s + 13) * 0.28;
           break;
         }
         case 'metal': {
-          n = 0.55 + fbm2(u * 3.0 + s, v * 3.0 + s, 3) * 0.30
-            + valueNoise2(u * 96.0 + s, v * 96.0 + s) * 0.15;
+          n = 0.55 + tfbm(u, v, 3, 2, s) * 0.30
+            + tnoise(u * 72, v * 72, 72, s + 23) * 0.15;
           break;
         }
         case 'fabric': {
-          const warp = Math.sin(u * size * 0.55) * 0.5 + 0.5;
-          const weft = Math.sin(v * size * 0.55) * 0.5 + 0.5;
-          n = (warp * 0.5 + weft * 0.5) * 0.55 + fbm2(u * 12.0 + s, v * 12.0 + s, 3) * 0.45;
+          // woven duck: warp and weft at ~1.2 mm
+          const cells = Math.max(8, Math.round(size / 5));
+          const warp = Math.sin(u * TAU * cells) * 0.5 + 0.5;
+          const weft = Math.sin(v * TAU * cells) * 0.5 + 0.5;
+          n = (warp * 0.5 + weft * 0.5) * 0.58 + tfbm(u, v, 10, 3, s) * 0.42;
           break;
         }
         case 'organic': {
-          const vein = Math.abs(Math.sin((u * 11.0 + fbm2(u * 3.0 + s, v * 3.0 + s, 3) * 2.0) * Math.PI));
-          n = vein * 0.42 + fbm2(u * 26.0 + s, v * 26.0 + s, 3) * 0.58;
+          const vein = Math.abs(Math.sin((u * 10 + tfbm(u, v, 3, 2, s) * 1.8) * Math.PI));
+          n = vein * 0.40 + tfbm(u, v, 24, 3, s + 29) * 0.60;
           break;
         }
-        default: { // flesh
-          n = fbm2(u * 18.0 + s, v * 18.0 + s, 4) * 0.6
-            + valueNoise2(u * 70.0 + s, v * 70.0 + s) * 0.4;
+        default: { // flesh — pores, no structure
+          n = tfbm(u, v, 16, 3, s) * 0.62
+            + tnoise(u * 56, v * 56, 56, s + 31) * 0.38;
         }
       }
-      h[y * size + x] = Math.min(1, Math.max(0, n));
+      h[y * size + x] = n < 0 ? 0 : (n > 1 ? 1 : n);
     }
   }
   return h;
 }
 
+/** Sobel-ish height -> tangent-space normal. Wraps, so the normal map tiles too. */
 function heightToNormalTexture(h, size, strength) {
   const canvas = makeCanvas(size);
   if (!canvas) return null;
   const g = canvas.getContext('2d', { willReadFrequently: true });
   const img = g.createImageData(size, size);
   const d = img.data;
-  const at = (x, y) => h[((y + size) % size) * size + ((x + size) % size)];
   for (let y = 0; y < size; y++) {
+    const rowC = y * size;
+    const rowU = (y === 0 ? size - 1 : y - 1) * size;
+    const rowD = (y === size - 1 ? 0 : y + 1) * size;
     for (let x = 0; x < size; x++) {
-      const dx = (at(x - 1, y) - at(x + 1, y)) * strength;
-      const dy = (at(x, y - 1) - at(x, y + 1)) * strength;
-      let nx = dx, ny = dy, nz = 1.0;
-      const len = Math.hypot(nx, ny, nz) || 1;
-      nx /= len; ny /= len; nz /= len;
-      const i = (y * size + x) * 4;
-      d[i] = (nx * 0.5 + 0.5) * 255;
-      d[i + 1] = (ny * 0.5 + 0.5) * 255;
-      d[i + 2] = (nz * 0.5 + 0.5) * 255;
+      const xl = x === 0 ? size - 1 : x - 1;
+      const xr = x === size - 1 ? 0 : x + 1;
+      const nx = (h[rowC + xl] - h[rowC + xr]) * strength;
+      const ny = (h[rowU + x] - h[rowD + x]) * strength;
+      const inv = 1 / Math.sqrt(nx * nx + ny * ny + 1);
+      const i = (rowC + x) * 4;
+      d[i] = (nx * inv * 0.5 + 0.5) * 255;
+      d[i + 1] = (ny * inv * 0.5 + 0.5) * 255;
+      d[i + 2] = (inv * 0.5 + 0.5) * 255;
       d[i + 3] = 255;
     }
   }
@@ -841,15 +919,18 @@ function heightToNormalTexture(h, size, strength) {
   return canvas;
 }
 
+/** Grayscale remap of a scalar field. Gamma goes through a 256-entry LUT — pow is slow. */
 function fieldToTexture(h, size, lo, hi, gamma) {
   const canvas = makeCanvas(size);
   if (!canvas) return null;
   const g = canvas.getContext('2d', { willReadFrequently: true });
   const img = g.createImageData(size, size);
   const d = img.data;
-  for (let i = 0; i < size * size; i++) {
-    const v = Math.pow(h[i], gamma);
-    const c = (lo + (hi - lo) * v) * 255;
+  const lut = new Float32Array(257);
+  for (let k = 0; k <= 256; k++) lut[k] = (lo + (hi - lo) * Math.pow(k / 256, gamma)) * 255;
+  const n = size * size;
+  for (let i = 0; i < n; i++) {
+    const c = lut[(h[i] * 256) | 0];
     const j = i * 4;
     d[j] = c; d[j + 1] = c; d[j + 2] = c; d[j + 3] = 255;
   }
@@ -857,27 +938,63 @@ function fieldToTexture(h, size, lo, hi, gamma) {
   return canvas;
 }
 
-/** A grayscale albedo-variation map. The material colour tints it — one map, many surfaces. */
+/** 2x2 box downsample — roughness and cavity are low-frequency by nature. */
+function halveField(h, size) {
+  const hs = size >> 1;
+  const out = new Float32Array(hs * hs);
+  for (let y = 0; y < hs; y++) {
+    const r0 = (y * 2) * size, r1 = (y * 2 + 1) * size;
+    for (let x = 0; x < hs; x++) {
+      const c0 = x * 2, c1 = x * 2 + 1;
+      out[y * hs + x] = (h[r0 + c0] + h[r0 + c1] + h[r1 + c0] + h[r1 + c1]) * 0.25;
+    }
+  }
+  return out;
+}
+
+/**
+ * A grayscale albedo-variation map — the material colour tints it, so one baked map serves a
+ * whole family. Two scales of variation: the height field (10 cm) and a coarse blotch field
+ * (metres), because a single grain size is the tell of a procedural texture.
+ */
 function albedoTexture(h, size, tintAmount, seed) {
   const canvas = makeCanvas(size);
   if (!canvas) return null;
   const g = canvas.getContext('2d', { willReadFrequently: true });
   const img = g.createImageData(size, size);
   const d = img.data;
-  const s = seed * 0.031 + 17.7;
+  const s = (seed | 0) + 977;
+
+  // Blotch at 1/8 resolution, bilinearly resampled — visually identical, 64x cheaper.
+  const bs = Math.max(4, size >> 3);
+  const blotch = new Float32Array(bs * bs);
+  for (let by = 0; by < bs; by++) {
+    for (let bx = 0; bx < bs; bx++) {
+      blotch[by * bs + bx] = 0.84 + tfbm(bx / bs, by / bs, 3, 3, s) * 0.32;
+    }
+  }
+  const bsample = (u, v) => {
+    const fx = u * bs, fy = v * bs;
+    const x0 = Math.floor(fx) % bs, y0 = Math.floor(fy) % bs;
+    const x1 = (x0 + 1) % bs, y1 = (y0 + 1) % bs;
+    const tx = fx - Math.floor(fx), ty = fy - Math.floor(fy);
+    const a = blotch[y0 * bs + x0], b = blotch[y0 * bs + x1];
+    const c = blotch[y1 * bs + x0], e = blotch[y1 * bs + x1];
+    return (a + (b - a) * tx) + ((c + (e - c) * tx) - (a + (b - a) * tx)) * ty;
+  };
+
   const inv = 1 / size;
   for (let y = 0; y < size; y++) {
     for (let x = 0; x < size; x++) {
       const i = y * size + x;
       const base = 1 - tintAmount * 0.5 + h[i] * tintAmount;
-      // a second, much larger blotch scale so it never looks like one grain size
-      const blotch = 0.85 + fbm2(x * inv * 2.3 + s, y * inv * 2.3 + s, 3) * 0.30;
-      const v = Math.min(1, Math.max(0, base * blotch));
-      // very slight hue drift so it is never a pure grey multiply
+      let v = base * bsample(x * inv, y * inv);
+      v = v < 0 ? 0 : (v > 1 ? 1 : v);
+      // a whisper of hue drift so it is never a pure grey multiply
       const j = i * 4;
-      d[j] = Math.min(255, v * 255 * 1.02);
-      d[j + 1] = Math.min(255, v * 255);
-      d[j + 2] = Math.min(255, v * 255 * 0.96);
+      d[j] = v * 255 * 1.02;
+      d[j + 1] = v * 255;
+      d[j + 2] = v * 255 * 0.96;
       d[j + 3] = 255;
     }
   }
@@ -885,17 +1002,18 @@ function albedoTexture(h, size, tintAmount, seed) {
   return canvas;
 }
 
-/** High-frequency detail normal used by every material at ~20x tiling. */
+/** High-frequency detail normal, layered over every material at ~20x tiling. */
 function detailNormalCanvas(size) {
   const h = new Float32Array(size * size);
   const inv = 1 / size;
   for (let y = 0; y < size; y++) {
+    const v = y * inv;
     for (let x = 0; x < size; x++) {
-      const u = x * inv, v = y * inv;
+      const u = x * inv;
       h[y * size + x] =
-        fbm2(u * 34.0 + 5.5, v * 34.0 + 5.5, 3) * 0.55 +
-        valueNoise2(u * 96.0 + 1.3, v * 96.0 + 1.3) * 0.30 +
-        valueNoise2(u * 190.0 + 9.1, v * 190.0 + 9.1) * 0.15;
+        tfbm(u, v, 12, 3, 5501) * 0.52 +
+        tnoise(u * 48, v * 48, 48, 5507) * 0.30 +
+        tnoise(u * 112, v * 112, 112, 5519) * 0.18;
     }
   }
   return heightToNormalTexture(h, size, 2.2);
@@ -1048,23 +1166,23 @@ const SPECS = {
   'ground-needles': {
     color: PAL.foliageDead, roughness: 0.62, metalness: 0.0, normalScale: 1.2,
     porosity: 1.0, wetScale: 0.92, family: 'ground', uv: [1, 1],
-    detail: [16, 0.75], breakup: [0.45, 34], ao: 0.95,
+    detail: [14, 0.50], detailFade: [3.0, 18.0], breakup: [0.45, 34], ao: 0.95,
     cavity: { contrast: 1.6, bias: 0.04 },
-    triplanar: [0.42, 5.0, 1.15, 0.34],
+    triplanar: [0.42, 5.0, 0.85, 0.34],
   },
   'ground-mud': {
     color: PAL.mudDeep, roughness: 0.16, metalness: 0.0, normalScale: 1.8,
     porosity: 1.0, wetScale: 1.25, family: 'ground', uv: [1, 1],
-    detail: [20, 0.95], breakup: [0.40, 28], ao: 1.0,
+    detail: [16, 0.55], detailFade: [3.0, 16.0], breakup: [0.40, 28], ao: 1.0,
     cavity: { contrast: 1.9, bias: 0.06 },
-    triplanar: [0.55, 6.0, 1.5, 0.40],
+    triplanar: [0.55, 6.0, 1.05, 0.40],
   },
   'ground-moss': {
     color: PAL.moss, roughness: 0.72, metalness: 0.0, normalScale: 0.5,
     porosity: 0.85, wetScale: 1.05, family: 'organic', uv: [1, 1],
-    detail: [22, 0.55], breakup: [0.42, 24], ao: 0.9,
+    detail: [18, 0.45], detailFade: [3.0, 16.0], breakup: [0.42, 24], ao: 0.9,
     cavity: { contrast: 1.4, bias: 0.02 },
-    triplanar: [0.75, 4.0, 0.85, 0.30],
+    triplanar: [0.75, 4.0, 0.70, 0.30],
     translucent: [0.75, 0.42, 2.4, 0.50], transColor: 0x2c4030,
     sheen: [0.30, 0.55, PAL.moonRim], physical: true,
   },
@@ -1072,9 +1190,9 @@ const SPECS = {
     color: PAL.midStone, roughness: 0.55, metalness: 0.0, normalScale: 1.1,
     porosity: 0.55, wetScale: 1.0, family: 'stone', uv: [1, 1],
     // the sparkle survives at 20 m because the detail normal becomes roughness, not mush
-    detail: [26, 0.95], breakup: [0.30, 32], ao: 0.85,
+    detail: [22, 0.60], detailFade: [4.0, 22.0], breakup: [0.30, 32], ao: 0.85,
     cavity: { contrast: 1.7, bias: 0.0 },
-    triplanar: [0.34, 6.0, 1.1, 0.42],
+    triplanar: [0.34, 6.0, 0.90, 0.42],
   },
   'sawn-lumber': {
     // THE brightest large surface in the game. Do not weather it. ART §5.3.
@@ -1128,9 +1246,9 @@ const SPECS = {
   concrete: {
     color: PAL.concrete, roughness: 0.88, metalness: 0.0, normalScale: 1.2,
     porosity: 0.80, wetScale: 1.0, family: 'stone', uv: [1, 1],
-    detail: [22, 0.70], breakup: [0.26, 20], ao: 0.9,
+    detail: [18, 0.55], detailFade: [4.0, 20.0], breakup: [0.26, 20], ao: 0.9,
     cavity: { contrast: 1.6, bias: 0.04 },
-    triplanar: [0.55, 5.0, 1.0, 0.34],
+    triplanar: [0.55, 5.0, 0.80, 0.34],
   },
   'glass-dirty': {
     color: 0x141b1f, roughness: 0.18, metalness: 0.0, normalScale: 0.35,
@@ -1325,8 +1443,10 @@ export class Materials {
       this._textures = null;
     }
 
-    this._fallbackSize = tier(128, 192, 256, 256);
-    this._cardSize = tier(128, 256, 512, 512);
+    // Fallback maps stay modest on purpose: the detail-normal layer at ~20x tiling is what
+    // carries close-range detail, so the base maps only ever need to carry macro variation.
+    this._fallbackSize = tier(96, 128, 160, 192);
+    this._cardSize = tier(128, 256, 384, 512);
 
     // Detail normal is mandatory (effect #2), so we never depend on Textures for it.
     this._detailNormal = await this._resolveDetailNormal();
@@ -1609,7 +1729,8 @@ export class Materials {
       uWaterColor: new THREE.Uniform(new THREE.Color(PAL.waterBody)),
       uBreakup: new THREE.Uniform(new THREE.Vector2(spec.breakup?.[0] ?? 0.25, spec.breakup?.[1] ?? 26)),
       uDetailParams: new THREE.Uniform(new THREE.Vector4(
-        spec.detail?.[0] ?? 18, spec.detail?.[1] ?? 0.6, 6.0, 26.0,
+        spec.detail?.[0] ?? 18, spec.detail?.[1] ?? 0.6,
+        spec.detailFade?.[0] ?? 6.0, spec.detailFade?.[1] ?? 26.0,
       )),
       uCavityParams: new THREE.Uniform(new THREE.Vector4(
         cav.contrast ?? 1.4, cav.bias ?? 0, cav.channel ?? 0, cav.invert ? 1 : 0,
@@ -1738,8 +1859,10 @@ export class Materials {
       local.uTriAlbedo = new THREE.Uniform(textures.triAlbedo);
       local.uTriNormal = new THREE.Uniform(textures.triNormal);
       local.uTriRough = new THREE.Uniform(textures.triRough ?? textures.triNormal);
+      // NB the triplanar normal strength is authored directly — it is NOT multiplied by
+      // spec.normalScale, which would double-count and turn wet ground into specular noise.
       local.uTriParams = new THREE.Uniform(new THREE.Vector4(
-        spec.triplanar[0], spec.triplanar[1], spec.triplanar[2] * (spec.normalScale ?? 1), spec.triplanar[3],
+        spec.triplanar[0], spec.triplanar[1], spec.triplanar[2], spec.triplanar[3],
       ));
     }
 
@@ -1938,14 +2061,18 @@ uniform sampler2D uAlphaMap;
     const size = this._fallbackSize ?? 256;
     let set = null;
     try {
+      const t0 = (typeof performance !== 'undefined' ? performance.now() : 0);
       const seed = (hashStr(family) * 1000) | 0;
       const h = bakeHeight(size, cfg.kind, seed);
+      const half = halveField(h, size);
+      const hs = size >> 1;
       set = {
         map: this._makeTexture(albedoTexture(h, size, cfg.tint, seed), THREE.SRGBColorSpace),
         normal: this._makeTexture(heightToNormalTexture(h, size, 3.0), THREE.NoColorSpace),
-        rough: this._makeTexture(fieldToTexture(h, size, cfg.rough[0], cfg.rough[1], 0.85), THREE.NoColorSpace),
-        cavity: this._makeTexture(fieldToTexture(h, size, 0.08, 1.0, 1.25), THREE.NoColorSpace),
+        rough: this._makeTexture(fieldToTexture(half, hs, cfg.rough[0], cfg.rough[1], 0.85), THREE.NoColorSpace),
+        cavity: this._makeTexture(fieldToTexture(half, hs, 0.08, 1.0, 1.25), THREE.NoColorSpace),
       };
+      Log.debug(`Materials: baked '${family}' ${size}px in ${((typeof performance !== 'undefined' ? performance.now() : 0) - t0).toFixed(1)}ms`);
     } catch (e) {
       Log.warn(`Materials: fallback bakery failed for '${family}'`, e);
       set = null;
@@ -1978,7 +2105,7 @@ uniform sampler2D uAlphaMap;
       if (t) { this._configureTexture(t); return t; }
     }
     try {
-      const size = this.ctx.settings?.tier ? this.ctx.settings.tier(128, 256, 256, 512) : 256;
+      const size = this.ctx.settings?.tier ? this.ctx.settings.tier(128, 192, 256, 256) : 256;
       return this._makeTexture(detailNormalCanvas(size), THREE.NoColorSpace);
     } catch (e) {
       Log.warn('Materials: could not bake the detail normal — surfaces will lack micro relief.', e);
