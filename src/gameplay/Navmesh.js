@@ -67,6 +67,10 @@ export const NAV_TUNING = {
   costMin: 0.35,
   costMax: 24.0,
 
+  // crossings — see addBridge()
+  bridgeWidth: 1.7,            // m, walkable corridor stamped over water
+  bridgeCost: 0.75,            // cheap: it is the only way across, and everyone knows it
+
   // the plot repulsion. Routes may pass; nothing parks.
   plotKeepOut: 16.0,           // m — soft repulsion radius around the build site
   plotRepulse: 14.0,           // multiplier at the centre of the keep-out
@@ -74,9 +78,10 @@ export const NAV_TUNING = {
   structurePatrolPeriod: 110,  // s — "routes past the plot every ~110 s"
 
   // A*
-  heuristicWeight: 1.12,       // > 1: paths are near-optimal, not optimal. Deliberate — see _search.
-  heuristicUnitCost: 0.55,     // assumed per-metre cost in the heuristic
-  syncExpandCap: 26000,        // hard ceiling for a blocking findPath()
+  heuristicWeight: 1.05,       // > 1: paths are near-optimal, not optimal. Deliberate — see _step.
+  heuristicUnitCost: 0,        // 0 = derive from the baked cost field; set a number to override
+  heuristicPercentile: 0.25,   // which quantile of the cost field the heuristic assumes
+  syncExpandCap: 40000,        // hard ceiling for a blocking findPath()
   asyncExpandPerFrame: 1400,   // amortised budget for queued requests
   routeExpandPerFrame: 600,    // idle budget for pre-computing route legs
   heapCapacity: 1 << 15,
@@ -351,19 +356,17 @@ const ROUTE_DEFS = [
   {
     id: 'the-long-way-round',
     label: 'The long way round',
-    intent: 'The route that costs the player something. It leaves the lamps, follows the carved '
-      + 'trail to the draw, turns at the crossing, and comes back along the shore. Its closest '
-      + 'approach to the plot is the tension in the whole night.',
+    intent: 'The route that costs the player something. It runs the far end of the carved trail '
+      + 'network — no lamps, no company — turns at the log crossing, and comes back. Its closest '
+      + 'approach to the plot is the tension in the whole night. It is deliberately anchored on '
+      + 'the trail rather than at the camp gate, so it can be met twice in one night.',
     window: [0.18, 0.72], minNight: 1, maxNight: 7,
     preferred: ['dale', 'coop'], speed: 1.20, loop: true,
     waypoints: [
-      { anchor: 'firepit', ox: 0, oz: 0, dwell: 5, note: '' },
-      { anchor: 'latrine', ox: 6, oz: -6, dwell: 3, note: '' },
+      { anchor: 'trail-mid', ox: 0, oz: 0, dwell: 6, note: 'stops where the trail bends' },
       { anchor: 'draw', ox: 0, oz: 0, dwell: 10, note: 'stands on the log crossing, listening' },
       { anchor: 'plot-approach', ox: 0, oz: 0, dwell: 6, note: 'turns here. Does not go further.' },
-      { anchor: 'draw', ox: 4, oz: 3, dwell: 0, note: '' },
-      { anchor: 'shore', ox: -8, oz: 0, dwell: 4, note: '' },
-      { anchor: 'dock', ox: -3, oz: 2, dwell: 5, note: '' },
+      { anchor: 'draw', ox: 4, oz: 3, dwell: 4, note: '' },
     ],
   },
   {
@@ -448,6 +451,7 @@ export class Navmesh {
 
     this._regionSizes = null;
     this._mainRegion = 0;
+    this._hUnit = 1;             // per-metre cost the A* heuristic assumes; derived in _bakeCost
 
     // ---- A* ----
     this._sync = null;
@@ -481,6 +485,8 @@ export class Navmesh {
     this.patrolRoutes = [];
     this.rallyPoints = [];
     this.hasStructurePatrol = false;
+    /** Walkable strips stamped over water — the log at the draw, plus anything addBridge() adds. */
+    this.bridges = [];
 
     // ---- light sources feeding the lit-area cost field ----
     this._lights = [];
@@ -537,6 +543,7 @@ export class Navmesh {
       this._sampleTerrain();
       this._bakeStaticColliders();
       this._bakeCost();
+      this._bakeCrossings();
       this._markEdges();
       this._computeRegions();
     } catch (e) {
@@ -611,6 +618,7 @@ export class Navmesh {
     this._region.fill(1);
     this._regionSizes = [0, this.cells];
     this._mainRegion = 1;
+    this._hUnit = 1;
     this.stats.walkable = this.cells;
     this.stats.regions = 1;
   }
@@ -852,7 +860,9 @@ export class Navmesh {
     const maxSlopeTan = Math.tan(NAV_TUNING.maxSlopeDeg * Math.PI / 180);
     const inv2c = 1 / (2 * c);
     const T = NAV_TUNING;
-    let walkable = 0, blocked = 0;
+    let walkable = 0, blocked = 0, costSum = 0;
+    const HIST_N = 256, HIST_MAX = 8;
+    const hist = new Int32Array(HIST_N);
 
     for (let j = 0, i = 0; j < d; j++) {
       const z = oz + j * c;
@@ -882,13 +892,125 @@ export class Navmesh {
         cost *= 1 + T.wetPenalty * wet;
 
         cost = clamp(cost, T.costMin, T.costMax);
+        costSum += cost;
+        hist[Math.min(HIST_N - 1, (cost / HIST_MAX * HIST_N) | 0)]++;
         C[i] = Math.min(65534, Math.round(cost * 256));
       }
     }
 
     this.stats.walkable = walkable;
     this.stats.blocked = blocked;
+
+    // The heuristic's assumed per-metre cost, and the one number that decides whether this file
+    // needs a worker. Scale the octile distance by the *minimum* cost and the heuristic is
+    // admissible, A* degenerates toward Dijkstra, and a 214 m walk expands 26 000 nodes. Scale it
+    // by the mean and the search goes greedy — 20x fewer expansions, but paths came out 64%
+    // long, which reads as a camper wandering. The low quartile is the balance: admissible
+    // almost everywhere except on the discounted trails, where a slightly long route is
+    // indistinguishable from a person taking the path because it is the path.
+    const mean = walkable > 0 ? costSum / walkable : 1;
+    let target = Math.max(1, Math.floor(walkable * clamp01(T.heuristicPercentile)));
+    let acc = 0, q = 1;
+    for (let b = 0; b < HIST_N; b++) {
+      acc += hist[b];
+      if (acc >= target) { q = (b + 0.5) / HIST_N * HIST_MAX; break; }
+    }
+    this._hUnit = T.heuristicUnitCost > 0 ? T.heuristicUnitCost : clamp(q, 0.25, 4.0);
+    this.stats.meanCost = mean;
+    this.stats.hUnit = this._hUnit;
     this._cacheVersion++;
+  }
+
+  // ------------------------------------------------------------------------------------ bridges
+
+  /**
+   * Terrain's stream is a wall: every cell in it is water, so the grid cuts the map in two along
+   * it. Terrain also publishes exactly one way across — `logCrossing`, the fallen trunk at the
+   * draw. Without stamping it, the shortest walk from the camp to the draw is 392 m around the
+   * headwaters instead of 219 m along the carved trail, and the chokepoint the whole west half of
+   * the map hangs on does not exist. This puts it back.
+   */
+  _bakeCrossings() {
+    const t = this._terrain;
+    const L = t?.logCrossing;
+    if (!L?.position || !L?.direction) return;
+    const half = (L.length ?? 7.4) * 0.5 + 1.5;   // overshoot so both banks are reached
+    const dx = L.direction.x, dz = L.direction.z;
+    const inv = Math.hypot(dx, dz) || 1;
+    const ax = L.position.x - (dx / inv) * half;
+    const az = L.position.z - (dz / inv) * half;
+    const bx = L.position.x + (dx / inv) * half;
+    const bz = L.position.z + (dz / inv) * half;
+    const n = this.addBridge(
+      { x: ax, y: L.position.y, z: az },
+      { x: bx, y: L.position.y, z: bz },
+      NAV_TUNING.bridgeWidth, NAV_TUNING.bridgeCost, false,
+    );
+    Log.debug(`Navmesh: log crossing at the draw stamped over ${n} cells.`);
+  }
+
+  /**
+   * Make a strip of ground walkable regardless of what is under it — a log over a stream, a dock
+   * deck over water, a plank the player laid down. `Props`/`CabinSite` may call this after init.
+   *
+   * @param {{x,y,z}} a @param {{x,y,z}} b end points (y is the walking surface height)
+   * @param {number} [width] corridor width in metres
+   * @param {number} [cost] traversal cost multiplier for the strip
+   * @param {boolean} [rebuild] recompute connectivity now (default true; init batches instead)
+   * @returns {number} cells stamped
+   */
+  addBridge(a, b, width = NAV_TUNING.bridgeWidth, cost = NAV_TUNING.bridgeCost, rebuild = true) {
+    if (!this._flags || !a || !b) return 0;
+    const halfW = Math.max(this.cell * 0.6, width * 0.5);
+    const minX = Math.min(a.x, b.x) - halfW, maxX = Math.max(a.x, b.x) + halfW;
+    const minZ = Math.min(a.z, b.z) - halfW, maxZ = Math.max(a.z, b.z) + halfW;
+    const i0 = this._clampIX(Math.floor((minX - this.originX) * this.invCell));
+    const i1 = this._clampIX(Math.ceil((maxX - this.originX) * this.invCell));
+    const j0 = this._clampIZ(Math.floor((minZ - this.originZ) * this.invCell));
+    const j1 = this._clampIZ(Math.ceil((maxZ - this.originZ) * this.invCell));
+
+    const ex = b.x - a.x, ez = b.z - a.z;
+    const elen2 = ex * ex + ez * ez || 1;
+    const ay = a.y ?? 0, by = b.y ?? ay;
+    const costFixed = Math.min(65534, Math.round(clamp(cost, NAV_TUNING.costMin, NAV_TUNING.costMax) * 256));
+    const halfW2 = halfW * halfW;
+    let stamped = 0;
+
+    for (let j = j0; j <= j1; j++) {
+      const z = this.originZ + (j + 0.5) * this.cell;
+      const base = j * this.width;
+      for (let i = i0; i <= i1; i++) {
+        const x = this.originX + (i + 0.5) * this.cell;
+        let s = ((x - a.x) * ex + (z - a.z) * ez) / elen2;
+        s = clamp01(s);
+        const px = a.x + ex * s, pz = a.z + ez * s;
+        const ddx = x - px, ddz = z - pz;
+        if (ddx * ddx + ddz * ddz > halfW2) continue;
+        const idx = base + i;
+        this._flags[idx] = (this._flags[idx] & ~(F_WATER | F_STEEP | F_BLOCKED)) | F_OPEN | F_PATH;
+        this._build[idx] = 0;
+        this._cost[idx] = costFixed;
+        // The deck only lifts you where the ground has fallen away beneath it. A log beds into
+        // its banks; walking onto one should not be a step up onto air.
+        const deck = lerp(ay, by, s);
+        if (deck > this._height[idx]) this._height[idx] = deck;
+        stamped++;
+      }
+    }
+
+    if (stamped) {
+      this.bridges.push({
+        ax: a.x, az: a.z, bx: b.x, bz: b.z, halfW2, ay, by,
+        ex, ez, elen2,
+      });
+    }
+
+    if (stamped && rebuild) {
+      this._markEdges();
+      this._computeRegions();
+      this._invalidateCache();
+    }
+    return stamped;
   }
 
   _markEdges() {
@@ -995,6 +1117,11 @@ export class Navmesh {
           }
           break;
         }
+        case 'trail-mid': {
+          const p = this._pathAnchor('camp-draw', 0.55) ?? this._pathAnchor('camp-latrine', 0.9);
+          if (p) return p;
+          break;
+        }
         default: break;
       }
     }
@@ -1005,6 +1132,23 @@ export class Navmesh {
     const doc = DOC_ANCHORS[name];
     if (doc) return new THREE.Vector3(doc[0], 0, doc[1]);
     return null;
+  }
+
+  /**
+   * A point at parameter `t` (0..1) along one of the trails Terrain carved. Patrol loops that
+   * turn on the trail network rather than at the camp gate stay short enough to be met twice in
+   * a night, which is what makes them a patrol rather than a procession.
+   * @returns {THREE.Vector3|null}
+   */
+  _pathAnchor(pathId, t) {
+    const paths = this._terrain?.paths;
+    if (!Array.isArray(paths)) return null;
+    const p = paths.find((x) => x?.id === pathId);
+    if (!p?.points?.length) return null;
+    const i = clamp(Math.round((p.points.length - 1) * clamp01(t)), 0, p.points.length - 1);
+    const pt = p.points[i];
+    if (!pt || !Number.isFinite(pt.x)) return null;
+    return new THREE.Vector3(pt.x, this.heightAt(pt.x, pt.z), pt.z);
   }
 
   /**
@@ -1057,22 +1201,47 @@ export class Navmesh {
       return new THREE.Vector3(d.x - _right.x * 18 - _fwd.x * 2, 0, d.z - _right.z * 18 - _fwd.z * 2);
     }
     if (name === 'shore-west') {
+      // Must actually be on the waterline. Interpolating toward the plot walks over the ridge,
+      // so march along the lake edge instead: pick the longitude, then find the water.
       const shore = this.anchors.get('shore') ?? d;
       const plot = this.anchors.get('plot');
-      if (plot) {
-        // A point on the waterline roughly two thirds of the way toward the plot's longitude.
-        return new THREE.Vector3(lerp(shore.x, plot.x, 0.62), 0, lerp(shore.z, plot.z, 0.28));
-      }
-      return new THREE.Vector3(shore.x - _right.x * 60, 0, shore.z - _right.z * 60);
+      const x = plot ? lerp(shore.x, plot.x, 0.55) : shore.x - _right.x * 60;
+      return this._waterlinePoint(x, shore.z);
     }
     return null;
+  }
+
+  /**
+   * Walk in Z from `startZ` until the ground meets the lake, then step back onto dry land. Both
+   * directions are tried, nearest wins; if neither finds water the start point is returned.
+   */
+  _waterlinePoint(x, startZ) {
+    const t = this._terrain;
+    const wl = t?.waterLevel ?? 0;
+    const minZ = this.bounds.minZ + 2, maxZ = this.bounds.maxZ - 2;
+    let best = null, bestD = Infinity;
+    for (const dir of [-1, 1]) {
+      let z = startZ;
+      for (let s = 0; s < 220; s++) {
+        z += dir * 2;
+        if (z < minZ || z > maxZ) break;
+        if (this.heightAt(x, z) < wl + 0.25) {
+          const land = z - dir * 3.5;
+          const d = Math.abs(land - startZ);
+          if (d < bestD) { bestD = d; best = land; }
+          break;
+        }
+      }
+    }
+    const z = best ?? startZ;
+    return new THREE.Vector3(x, this.heightAt(x, z), z);
   }
 
   _buildAnchors() {
     this.anchors.clear();
     // Order matters: 'camp' and 'dock' define the local frame the derived anchors use.
     const order = [
-      'plot', 'camp', 'dock', 'shore', 'latrine', 'draw', 'ridge',
+      'plot', 'camp', 'dock', 'shore', 'latrine', 'draw', 'ridge', 'trail-mid',
       'firepit', 'mess', 'cabins', 'office', 'toolshed', 'woodpile',
       'canoe-rack', 'boathouse', 'shore-west',
     ];
@@ -1103,8 +1272,11 @@ export class Navmesh {
     const plot = this.anchors.get('plot');
     const draw = this.anchors.get('draw') ?? this.anchors.get('camp');
     if (plot && draw) {
+      // 26 m: an ordinary patrol turns here, close enough to hear a mallet, too far to read a
+      // silhouette. 12 m: a structure patrol stops here — outside the 14 x 10 m footprint, and
+      // near enough that the thing is unmistakably a building.
       this.anchors.set('plot-approach', this._pointToward(plot, draw, NAV_TUNING.plotKeepOut + 10));
-      this.anchors.set('plot-watch', this._pointToward(plot, draw, NAV_TUNING.plotKeepOut + 1.5));
+      this.anchors.set('plot-watch', this._pointToward(plot, draw, NAV_TUNING.plotKeepOut * 0.75));
     }
 
     // Rally points — GAME_DESIGN §9.7: an Alerted camper runs to the nearest one.
@@ -1418,15 +1590,29 @@ export class Navmesh {
   /**
    * Nearest graph node to a position. Returns a POOLED record — copy what you need immediately;
    * the eighth subsequent call overwrites it (same convention as Physics's Hit records).
+   *
+   * A position out in the lake or inside a trunk snaps to the closest walkable cell within
+   * `searchRadius`. Check `node.index >= 0`: -1 means there is genuinely no ground within reach,
+   * and the record's x/y/z then hold the query position unchanged.
+   *
    * @param {THREE.Vector3|{x:number,z:number}} position
+   * @param {number} [searchRadius] metres, default 48
    * @returns {object} node
    */
-  nearestNode(position) {
+  nearestNode(position, searchRadius = 48) {
     const n = nextNode();
-    if (!position || !this._flags) { n.index = -1; return n; }
+    if (!position || !this._flags) {
+      n.index = -1; n.walkable = false;
+      n.x = position?.x ?? 0; n.z = position?.z ?? 0; n.y = 0;
+      return n;
+    }
     let idx = this.indexAt(position.x, position.z);
-    if (idx < 0 || !this._open(idx)) idx = this._nearestWalkable(position.x, position.z, 24, false);
-    if (idx < 0) { n.index = -1; n.walkable = false; return n; }
+    if (idx < 0 || !this._open(idx)) idx = this._nearestWalkable(position.x, position.z, searchRadius, false);
+    if (idx < 0) {
+      n.index = -1; n.walkable = false;
+      n.x = position.x; n.z = position.z; n.y = this.heightAt(position.x, position.z);
+      return n;
+    }
     this._fillNode(n, idx);
     return n;
   }
@@ -1482,6 +1668,22 @@ export class Navmesh {
       if (best >= 0) return best;
     }
     return -1;
+  }
+
+  /**
+   * True when a point is on a stamped crossing rather than on the ground — the log at the draw,
+   * a deck, a laid plank. Worth knowing: it is a chokepoint, the footstep is wood, and the
+   * ground below is water.
+   */
+  isBridge(x, z) {
+    for (let i = 0; i < this.bridges.length; i++) {
+      const b = this.bridges[i];
+      let s = ((x - b.ax) * b.ex + (z - b.az) * b.ez) / b.elen2;
+      s = clamp01(s);
+      const dx = x - (b.ax + b.ex * s), dz = z - (b.az + b.ez * s);
+      if (dx * dx + dz * dz <= b.halfW2) return true;
+    }
+    return false;
   }
 
   /** Baked lamp/fire illumination, 0..1. Campers may use it as a "would I stand here" proxy. */
@@ -1887,7 +2089,7 @@ export class Navmesh {
     const gen = ws.gen;
     const goal = ws.goal;
     const cell = this.cell, diag = this.cellDiag;
-    const hw = NAV_TUNING.heuristicWeight * NAV_TUNING.heuristicUnitCost;
+    const hw = NAV_TUNING.heuristicWeight * (this._hUnit || 1);
     const hasMods = this._mods.length > 0;
     const litW = NAV_TUNING.litDiscount;
     const LT = this._lit;
@@ -2576,7 +2778,9 @@ export class Navmesh {
     this._anchorOverrides.clear();
     this.patrolRoutes.length = 0;
     this.rallyPoints.length = 0;
+    this.bridges.length = 0;
     this._lights.length = 0;
+    this._vecPool.length = 0;
 
     this._flags = null; this._cost = null; this._lit = null;
     this._region = null; this._height = null; this._build = null;

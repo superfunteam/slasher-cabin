@@ -623,6 +623,8 @@ export class Weather {
   setNight(n) {
     const night = clamp(Math.round(Number(n) || 1), 1, 7);
     this.night = night;
+    // A new night is not an external override of the old one.
+    this.clearPins();
     const base = NIGHT_WEATHER[night - 1] ?? NIGHT_WEATHER[0];
 
     // Script.js wins on the numbers it publishes (it is the data layer other agents read);
@@ -673,18 +675,29 @@ export class Weather {
     this._windAngle = this._rand.range(0, Math.PI * 2);
 
     this._buildFronts();
+    this.strikeCount = 0;
     this._scheduleStrikes();
     this._resetLightning();
     this._applyProfileAt(0);
 
-    // Snap, not fade: a night begins in its own weather.
+    // Snap, not fade: a night begins in its own weather, evaluated at t = 0 rather than
+    // inheriting whatever the previous night happened to end on.
+    const floor0 = this._active.rain * TUNING.rainFloorFraction;
+    this._rainTarget = this._active.rain <= 0.001
+      ? 0
+      : clamp01(floor0 + (this._active.rain - floor0) * this._frontEnvelope);
     this.rain = this._rainTarget;
     this.windStrength = this._active.wind;
+    this.windLoad = this._active.wind;
     this.fog = this._active.fog;
     this.wetness = clamp01(TUNING.wetFloor + this.rain * (1 - TUNING.wetFloor) * 1.35);
+    this.rainAccum = this.rain * 0.05;
     this._scheduleNextGust(0);
     this._applyFogProfile(true);
-    this._emitChange(true);
+
+    // Record the snap as ours, or _adoptPins() will read it as somebody pinning the night.
+    this._publish();
+    this._emitChange();
   }
 
   _scriptProfile(night) {
@@ -775,6 +788,11 @@ export class Weather {
     const r = this._rand;
     this._strikeTimes.length = 0;
     this._strikeCursor = 0;
+    // Clear any flash still pending from the previous night, or Night Six — which has no
+    // strikes at all and whose entire design is that nothing covers you — inherits one.
+    this._nextFlashAt = Infinity;
+    this._preflickerAt = Infinity;
+    this._refreshCountdown();
     const n = this._profile.strikes | 0;
     if (n <= 0) return;
 
@@ -823,6 +841,7 @@ export class Weather {
     }
     this._nextFlashAt = this._strikeTimes.length ? this._strikeTimes[0] : Infinity;
     this._armPreflicker();
+    this._refreshCountdown();
   }
 
   _resetLightning() {
@@ -851,11 +870,10 @@ export class Weather {
     this._simLightning(dt);
     this._simWetness(dt);
 
-    this.isStorming = (this._profile.strikes > 0)
-      && (this.rain > 0.30 || this.windStrength > 0.55)
-      && (this._strikeCursor < this._strikeTimes.length
-          || this._rollEndsAt > this._t
-          || Number.isFinite(this._thunderAt));
+    // A storm is still a storm after its last strike. It stops being one when the rain and the
+    // wind stop, which on Night 7 happens at t = 0.80 and is the whole point of Night 7.
+    this.isStorming = (this._active.strikes > 0)
+      && (this.rain > 0.30 || this.windStrength > 0.55);
 
     // Re-apply pins so a pinned value survives the simulation, then record what the simulation
     // produced. _adoptPins() compares against this to tell an external write from our own.
@@ -1017,7 +1035,9 @@ export class Weather {
     // outlive the weather that made them, which is the whole point of the detail.
     const tau = this.rain > this._dripCharge ? TUNING.dripChargeTau : TUNING.dripDrainTau;
     this._dripCharge += (this.rain - this._dripCharge) * (1 - Math.exp(-dt / tau));
-    if (this._dripCharge < 0.0008) this._dripCharge = 0;
+    // Only snap to zero once the sky is actually dry — a floor applied while charging clamps
+    // the reservoir to nothing on every 1/60 s step and the canopy never gets wet at all.
+    if (this._dripCharge < 0.0008 && this.rain < 0.0008) this._dripCharge = 0;
   }
 
   _simFog(dt, t01) {
@@ -1124,8 +1144,13 @@ export class Weather {
     this.maskLevel.value = level;
     this.maskLevelValue = level;
 
-    // --- countdown
-    const next = Number.isFinite(this._nextFlashAt) ? Math.max(0, this._nextFlashAt - now) : Infinity;
+    this._refreshCountdown();
+  }
+
+  /** Republish the public countdown. Called whenever `_nextFlashAt` moves, not just per step. */
+  _refreshCountdown() {
+    const next = Number.isFinite(this._nextFlashAt)
+      ? Math.max(0, this._nextFlashAt - this._t) : Infinity;
     this.nextStrikeIn.value = next;
     this.secondsToNextStrike = next;
   }
@@ -1153,6 +1178,7 @@ export class Weather {
       ? this._strikeTimes[this._strikeCursor]
       : Infinity;
     this._armPreflicker();
+    this._refreshCountdown();
   }
 
   _commitStrike(now, distanceKm) {
@@ -1246,6 +1272,7 @@ export class Weather {
     const at = now + this._rand.range(6, TUNING.coverWindow - 4);
     this._nextFlashAt = at;
     this._armPreflicker();
+    this._refreshCountdown();
     Log.debug(`Weather: cover requested — inserting a strike in ${(at - now).toFixed(1)} s.`);
   }
 
@@ -1305,6 +1332,7 @@ export class Weather {
     if (opts.immediate === false) {
       this._nextFlashAt = this._t + Math.max(0.1, opts.inSeconds ?? 3);
       this._armPreflicker();
+      this._refreshCountdown();
       return;
     }
     this._commitStrike(this._t, km);

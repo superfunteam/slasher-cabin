@@ -475,7 +475,8 @@ export class Player {
     this._setDownHeld = 0;
     this._lanternHeld = 0;
     this._lanternHooded = false;
-    this._interactWasDown = false;
+    this._interactHeldAtRelease = 0;
+    this._surfaceTick = 0;
 
     this._prevEye = new THREE.Vector3(0, T.standEye, 6);
     this._currEye = new THREE.Vector3(0, T.standEye, 6);
@@ -1129,7 +1130,6 @@ export class Player {
       this._onInteractRelease(held);
     }
     this._interactHeldAtRelease = this.interactHold;
-    this._interactWasDown = interactDown;
 
     // ---------------------------------------------------------------- drop / set down
     // GAME_DESIGN §4.1: a TAP drops — instant, and a 40 m broadcast at class D. A 2.1 s HOLD sets

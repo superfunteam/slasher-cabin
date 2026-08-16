@@ -665,12 +665,19 @@ Surf S(vec2 uv, float h, float ao, vec3 n) {
 // keeps them tileable).  ART_DIRECTION §5.3: this is the brightest large surface in the game.
 M['sawn-lumber'] = /* glsl */`
 float ringField(vec2 uv, out float knotM, out float knotR) {
-  // arc(uv.x) is period-1, so |uv.y - arc| tiles in both axes.
+  // arc(uv.x) is period-1, so the ring centre tiles along x.
   float arc = 0.5
             + 0.20 * sin(uv.x * TAU)
             + 0.07 * sin(uv.x * TAU * 2.0 + 1.1)
             + 0.09 * (fbm(uv * vec2(3.0, 1.0), vec2(3.0, 1.0), 3, 0.6) - 0.5);
-  float d = abs(uv.y - arc);
+  // Measure to the arc the SHORT way around the torus. A plain abs(uv.y - arc) is not
+  // periodic in y: it reads arc at the bottom edge and 1.0 - arc at the top, so it steps
+  // by |1 - 2*arc| (up to 0.54) across the wrap. fract(d * 26.0) multiplies that into a
+  // hard ring-phase mismatch -- a 12-level seam along every board's y wrap.
+  // Ring density is unchanged: d still sweeps 0 -> 0.5 -> 0 over one period.
+  float dy = uv.y - arc;
+  dy -= floor(dy + 0.5);        // -> [-0.5, 0.5], period 1 in uv.y
+  float d = abs(dy);
   Cell k = worley(uv * vec2(3.0, 3.0), vec2(3.0, 3.0), 0.9);
   knotM = step(0.82, k.id) * exp(-k.f1 * k.f1 * 30.0);
   knotR = k.f1;

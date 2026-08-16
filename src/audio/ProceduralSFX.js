@@ -244,13 +244,27 @@ export function noiseSrc(R, type, t0, dur, { rate = 1, detuneCents = 0 } = {}) {
 }
 
 /**
+ * One long-running noise source per (render, type), gated per grain. A dense grain train
+ * would otherwise allocate a BufferSource per grain, which is what makes an offline render
+ * slow. Grains still land on different parts of the bed, so they stay decorrelated.
+ */
+function sharedNoise(R, type) {
+  if (!R._shared) R._shared = {};
+  let s = R._shared[type];
+  if (!s) {
+    s = noiseSrc(R, type, 0, R.ctx.length / R.sr + 0.05, {});
+    R._shared[type] = s;
+  }
+  return s;
+}
+
+/**
  * A shaped noise burst. Transients are made by a 1–2 ms *source*, never by a 0 ms envelope
  * (§9.2.2) — the ramp here is only steep enough to avoid a DC step.
  */
 export function burst(R, t0, durSec, peak = 1, type = 'white') {
   const g = R.ctx.createGain();
-  const s = noiseSrc(R, type, t0, durSec, {});
-  s.connect(g);
+  sharedNoise(R, type).connect(g);
   const p = g.gain;
   const atk = Math.min(0.0006, durSec * 0.3);
   p.setValueAtTime(0, t0);
@@ -707,8 +721,8 @@ function buildLumberHoist(R, dest) {
 }
 
 function buildLumberDrag(R, dest) {
-  // A 3 s loopable scrape at a nominal speed; AudioEngine rides gain + a speed-tracking LPF.
-  const dur = 3.2;
+  // A loopable scrape at a nominal speed; AudioEngine rides gain + a speed-tracking LPF.
+  const dur = R.ctx.length / R.sr;
   const lp = biquad(R, 'lowpass', 1400, 0.8);
   const out = gain(R, dbToGain(-8));
   lp.connect(out); out.connect(dest);
@@ -722,7 +736,7 @@ function buildLumberDrag(R, dest) {
   const scrape = gain(R, dbToGain(-10));
   scrape.connect(lp);
   grainTrain(R, {
-    t0: 0.01, dur: dur - 0.02, rate: 85, jitter: 0.9, max: 340,
+    t0: 0.01, dur: dur - 0.02, rate: 85, jitter: 0.9, max: 200,
     spawn: (t) => pingGrain(R, scrape, t, {
       f: 2200 * R.rand.range(0.7, 1.5), Q: 5, dur: 0.006, decay: 0.02, level: R.rand.range(0.3, 1),
     }),
@@ -1184,7 +1198,7 @@ function buildWoodSplitAt(R, dest, at) {
 // ================================================================ §4.12–4.15 WEATHER
 
 function buildRainLeaves(R, dest) {
-  const dur = 5.2;
+  const dur = R.ctx.length / R.sr;
   const bp = biquad(R, 'bandpass', 1900, 0.55);
   const hs = biquad(R, 'highshelf', 7000, 0.7, -4);
   const bg = gain(R, dbToGain(-6));
@@ -1199,7 +1213,7 @@ function buildRainLeaves(R, dest) {
   }
   const gr = gain(R, dbToGain(-14)); gr.connect(dest);
   grainTrain(R, {
-    t0: 0.005, dur: dur - 0.01, rate: 240, jitter: 1.0, max: R.tierMax ?? 700,
+    t0: 0.005, dur: dur - 0.01, rate: 240, jitter: 1.0, max: Math.min(R.tierMax ?? 400, 420),
     spawn: (tt) => pingGrain(R, gr, tt, {
       f: 2600 * R.rand.range(0.5, 1.8), Q: 2.4, dur: 0.004, decay: 0.012,
       level: R.rand.range(0.3, 1),
@@ -1208,7 +1222,7 @@ function buildRainLeaves(R, dest) {
 }
 
 function buildRainTin(R, dest) {
-  const dur = 5.2;
+  const dur = R.ctx.length / R.sr;
   const hp = biquad(R, 'highpass', 1400, 0.7);
   const bp = biquad(R, 'bandpass', 4200, 0.7);
   const bg = gain(R, dbToGain(-4));
@@ -1217,7 +1231,7 @@ function buildRainTin(R, dest) {
   // Pitched pings, not noise. This is why tin rain is unmistakable.
   const gr = gain(R, dbToGain(-12)); gr.connect(dest);
   grainTrain(R, {
-    t0: 0.005, dur: dur - 0.01, rate: 300, jitter: 1.0, max: R.tierMax ?? 700,
+    t0: 0.005, dur: dur - 0.01, rate: 300, jitter: 1.0, max: Math.min(R.tierMax ?? 400, 460),
     spawn: (tt) => {
       const r = R.rand.range(0.85, 1.2);
       modal(R, burst(R, tt, 0.0004, 1, 'white'), [
@@ -1229,7 +1243,7 @@ function buildRainTin(R, dest) {
 }
 
 function buildRainWater(R, dest) {
-  const dur = 5.2;
+  const dur = R.ctx.length / R.sr;
   const lp = biquad(R, 'lowpass', 900, 0.7);
   const bg = gain(R, dbToGain(-8));
   noiseSrc(R, 'pink', 0, dur).connect(lp);
@@ -1259,7 +1273,7 @@ function buildRainWater(R, dest) {
 function buildWindPines(R, dest) {
   // A loopable banded bed with independently drifting formants. AudioEngine layers a live
   // band model on top of this; the bed guarantees motion even on `low`.
-  const dur = 8.4;
+  const dur = R.ctx.length / R.sr;
   const bands = [
     { f: 380, Q: 0.75, base: 1.0 },
     { f: 1150, Q: 1.10, base: 0.62 },
@@ -1375,7 +1389,7 @@ function rumble(R, dest, t0, dur, fc, peak) {
 }
 
 function buildCampfire(R, dest) {
-  const dur = 6.2;
+  const dur = R.ctx.length / R.sr;
   const lp = biquad(R, 'lowpass', 520, 0.7);
   const bg = gain(R, dbToGain(-8));
   noiseSrc(R, 'brown', 0, dur).connect(lp);
@@ -1422,7 +1436,7 @@ function buildCampfirePop(R, dest) {
 }
 
 function buildWaterLap(R, dest) {
-  const dur = 5.6;
+  const dur = R.ctx.length / R.sr;
   const lp = biquad(R, 'lowpass', 700, 0.6);
   const bg = gain(R, dbToGain(-16));
   noiseSrc(R, 'brown', 0, dur).connect(lp);
@@ -1526,7 +1540,7 @@ function buildGlassPing(R, dest) {
 }
 
 function buildLanternHiss(R, dest) {
-  const dur = 4.2;
+  const dur = R.ctx.length / R.sr;
   const bp = biquad(R, 'bandpass', 2350, 0.85);
   const hs = biquad(R, 'highshelf', 6000, 0.7, -8);
   const out = gain(R, 0.7);
@@ -1621,7 +1635,7 @@ function buildCricketChirp(R, dest) {
 }
 
 function buildCricketWash(R, dest) {
-  const dur = 4.2;
+  const dur = R.ctx.length / R.sr;
   const bp = biquad(R, 'bandpass', 4600, 3.5);
   const out = gain(R, 0.5);
   noiseSrc(R, 'pink', 0, dur).connect(bp);
@@ -1781,7 +1795,7 @@ const BREATH_STATES = {
 
 function breathRecipes(out) {
   for (const [state, s] of Object.entries(BREATH_STATES)) {
-    const core = state === 'calm' || state === 'walk';
+    const core = state === 'calm';
     out[`breath.${state}.in`] = {
       dur: s.inDur + 0.15, v: 3, family: 'breath', priority: 3, peakDb: -12, half: true,
       phase: core ? 0 : 1,
@@ -1809,7 +1823,7 @@ function creakRecipes(out) {
         priority: tier >= 2 ? 3 : 2,
         peakDb: [-30, -20, -12, -8][tier - 1],
         // The medium member is the one the player hears most, so it is the one we pre-warm.
-        phase: si === 1 && tier <= 3 ? 0 : 1,
+        phase: si === 1 && tier >= 2 && tier <= 3 ? 0 : 1,
         build: (R, d) => buildCreak(R, d, { tier, size: CREAK_SIZES[si] }),
       };
     }
@@ -1838,19 +1852,19 @@ export const RECIPES = creakRecipes(breathRecipes({
     dur: 3.2, v: 2, family: 'build', priority: 2, peakDb: -20, phase: 1, loop: true, xfade: 0.4,
     build: buildLumberDrag,
   },
-  'lumber.drop': { dur: 0.85, v: 4, family: 'build', priority: 2, peakDb: -9, phase: 0, build: buildLumberDrop },
+  'lumber.drop': { dur: 0.85, v: 4, family: 'build', priority: 2, peakDb: -9, phase: 1, build: buildLumberDrop },
   'lumber.knock': { dur: 0.4, v: 5, family: 'build', priority: 2, peakDb: -16, phase: 1, build: buildLumberKnock },
 
   // ---- tools
   'hammer.wood': {
-    dur: 0.42, v: 4, family: 'hammer', priority: 2, peakDb: -13, phase: 0,
+    dur: 0.42, v: 4, family: 'hammer', priority: 2, peakDb: -13, phase: 1,
     // Variant index doubles as the strike index: the nail's pitch rises 4% per strike.
     build: (R, d, p) => buildHammerWood(R, d, p), params: (i) => ({ strike: i }),
   },
-  'hammer.steel': { dur: 2.1, v: 3, family: 'hammer', priority: 2, peakDb: -7, phase: 0, build: buildHammerSteel },
+  'hammer.steel': { dur: 2.1, v: 3, family: 'hammer', priority: 2, peakDb: -7, phase: 1, build: buildHammerSteel },
   'bracket.drop.rock': { dur: 1.3, v: 3, family: 'build', priority: 2, peakDb: -18, phase: 1, build: buildBracketDropRock },
   'screw.torque': { dur: 2.4, v: 3, family: 'build', priority: 2, peakDb: -20, phase: 1, build: buildScrewTorque },
-  'screw.seat': { dur: 0.3, v: 3, family: 'build', priority: 3, peakDb: -16, phase: 0, build: buildScrewSeat },
+  'screw.seat': { dur: 0.3, v: 3, family: 'build', priority: 3, peakDb: -16, phase: 1, build: buildScrewSeat },
   'screw.strip': { dur: 0.6, v: 2, family: 'build', priority: 2, peakDb: -18, phase: 1, build: buildScrewStrip },
   'wood.split': { dur: 1.3, v: 3, family: 'build', priority: 3, peakDb: -5, phase: 1, build: buildWoodSplit },
   'nail.pull': { dur: 0.75, v: 3, family: 'build', priority: 2, peakDb: -14, phase: 1, build: buildNailPull },
@@ -1862,8 +1876,8 @@ export const RECIPES = creakRecipes(breathRecipes({
   },
 
   // ---- weather (loops are seam-crossfaded; AudioEngine rides their gain from weather:change)
-  'rain.leaves': { dur: 5.2, ch: 2, half: true, v: 2, family: 'ambience', priority: 0, peakDb: -6, phase: 1, loop: true, build: buildRainLeaves },
-  'rain.tin': { dur: 5.2, ch: 2, half: true, v: 2, family: 'ambience', priority: 0, peakDb: -6, phase: 1, loop: true, build: buildRainTin },
+  'rain.leaves': { dur: 4.6, ch: 2, half: true, v: 1, family: 'ambience', priority: 0, peakDb: -6, phase: 1, loop: true, build: buildRainLeaves },
+  'rain.tin': { dur: 4.6, ch: 2, half: true, v: 1, family: 'ambience', priority: 0, peakDb: -6, phase: 1, loop: true, build: buildRainTin },
   'rain.water': { dur: 5.2, ch: 2, half: true, v: 1, family: 'ambience', priority: 0, peakDb: -8, phase: 1, loop: true, build: buildRainWater },
   'wind.pines': { dur: 8.4, ch: 2, half: true, v: 2, family: 'ambience', priority: 0, peakDb: -6, phase: 1, loop: true, xfade: 0.6, build: buildWindPines },
   'wind.gust': { dur: 5.5, ch: 2, half: true, v: 2, family: 'ambience', priority: 1, peakDb: -10, phase: 1, build: buildWindGust },
@@ -1877,7 +1891,7 @@ export const RECIPES = creakRecipes(breathRecipes({
   'campfire.pop': { dur: 0.4, v: 4, family: 'ambience', priority: 1, peakDb: -18, phase: 1, build: buildCampfirePop },
   'water.lap': { dur: 5.6, ch: 2, half: true, v: 1, family: 'ambience', priority: 0, peakDb: -12, phase: 1, loop: true, build: buildWaterLap },
   'zipper': { dur: 1.1, v: 3, family: 'camper', priority: 2, peakDb: -16, phase: 1, build: buildZipper },
-  'click.flashlight.on': { dur: 0.3, v: 3, family: 'camper', priority: 2, peakDb: -14, phase: 0, build: (R, d) => buildClick(R, d, {}) },
+  'click.flashlight.on': { dur: 0.3, v: 3, family: 'camper', priority: 2, peakDb: -14, phase: 1, build: (R, d) => buildClick(R, d, {}) },
   'click.flashlight.off': { dur: 0.3, v: 3, family: 'camper', priority: 2, peakDb: -16, phase: 1, build: (R, d) => buildClick(R, d, { off: true }) },
   'click.shutter': { dur: 0.25, v: 3, family: 'camper', priority: 2, peakDb: -14, phase: 1, build: buildShutterClick },
   'glass.ping': { dur: 0.32, v: 4, family: 'lantern', priority: 0, peakDb: -24, phase: 1, build: buildGlassPing },
@@ -2049,10 +2063,17 @@ export async function renderImpulseResponse(space, sampleRate, { tierIndex = 3 }
 
 // ================================================================ THE BANK
 
+/**
+ * Yield to the frame between renders. Raced against a timer on purpose: rAF never fires in
+ * a background tab, and a bank that stops rendering because the player alt-tabbed is a bank
+ * that is missing sounds when they come back.
+ */
 const yieldToFrame = () => new Promise((resolve) => {
-  if (typeof globalThis.requestIdleCallback === 'function') globalThis.requestIdleCallback(() => resolve(), { timeout: 60 });
-  else if (typeof globalThis.requestAnimationFrame === 'function') globalThis.requestAnimationFrame(() => resolve());
-  else setTimeout(resolve, 0);
+  let done = false;
+  const fire = () => { if (!done) { done = true; resolve(); } };
+  setTimeout(fire, 24);
+  if (typeof globalThis.requestIdleCallback === 'function') globalThis.requestIdleCallback(fire, { timeout: 60 });
+  else if (typeof globalThis.requestAnimationFrame === 'function') globalThis.requestAnimationFrame(fire);
 });
 
 function variantCount(rec, tierIndex) {
@@ -2085,6 +2106,7 @@ export class SFXBank {
     /** @type {Map<string, Promise<AudioBuffer[]>>} */
     this._pending = new Map();
     this._missing = new Set();
+    this._failed = new Set();
     this._disposed = false;
     this._grainMax = [200, 350, 550, 800][clamp(this.tierIndex, 0, 3)];
     this.stats = { rendered: 0, buffers: 0, ms: 0 };
@@ -2144,33 +2166,41 @@ export class SFXBank {
     return noiseBuffer(type, this.sampleRate, seconds);
   }
 
-  /** Render one id now (idempotent). Returns a promise for its variant list. */
-  ensure(id) {
+  /**
+   * Render one id now (idempotent). `want` caps how many variants are needed right now —
+   * boot asks for one of everything it might need immediately and the background pass tops
+   * each id up to its full variant count.
+   */
+  ensure(id, want = 0) {
     const r = resolveId(id);
     if (!r || this._disposed || !this.available) return Promise.resolve([]);
-    const have = this._buffers.get(r);
-    if (have && have.length) return Promise.resolve(have);
+    const have = this._buffers.get(r) ?? null;
+    if (this._failed.has(r)) return Promise.resolve(have ?? []);
+    const full = variantCount(RECIPES[r], this.tierIndex);
+    const target = want > 0 ? Math.min(want, full) : full;
+    if (have && have.length >= target) return Promise.resolve(have);
     const pend = this._pending.get(r);
-    if (pend) return pend;
-    const p = this._renderId(r).finally(() => this._pending.delete(r));
+    // A render is already in flight for fewer variants than we now need: queue behind it.
+    if (pend) return pend.then(() => this.ensure(r, want));
+    const p = this._renderId(r, target).finally(() => this._pending.delete(r));
     this._pending.set(r, p);
     return p;
   }
 
-  async _renderId(id) {
+  async _renderId(id, target) {
     const rec = RECIPES[id];
     if (!rec) return [];
-    const n = variantCount(rec, this.tierIndex);
-    const out = [];
-    for (let i = 0; i < n; i++) {
+    const out = this._buffers.get(id) ?? [];
+    const from = out.length;
+    for (let i = from; i < target; i++) {
       if (this._disposed) break;
       const buf = await this._renderVariant(id, rec, i);
-      if (buf) out.push(buf);
+      if (!buf) break;
+      out.push(buf);
+      this.stats.buffers++;
     }
-    if (out.length && !this._disposed) {
-      this._buffers.set(id, out);
-      this.stats.buffers += out.length;
-    }
+    if (out.length > from && !this._disposed) this._buffers.set(id, out);
+    else if (out.length === 0) this._failed.add(id);
     return out;
   }
 
@@ -2226,13 +2256,18 @@ export class SFXBank {
    * exceeded so boot never stalls. phase 0 is awaited by AudioEngine.init(); phase 1 runs
    * in the background.
    */
-  async renderPhase(phase = 0, { budgetMs = 6, onProgress = null } = {}) {
+  async renderPhase(phase = 0, { budgetMs = 6, onProgress = null, variants = 0 } = {}) {
     if (!this.available || this._disposed) return this;
-    const ids = Object.keys(RECIPES).filter((id) => (RECIPES[id].phase ?? 1) === phase);
+    // Phase 0 only needs *one* of each urgent sound to exist; phase 1 sweeps every id and
+    // tops it up to its full variant count, so repetition stops being audible a few
+    // seconds in rather than delaying the first frame.
+    const ids = phase === 0
+      ? Object.keys(RECIPES).filter((id) => (RECIPES[id].phase ?? 1) === 0)
+      : Object.keys(RECIPES);
     let chunkStart = performance.now();
     for (let i = 0; i < ids.length; i++) {
       if (this._disposed) break;
-      await this.ensure(ids[i]);
+      await this.ensure(ids[i], variants);
       onProgress?.((i + 1) / ids.length, ids[i]);
       if (performance.now() - chunkStart > budgetMs) {
         await yieldToFrame();
@@ -2244,7 +2279,7 @@ export class SFXBank {
 
   /** Everything, in phase order. */
   async renderAll(opts = {}) {
-    await this.renderPhase(0, opts);
+    await this.renderPhase(0, { ...opts, variants: 1 });
     await this.renderPhase(1, opts);
     Log.debug(`SFX bank: ${this.stats.buffers} buffers in ${this.stats.ms.toFixed(0)} ms`);
     return this;
@@ -2255,6 +2290,7 @@ export class SFXBank {
     this._buffers.clear();
     this._pending.clear();
     this._missing.clear();
+    this._failed.clear();
   }
 }
 

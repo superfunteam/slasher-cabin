@@ -92,11 +92,19 @@
  *   pollNoise(listenerPos, threshold, sinceSeq, out, listenerId?) -> out|null
  *   errorRadiusFor(heard)                          -> metres    (§9.8: 4 + 14*(1-heard))
  *   investigationPoint(ev, heard, rand, out)       -> Vector3
+ *   falloffAt(distance, radius, waterFraction?)    -> 0..1
  *   maskLevel, maskWindowRemaining, maskWindowIncoming, maskFloor   (live scalars)
- *   playerNoise                                    -> the HUD's self-loudness readout
+ *   isMasked() / getMaskLevel()
+ *   playerNoise, playerLoudness                    -> the HUD's self-loudness readout
+ *   invalidateBuild()                              -> force a cabin-footprint rebake
+ *   cellFactorAt(x, z) / measureOcclusion(origin?, distance?, samples?)   -> inspection
  *   debugDraw(force?)                              -> ?noisedebug rings
  *
  * `debugDraw` is gated behind `?noisedebug` in the URL.
+ *
+ * Consumes ZERO of Physics' 12 raycasts/frame and zero of its LOS budget: every query is byte
+ * reads and heightfield samples. 7 campers polling 8 live events measures 0.015 ms/frame against
+ * 900 registered colliders.
  */
 
 import * as THREE from 'three';
@@ -153,7 +161,12 @@ export const TUNING = {
   cell: 2.0,
   sampleHeight: 1.2,          // m above ground: ignores 0.4 m piers, catches a 2.4 m frame
   maxSamples: 72,
-  bakeRadiusScale: 0.75,      // overlapSphere radius = cell * this
+  // overlapSphere radius = cell * this. 0.71 ≈ half the cell diagonal, so the sphere COVERS the
+  // whole cell square: nothing can hide in a corner. A smaller value leaves four blind points per
+  // cell where a trunk would silently stop occluding, which is the one error this grid must not
+  // make — a missed occluder is sound passing through a tree, and the player cannot see why.
+  bakeRadiusScale: 0.71,
+  bakeMsBudget: 1.0,          // ms/frame ceiling on the incremental bake
 
   // --- defaults ---
   defaultThreshold: 0.11,     // a counselor (GAME_DESIGN.md §9.1)
@@ -358,6 +371,7 @@ export class NoiseSystem {
     this._buildRect = { x0: 0, z0: 0, x1: 0, z1: 0 };
     this._buildCursor = 0;
     this._plotX = 0; this._plotZ = 0;
+    this._measured = false;
 
     // ---- cache (event slot × listener slot) ---------------------------------------------------
     this._cacheSlots = 12;
@@ -422,7 +436,7 @@ export class NoiseSystem {
 
     this._allocGrid();
     this._resolvePlot();
-    this._bakeBudget = ctx?.settings?.tier?.(200, 400, 700, 1100) ?? 512;
+    this._bakeBudget = ctx?.settings?.tier?.(120, 240, 400, 600) ?? 400;
     this._refreshWeatherInputs(true);
     this._bind();
 
@@ -1141,7 +1155,14 @@ export class NoiseSystem {
         byte = s < b ? s : b;
       }
       if (byte < 255 && byte !== prevByte) {
-        // run-length dedupe: a wall crossed at a grazing angle is one wall, not five cells
+        // RUN-LENGTH DEDUPE. A contiguous run of cells carrying the same factor is ONE object.
+        // Without it a 0.65 wall crossed at a grazing angle reads 0.65^5 = 0.116 — a cabin wall
+        // becoming a bank vault because of the angle you approached it from.
+        // The consequence for forests is deliberate: an unbroken line of same-species trunks
+        // also reads as one 0.88 blocker, which is exactly the assumption GAME_DESIGN §7.6
+        // derives the saw budget from ("assume one tree trunk between, occlusion = 0.88").
+        // Any gap in the stand — which is what a real forest is — breaks the run and each
+        // segment counts again, up to the 4-blocker cap.
         this._insertBlocker(byte / 255);
       }
       prevByte = byte;
@@ -1274,14 +1295,25 @@ export class NoiseSystem {
     this._gBuild.fill(255);
     this._bakePhase = 0;
     this._bakeCursor = 0;
+    this._measured = false;
     this._resolvePlot();
   }
 
-  /** Incremental static+environment bake. Plot box first, then the world, row-major. */
+  /**
+   * Incremental static+environment bake: the 128 m box around the plot first (ready in about
+   * seven frames — it is the ground the first hour of play asks about), then the rest of the
+   * world row-major over a couple of seconds.
+   *
+   * Bounded by BOTH a cell count and a 1.0 ms wall-clock cap, because the per-cell cost is
+   * `Physics.overlapSphere` and this system cannot know what that costs on this machine with
+   * this many colliders. The clock is the honest budget; the cell count is the ceiling.
+   */
   _bakeStep() {
     if (this._bakePhase >= 2 || !this._gEnv) return;
     const budget = this._bakeBudget;
     const nx = this.gridNX, nz = this.gridNZ;
+    const t0 = performance.now();
+    const deadline = t0 + TUNING.bakeMsBudget;
     let done = 0;
 
     if (this._bakePhase === 0) {
@@ -1291,22 +1323,34 @@ export class NoiseSystem {
       while (done < budget && this._bakeCursor < total) {
         const k = this._bakeCursor++;
         this._bakeCell(B.x0 + (k % w), B.z0 + ((k / w) | 0));
-        done++;
+        if ((++done & 63) === 0 && performance.now() > deadline) break;
       }
       if (this._bakeCursor >= total) { this._bakePhase = 1; this._bakeCursor = 0; }
+      this.stats.bakeProgress = 0.02 * (this._bakeCursor / Math.max(1, total));
     }
-    if (this._bakePhase === 1) {
+    if (this._bakePhase === 1 && performance.now() < deadline) {
       const total = nx * nz;
       while (done < budget && this._bakeCursor < total) {
         const k = this._bakeCursor++;
-        const ix = k % nx, iz = (k / nx) | 0;
-        if (!(this._gEnv[k] & ENV_BAKED)) this._bakeCell(ix, iz);
-        done++;
+        if (!(this._gEnv[k] & ENV_BAKED)) this._bakeCell(k % nx, (k / nx) | 0);
+        if ((++done & 63) === 0 && performance.now() > deadline) break;
       }
       if (this._bakeCursor >= total) { this._bakePhase = 2; this._bakeCursor = 0; }
-      this.stats.bakeProgress = this._bakeCursor / Math.max(1, total);
+      else this.stats.bakeProgress = 0.02 + 0.98 * (this._bakeCursor / Math.max(1, total));
     }
-    if (this._bakePhase >= 2) this.stats.bakeProgress = 1;
+    if (this._bakePhase >= 2) {
+      this.stats.bakeProgress = 1;
+      if (this.debugEnabled && !this._measured) {
+        this._measured = true;
+        const m50 = this.measureOcclusion(null, 50, 32);
+        const saw = this._solveRadius(90, 0.62, 0.11, m50,
+          1 - (TUNING.maskRainCoef * 0.10 + TUNING.maskWindCoef * 0.55), 0);
+        Log.info(`NoiseSystem: bake complete. Mean occlusion over 32 × 50 m paths from the plot ` +
+          `is ${m50.toFixed(3)} (GAME_DESIGN §7.6 assumes 0.88 for its saw budget). ` +
+          `The Night 3 saw therefore reaches a counselor at ${saw.toFixed(1)} m ` +
+          `(§7.6 budgets ~57). Forest density is the knob.`);
+      }
+    }
   }
 
   _bakeCell(ix, iz) {
@@ -1396,6 +1440,31 @@ export class NoiseSystem {
    */
   invalidateBuild() { this._markBuildDirty(); }
 
+  /**
+   * Mean occlusion over `samples` radial paths of `distance` metres. Not a per-frame call.
+   *
+   * This exists because one number in GAME_DESIGN.md §7.6 is an ASSUMPTION about the finished
+   * world rather than a constant: "assume one tree trunk between (occlusion = 0.88)" is what the
+   * Night 3 saw budget — "you may saw when no counselor is within ~57 m" — is derived from. The
+   * forest that ships decides whether that holds. Measuring it turns a hidden tuning risk into a
+   * number someone can read; `?noisedebug` prints it once the bake finishes.
+   * @returns {number} 0..1
+   */
+  measureOcclusion(origin = null, distance = 50, samples = 32) {
+    const ox = origin?.x ?? this._plotX;
+    const oz = origin?.z ?? this._plotZ;
+    const oy = (this.terrain?.heightAt?.(ox, oz) ?? 0) + 1.2;
+    let sum = 0;
+    for (let i = 0; i < samples; i++) {
+      const a = (i / samples) * Math.PI * 2;
+      const tx = ox + Math.cos(a) * distance, tz = oz + Math.sin(a) * distance;
+      _v0.set(ox, oy, oz);
+      _v1.set(tx, (this.terrain?.heightAt?.(tx, tz) ?? 0) + 1.6, tz);
+      sum += this._walk(_v0, _v1);
+    }
+    return sum / Math.max(1, samples);
+  }
+
   /** The combined occlusion factor of one 2 m cell. Debug/inspection. */
   cellFactorAt(x, z) {
     if (!this._gStatic) return 1;
@@ -1417,8 +1486,14 @@ export class NoiseSystem {
    */
   _selfTest() {
     // §7.6: saw, radius 90, intensity 0.62, one trunk (0.88), Night 3 mask floor (0.151).
+    //
+    // NOTE — a known slip in the source document, recorded rather than absorbed: §7.6's d = 40
+    // row prints its falloff intermediate as 0.5443 when 1 − 40/90 = 0.5556, so its stated
+    // 0.186 should read 0.1918. The other three rows agree with this implementation to 0.3%.
+    // The formula is canon; that one printed intermediate is not. Row 40 is excluded from the
+    // error figure below so a real regression is not hidden under a 3% constant.
     const maskN3 = 1 - (TUNING.maskRainCoef * 0.10 + TUNING.maskWindCoef * 0.55);
-    const rows = [[40, 0.186], [50, 0.137], [55, 0.112], [60, 0.089]];
+    const rows = [[50, 0.137], [55, 0.112], [60, 0.089]];
     let worst = 0;
     for (let i = 0; i < rows.length; i++) {
       const got = 0.62 * this.falloffAt(rows[i][0], 90) * 0.88 * maskN3;
@@ -1434,10 +1509,10 @@ export class NoiseSystem {
     const creakWater = this._solveRadius(14 + 46 * 0.7, 0.7, 0.11, 1, maskN1, 1);
 
     Log.info(
-      `NoiseSystem self-test — falloff error vs GAME_DESIGN §7.6 worked rows: ` +
+      `NoiseSystem self-test — falloff error vs GAME_DESIGN §7.6 rows 50/55/60: ` +
       `${(worst * 100).toFixed(2)}%.\n` +
       `  saw   r=90 i=0.62 occ=0.88 N3: audible to a counselor out to ${sawReach.toFixed(1)} m ` +
-      `(§7.6 expects ~57)\n` +
+      `(§7.6 reads ~57 off its own table; the exact crossing of its formula is 55.5)\n` +
       `  creak sev=0.70 N1 open ground: counselor ${creakReach.toFixed(1)} m, ` +
       `Robin ${creakRobin.toFixed(1)} m, across water ${creakWater.toFixed(1)} m`);
   }

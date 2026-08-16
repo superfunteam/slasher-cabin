@@ -98,6 +98,7 @@
 import * as THREE from 'three';
 import { Log } from '../core/Log.js';
 import { Rand } from '../core/Rand.js';
+import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
 
 /* ==============================================================================================
  * Module-scope scratch. ARCHITECTURE.md §12: no allocation in update().
@@ -109,6 +110,7 @@ const _v3d = new THREE.Vector3();
 const _v3e = new THREE.Vector3();
 const _q1 = new THREE.Quaternion();
 const _q2 = new THREE.Quaternion();
+const _m4 = new THREE.Matrix4();
 const _e1 = new THREE.Euler(0, 0, 0, 'YXZ');
 const _e2 = new THREE.Euler(0, 0, 0, 'YXZ');
 const _colA = new THREE.Color();
@@ -1167,19 +1169,13 @@ export class Flashlight {
     fount.name = 'lantern-fount';
     group.add(fount);
 
-    // Burner gallery — the perforated collar the chimney sits in.
-    const gCollar = new THREE.CylinderGeometry(0.026, 0.023, 0.016, 20, 1, true);
-    this._geoms.push(gCollar);
-    const collar = new THREE.Mesh(gCollar, matBrassDark);
-    collar.position.y = 0.068;
-    group.add(collar);
-
-    const gCrown = new THREE.TorusGeometry(0.026, 0.0035, 6, 20);
-    this._geoms.push(gCrown);
-    const crown = new THREE.Mesh(gCrown, matBrassDark);
-    crown.rotation.x = Math.PI / 2;
-    crown.position.y = 0.077;
-    group.add(crown);
+    // Burner gallery — the perforated collar the chimney sits in, plus its crown ring.
+    // Merged: two draw calls for two rings of brass is two draw calls too many.
+    const gGallery = this._merge([
+      { geo: new THREE.CylinderGeometry(0.026, 0.023, 0.016, 20, 1, true), pos: [0, 0.068, 0] },
+      { geo: new THREE.TorusGeometry(0.026, 0.0035, 6, 20), pos: [0, 0.077, 0], rot: [Math.PI / 2, 0, 0] },
+    ]);
+    if (gGallery) group.add(new THREE.Mesh(gGallery, matBrassDark));
 
     // The wick and its knurled adjuster — the small honest detail that reads at 0.45 m.
     const gWick = new THREE.BoxGeometry(0.013, 0.010, 0.0022);
@@ -1188,12 +1184,6 @@ export class Flashlight {
     wick.position.y = 0.082;
     group.add(wick);
 
-    const gKnob = new THREE.CylinderGeometry(0.008, 0.008, 0.004, 12);
-    this._geoms.push(gKnob);
-    const knob = new THREE.Mesh(gKnob, matSteel);
-    knob.rotation.z = Math.PI / 2;
-    knob.position.set(0.030, 0.062, 0);
-    group.add(knob);
 
     // Glass chimney: bulges over the flame, waists, then flares at the top.
     const chimneyProfile = [
@@ -1213,38 +1203,33 @@ export class Flashlight {
     sheen.renderOrder = 4;
     group.add(sheen);
 
-    // Top guard: four wire uprights and a cap ring.
-    const gUpright = new THREE.CylinderGeometry(0.0016, 0.0016, 0.095, 5);
-    this._geoms.push(gUpright);
+    // All the steelwork in ONE draw call: the wick-adjuster knob, four wire uprights, the cap
+    // ring, the bail handle and its two lugs. Nine primitives, none of which move relative to
+    // each other, merged at init. ARCHITECTURE §12's draw-call budget is 220 for the whole
+    // forest; a hand prop does not get to spend nine of them.
+    const steelParts = [
+      { geo: new THREE.CylinderGeometry(0.008, 0.008, 0.004, 12), pos: [0.030, 0.062, 0], rot: [0, 0, Math.PI / 2] },
+      { geo: new THREE.TorusGeometry(0.030, 0.0028, 6, 18), pos: [0, 0.172, 0], rot: [Math.PI / 2, 0, 0] },
+      { geo: new THREE.TorusGeometry(0.040, 0.0022, 6, 22, Math.PI), pos: [0, 0.176, 0], rot: [0, 0.12, 0] },
+    ];
     for (let i = 0; i < 4; i++) {
       const a = (i / 4) * Math.PI * 2 + Math.PI / 4;
-      const up = new THREE.Mesh(gUpright, matSteel);
-      up.position.set(Math.cos(a) * 0.033, 0.124, Math.sin(a) * 0.033);
-      group.add(up);
+      steelParts.push({
+        geo: new THREE.CylinderGeometry(0.0016, 0.0016, 0.095, 5),
+        pos: [Math.cos(a) * 0.033, 0.124, Math.sin(a) * 0.033],
+      });
     }
-    const gCap = new THREE.TorusGeometry(0.030, 0.0028, 6, 18);
-    this._geoms.push(gCap);
-    const cap = new THREE.Mesh(gCap, matSteel);
-    cap.rotation.x = Math.PI / 2;
-    cap.position.y = 0.172;
-    group.add(cap);
-
-    // Wire bail handle — a half torus on two lugs, hanging back over the top.
-    const gBail = new THREE.TorusGeometry(0.040, 0.0022, 6, 22, Math.PI);
-    this._geoms.push(gBail);
-    const bail = new THREE.Mesh(gBail, matSteel);
-    bail.position.y = 0.176;
-    bail.rotation.z = 0;
-    bail.rotation.y = 0.12;
-    group.add(bail);
-
-    const gLug = new THREE.CylinderGeometry(0.0026, 0.0026, 0.006, 8);
-    this._geoms.push(gLug);
     for (let i = 0; i < 2; i++) {
-      const lug = new THREE.Mesh(gLug, matSteel);
-      lug.rotation.z = Math.PI / 2;
-      lug.position.set(i === 0 ? 0.030 : -0.030, 0.174, 0);
-      group.add(lug);
+      steelParts.push({
+        geo: new THREE.CylinderGeometry(0.0026, 0.0026, 0.006, 8),
+        pos: [i === 0 ? 0.030 : -0.030, 0.174, 0], rot: [0, 0, Math.PI / 2],
+      });
+    }
+    const gSteel = this._merge(steelParts);
+    if (gSteel) {
+      const steel = new THREE.Mesh(gSteel, matSteel);
+      steel.name = 'lantern-metalwork';
+      group.add(steel);
     }
 
     // THE HOOD. A sheet-metal sleeve that rises over the chimney. It is the mechanic, so it
@@ -1361,6 +1346,49 @@ export class Flashlight {
   /* ------------------------------------------------------------------------------------------
    * Helpers — kept in this file because it owns exactly one file (golden rule 1)
    * ---------------------------------------------------------------------------------------- */
+
+  /**
+   * Bake a list of transformed primitives into one geometry, so a nine-part wire assembly
+   * costs one draw call instead of nine. The source primitives are consumed: they are
+   * transformed in place, merged, and disposed here, so only the result is tracked.
+   *
+   * `mergeGeometries` needs every input to carry the same attribute set — all the primitives
+   * used here are Cylinder/Torus/Box, which all supply position + normal + uv, so they merge
+   * cleanly. If that ever stops being true this returns null and the caller silently skips
+   * the part rather than throwing during init.
+   *
+   * @param {{geo: THREE.BufferGeometry, pos?: number[], rot?: number[]}[]} parts
+   * @returns {THREE.BufferGeometry|null}
+   */
+  _merge(parts) {
+    const list = [];
+    for (const p of parts) {
+      const g = p.geo;
+      if (!g) continue;
+      _e2.set(p.rot?.[0] ?? 0, p.rot?.[1] ?? 0, p.rot?.[2] ?? 0, 'YXZ');
+      _q1.setFromEuler(_e2);
+      _v3a.set(p.pos?.[0] ?? 0, p.pos?.[1] ?? 0, p.pos?.[2] ?? 0);
+      _m4.compose(_v3a, _q1, _v3b.set(1, 1, 1));
+      g.applyMatrix4(_m4);
+      list.push(g);
+    }
+    if (!list.length) return null;
+    let merged = null;
+    try {
+      merged = mergeGeometries(list, false);
+    } catch (e) {
+      Log.once('lantern-merge', 'Flashlight: geometry merge failed, falling back.', e);
+    }
+    if (!merged) {
+      // Degrade rather than lose the part: keep the first primitive, drop the rest.
+      for (let i = 1; i < list.length; i++) list[i].dispose();
+      this._geoms.push(list[0]);
+      return list[0];
+    }
+    for (const g of list) g.dispose();
+    this._geoms.push(merged);
+    return merged;
+  }
 
   /** @param {number[][]} profile [radius, y] pairs */
   _lathe(profile, segments, openEnded = false) {

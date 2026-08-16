@@ -188,6 +188,9 @@ export class AudioEngine {
     this.sfx = null;
     this.enabled = false;
     this.started = false;          // has a user gesture resumed the context?
+    // Sibling audio modules (Music, VoiceBank) share our context and must not fight us for
+    // the listener. Advertise that we own it.
+    this.drivesListener = true;
 
     this._unsubs = [];
     this._timers = new Set();
@@ -259,8 +262,11 @@ export class AudioEngine {
         rand: this.rand.fork('bank'),
         settings: this.settings,
       });
-      // Phase 0 is everything the player can trigger in the first second. Awaited.
-      await this.sfx.renderPhase(0, { budgetMs: 6 });
+      // Phase 0: one variant of everything the player can trigger in the first second.
+      // This is the only audio work the boot waits on.
+      // A generous budget here: during boot every yield is pure wall-clock latency, and
+      // there is no frame to protect yet.
+      await this.sfx.renderPhase(0, { budgetMs: 50, variants: 1 });
       // Everything else renders in the background across frames — boot never stalls.
       this.sfx.renderPhase(1, { budgetMs: 5 }).then(() => {
         Log.debug(`Audio: SFX bank complete (${this.sfx.stats.buffers} buffers, ` +
@@ -523,6 +529,13 @@ export class AudioEngine {
   }
 
   busNode(name) { return this.bus(name); }
+
+  /**
+   * The input of the reverb network, for modules that build their own sources (VoiceBank's
+   * VO chain, Music's pad) and want the current space's tail.
+   * @returns {GainNode|null}
+   */
+  reverbSend() { return this._verbIn ?? null; }
 
   now() { return this.context?.currentTime ?? 0; }
 
@@ -1294,6 +1307,7 @@ export class AudioEngine {
     if (!this.enabled) return;
     if (e?.correct === false) {
       for (const n of ['ambience', 'music', 'sfxWorld', 'vo', 'body']) this.duck(n, 18, 20, 180, 900);
+      this._holdVoice(1100, 'S3 naked creak');
       return;
     }
     // The seat. The most satisfying sound in the game, mixed a couple of dB louder than it
@@ -1324,6 +1338,7 @@ export class AudioEngine {
     const now = this.now();
     this._hardMute(true, 0.05);
     this._ambTargets(0, 0, 0, 0.05);
+    this._holdVoice(8200, 'S1 first breath');
     this._cricketCut = 1;
     this._cricketClearAt = now + 6.4;
     this._after(2.2, () => {
@@ -1343,6 +1358,7 @@ export class AudioEngine {
   _clinicalPause() {
     if (!this.context) return;
     this._hardMute(true, 0.05, false);
+    this._holdVoice(3600, 'S6 clinical pause');
     this._after(1.4, () => {
       this.play('ui.chime', { bus: 'sfxUI', priority: 3, volume: 1 });
       this._after(0.34, () => this._restoreMix(1800));
@@ -1356,6 +1372,7 @@ export class AudioEngine {
     this._hardMute(true, 0.03, true);
     this._ambTargets(0, 0, 0, 0.03);
     this._silenceRule = 'S7';
+    this._holdVoice(600000, 'S7 the end');
     this._cricketClearAt = this.now() + 3600;
     this._setBreath('calm');
     this._after(0.9, () => {
@@ -1380,6 +1397,7 @@ export class AudioEngine {
   _maskOnBeat() {
     if (this._maskOn || !this.context) return;
     this._hardMute(true, 0.12, false);
+    this._holdVoice(2000, 'S10 the mask');
     this.duck('body', -6, 200, 1600, 900);
     this._after(0.4, () => {
       this._restoreMix(1400);
@@ -1403,7 +1421,9 @@ export class AudioEngine {
     this._setBreath('held');
     this._heart.open = true;
     this._cutCrickets(8);
+    this._holdVoice(4000, 'held-breath');
 
+    // The one place we override the score: being seen is not a gradient.
     const music = this.ctx?.systems?.get?.('Music');
     if (typeof music?.setDread === 'function') { try { music.setDread(1); } catch { /* optional */ } }
   }
@@ -1419,6 +1439,17 @@ export class AudioEngine {
     this._set(this._sfxComp.threshold, -18, now, 0.6);
     this._heart.open = false;
     this._setBreath(this._speed > 2.4 ? 'heavy' : 'walk');
+    // Hand the score back its own judgement.
+    const music = this.ctx?.systems?.get?.('Music');
+    if (typeof music?.setDread === 'function') { try { music.setDread(null); } catch { /* optional */ } }
+  }
+
+  /** §8 — VO stops entirely during any silence rule except S9. VoiceBank exposes the gate. */
+  _holdVoice(ms, reason) {
+    const vb = this.ctx?.systems?.get?.('VoiceBank');
+    if (typeof vb?.holdVoice === 'function') {
+      try { vb.holdVoice(ms, reason); } catch { /* optional system */ }
+    }
   }
 
   // --------------------------------------------------------------- weather
@@ -2056,22 +2087,21 @@ export class AudioEngine {
     const t = clamp01(state?.timeOfNight ?? 0);
     this._set(this._dawnHP.frequency, t > 0.92 ? 20 + 280 * clamp01((t - 0.92) / 0.06) : 20, now, 4.0);
 
-    // Music's dread scalar is ours to compute (§6.3); Music smooths it internally.
-    const music = sys?.get?.('Music');
-    if (typeof music?.setDread === 'function') {
-      const buildProgress = clamp01(this._buildProgress());
-      const target = clamp01(
-        0.40 * clamp01(state?.suspicion ?? 0)
-        + 0.30 * clamp01(1 - this._nearestCamper / 30)
-        + 0.15 * (state?.spotted ? 1 : 0)
-        + 0.10 * clamp01((state?.creaks ?? 0) / 6)
-        + 0.05 * (1 - buildProgress),
-      );
-      // Dread arrives instantly and leaves slowly. Never the reverse.
-      const tau = target > this.dread ? 0.35 : 4.5;
-      this.dread += (target - this.dread) * (1 - Math.exp(-dt / tau));
-      try { music.setDread(this.dread); } catch { /* optional system */ }
-    }
+    // §6.3 — the dread scalar. We keep our own copy because the mix reads it, but we do not
+    // push it at Music every tick: Music computes the same formula and treats setDread() as
+    // an external floor, so streaming it in would take the score's own judgement away. We
+    // only override on a real event (the Held Breath).
+    const buildProgress = clamp01(this._buildProgress());
+    const target = clamp01(
+      0.40 * clamp01(state?.suspicion ?? 0)
+      + 0.30 * clamp01(1 - this._nearestCamper / 30)
+      + 0.15 * (state?.spotted ? 1 : 0)
+      + 0.10 * clamp01((state?.creaks ?? 0) / 6)
+      + 0.05 * (1 - buildProgress),
+    );
+    // Dread arrives instantly and leaves slowly. Never the reverse.
+    const tau = target > this.dread ? 0.35 : 4.5;
+    this.dread += (target - this.dread) * (1 - Math.exp(-dt / tau));
   }
 
   _queryNearestCamper() {
