@@ -1570,5 +1570,510 @@ No `noise:emit`. The grind is quiet, close, and for the player alone. Campers do
 a mistake; they hear the mistake nine seconds later, which is the game.
 
 ---
+### 4.10 Nail pulled, and the wrench removal — `LIVE`
+
+`build:remove` costs 8 s and emits `noise:emit { kind:'wrench', radius: 24, intensity: 0.45 }`
+(`GAME_DESIGN.md` §2.2). **Undoing is loud**, and that is the core tension of the errata grammar
+(G6): the manual is wrong, you now know it is wrong, and fixing it announces you.
+
+The 8 seconds are structured, not a loop:
+
+1. **0–900 ms — the bar setting.** A steel-on-wood scrape: `frictionOsc`, `slipRate 62, N = 7,
+   f_center 900 → 720, Q = 40`, −26 dBFS@1m.
+2. **0.9–6.2 s — the pull, ×3.** Three cycles of `nail_pull`, 1.7 s apart:
+   - `frictionOsc` tier 2–3 with an **upward** `f_center` sweep `620 → 1450 Hz` over 500 ms. The
+     free shank shortens as it comes out, so the resonance rises — the exact inverse of §4.4's
+     seating rise, and a player who has driven two hundred nails will feel that inversion before
+     they can name it.
+   - Terminal pop: `modal([{f:940,Q:60,g:1,d:90}, {f:2200,Q:40,g:0.6,d:60}])` plus a 25 ms noise
+     chuff lowpassed at 700.
+3. **6.2–8.0 s — the part coming free.** One `drop_lumber` body layer at 0.5× gain, plus the
+   surface material layer.
+
+`noise:emit` fires **once, at t = 900 ms**, not per pull — one canonical emission per
+`build:remove`, per the design's single-row entry.
+
+**Mix it as relief.** Dry, close, −14 dBFS@1m, reverb send **0.06** instead of the 0.22 base.
+Removing a wrong part is the sound of undoing a mistake and it should feel physically closer to
+the player than the mistake did. That is the one emotional colour audio is allowed to add here,
+and it is achieved with a send level, not with a sweetener.
+
+### 4.11 The pry bar — the 1.4 s that decides the run
+
+`GAME_DESIGN.md` §2.3: "Wrong part cannot be placed by accident. The ghost refuses; the player must
+hold the place input for **1.4 s** to force it. This is a deliberate, punished choice — usually
+made at 04:40 when the player is short a bracket and out of time. **That decision is the game.**"
+
+v1.0 had no sound for it at all. It gets three movements and a silence.
+
+| t | Movement | Recipe |
+|---|---|---|
+| 0–500 ms | **The bar sets.** | `frictionOsc`, `slipRate 30, N = 5, f_center 380 → 240, Q = 90, pitchDrop 380 ¢`, −22 dBFS@1m. Steel finding purchase in a gap that does not want it. |
+| 500–1200 ms | **The load.** | `frictionOsc` at tier-3 amplitude but with **`slipRate` 4 and `N = 2`** — i.e. *no slip individuation at all*. `f_center 700 → 380`, `Q` climbing 90 → 200, gain −22 → −8 dBFS@1m. Under it, a sine 58 Hz rising −40 → −18 dBFS@1m. |
+| **1200–1400 ms** | **Nothing.** | **200 ms of complete silence on `sfxWorld`.** The bed continues. The player is still holding the button. |
+| 1400 ms | **The split.** | `join_split` (§4.8) at full level + `noise:emit { kind:'impact', radius:30, intensity:0.60 }`. |
+
+**Movement 2 is the inverse of a creak and that is deliberate.** A creak is a sequence of discrete
+slips — the player learns to count the pops (§4.12.4). The pry bar is *one continuous slip*, smooth
+and rising, with nothing to count. It is the only sustained wood sound in the game that does not
+individuate, and it therefore sounds *unlike anything else the wood has ever done*, which is
+correct: nothing in the manual asked for this.
+
+**Movement 3 is the only place in this game where silence is a warning rather than a consequence.**
+Every other silence in §8 arrives after something. This one arrives before. The player is 200 ms
+from a permanent 1.0-wrongness join that can never be shimmed below 0.55, and the game has just
+gone quiet and left the button under their thumb. If they release, nothing happens and nothing is
+said about it.
+
+Do not add a UI prompt to movement 3. Do not add a heartbeat. Do not duck the bed. The silence is
+the entire mechanism.
+
+### 4.12 THE CREAK — the signature sound
+
+A **stick-slip friction** phenomenon, not a filtered noise sweep. Modelling it properly is why our
+creak will be better than everyone else's, and `GAME_DESIGN.md` §11 stakes the whole tutorial on
+it: "at 4:39, if the player does not physically flinch… the game has failed."
+
+#### 4.12.1 `frictionOsc(params)` — the core model
+
+```
+1. SLIP CLOCK: a scheduled sequence of gain ramps — N events at times t_i, where
+   dt_i = dt_0 · (1 + 0.5·rand(-1,1)) and dt_0 = 1/slipRate.
+   NOT a per-slip AudioBufferSource. One persistent noise source, N scheduled ramps.
+   This is why a 17-slip tier-3 creak costs ~8 nodes and not ~90 (§4.0.3).
+2. Each slip event: the shared noise source gated open for 1.5 ms → gain g_i.
+3. RESONATOR: all excitations feed a bandpass at f_center, Q = Qc (40–260).
+   f_center ramps DOWN by `pitchDrop` cents across the whole event — the joint settling
+   under load. Down, always. A creak that rises is a creak that is being relieved of load,
+   which happens exactly twice in this game (§4.10 nail pull, §4.16 pine whistle).
+4. A parallel second resonator at f_center · 1.47, at −8 dB — the "two surfaces" quality.
+   1.47 is deliberately not a small-integer ratio; a harmonic partner reads as a note.
+5. A brown-noise bed through a lowpass at f_center/3, at −26 dBFS@1m, glues it.
+6. A gentle WaveShaper (drive 1.3, **oversample '4x'**) — friction is nonlinear.
+   DC blocker after: highpass f=18, Q=0.7.
+```
+
+The parameter that makes it a creak rather than a buzz is `slipRate` in the **8–90 Hz** range with
+**heavy irregularity**. Regular is a synth tone. Irregular is wood.
+
+#### 4.12.2 Tiers — **DERIVED from `GAME_DESIGN.md` §3.1**, and rebased
+
+`build:creak` carries `{ position, severity }`. **Quantization into tiers happens in
+`AudioEngine`**, not in `BuildSystem`. v1.0 instructed a system it does not own ("`BuildSystem`
+should quantize to tiers") when the payload is fixed and the tiering is a presentation decision.
+
+v1.0's thresholds also could not fire. `severity = clamp01(0.25 + 0.55w + 0.30s + 0.20·min(L,1.5))`
+and `lambda = 6.0·(w + 0.30s)·(...)`, so `lambda = 0` whenever `w = 0` and `s = 0`. Any join that
+creaks at all has `w > 0` or `s > 0`, and the lowest severity actually reachable is **≈ 0.41** (a
+correctly-placed join released at `p ≈ 0.5`, `torque 0.45`, `s = 0.55`, low load). **v1.0's tier 1
+band of `severity ≤ 0.25` was dead code.** Nobody would ever have heard it.
+
+Rebased on the reachable range, with the **tier-2/3 boundary at exactly 0.70** so that it
+coincides with `GAME_DESIGN.md` §3.1's own `severity > 0.7 ? 'creak_groan' : 'creak_tick'` split:
+
+| Tier | Severity band | design `audio:sfx` id | Reachable via |
+|---|---|---|---|
+| **1** — the tick | ≤ 0.50 | `creak_tick` | Seated but under-torqued, light load |
+| **2** — the complaint | 0.50 < s ≤ 0.70 | `creak_tick` | Rotated at low load, or badly under-torqued |
+| **3** — the groan | 0.70 < s ≤ 0.85 | `creak_groan` | Rotated under load, Wrong-slot |
+| **4** — the failure | > 0.85 | `creak_groan` | Wrong-part, or Wrong-slot at high load with a seating deficit |
+
+`radius = 14 + 46·severity`, clamped to **[14, 60] m**, verbatim from the design.
+`intensity = severity`, verbatim. **v1.0's 120 m tier-4 radius does not exist**; the formula caps
+at 60.
+
+#### 4.12.3 Tier recipes
+
+**Tier 1 — "the tick."**
+`slipRate 34, N = 3, duration 90 ms, f_center 2400 → 2280, Q = 70, pitchDrop 90 ¢,`
+`gain −16 dBFS@1m` (from §1.3 at severity ≈ 0.45). Barely a sound. A single dry tick, like a house
+at night. No mix duck. **The player is allowed to ignore this one**, and that permission is what
+makes tiers 3 and 4 terrifying.
+
+**Tier 2 — "the complaint."**
+`slipRate 22, N = 9, duration 420 ms, f_center 1650 → 1410, Q = 110, pitchDrop 260 ¢,`
+`gain −11 dBFS@1m`. A short, high, unmistakable *eeuk*. Inharmonic partner at −8 dB. No duck; dips
+the chorus to 40% (§5.4).
+
+**Tier 3 — "the groan."**
+`slipRate 13, N = 17, duration 1.15 s, f_center 880 → 620, Q = 160, pitchDrop 520 ¢,`
+`gain −7 dBFS@1m`. Long enough to be a *sentence*. Add a sub layer: sine 74 → 58 Hz across the
+full duration at −22 dBFS@1m. **The slip events audibly individuate — the player can count the
+pops.** Full duck (§2.3). Chorus stops for 4 s. Triggers S3.
+
+**Tier 4 — "the failure."** 2.6 s, three movements, and the building must sound like it is *dying*.
+
+1. **0–900 ms, the load.** `frictionOsc: slipRate 9, N = 8, f_center 640 → 430, Q = 220,
+   pitchDrop 700 ¢, gain −4 dBFS@1m`. The slips are so slow they are individually audible as
+   *knocks*. Under it, a sine at 52 Hz rising −40 → −16 dBFS@1m.
+2. **900–1600 ms, the descent.** `f_center` continues to **190 Hz** while `Q` climbs to 260.
+   Simultaneously a **subharmonic** appears at `f_center / 2` (≈ 95 Hz), amplitude-modulated by the
+   slip clock, at −14 dBFS@1m. This is the psychoacoustic nastiness: something too big making a
+   sound too low for its size. Add a 5.5 Hz tremolo, ±4 dB, so it wobbles.
+3. **1600–2600 ms, the tear.** Trigger `join_split` (§4.8) at 1600 ms at full level, then a
+   **decelerating** crackle: `grainTrain(rate = 60 → 6 decelerando, dur 900 ms)` of wood modal
+   ticks, random detune ±700 ¢. **The deceleration is critical.** An accelerating crackle reads as
+   building tension; a decelerating one reads as aftermath, as debris settling, as *it is over and
+   you cannot undo it*. This is the only decelerando in the document and it is load-bearing.
+4. Optional 4th movement, **5% chance, Nights 6–7 only**: 400 ms of nothing, then one very quiet
+   tick at −34 dBFS@1m. The building has one more thing to say.
+
+If `state.suspicion > 0.5` when a tier 4 fires, `NightManager` will likely consider the night lost.
+**The audio has already told the player that, 2.6 seconds before the UI does.**
+
+#### 4.12.4 The tier-4 cooldown — mandatory, with the arithmetic
+
+A Wrong-part join has `w = 1.00`. At `L = 1.0`, `Mw = Mt = Md = 1`:
+`lambda = 6.0 · 1.00 · (0.40 + 0.90) = 7.8` creaks/minute. Its severity is
+`0.25 + 0.55 + 0.30s + 0.20 = ≈ 1.0`. **Unmitigated, that is a tier-4 failure every 7.7 seconds
+for the rest of the game.** The scariest sound in the game would become wallpaper inside two
+minutes, and `creakDebt` carries 40% into the next night.
+
+Therefore, in `AudioEngine`:
+
+- **At most one tier 4 per join, ever** — for the whole run, across all seven nights.
+- **At most one tier 4 per night**, globally.
+- Every subsequent creak that quantizes to tier 4 resolves as **tier 3 plus the "already dead"
+  knock**: a 400 ms dry, close, unreverbed double knock,
+  `modal([{f:132,Q:14,g:1,d:190},{f:298,Q:11,g:0.5,d:150}])` at t = 0 and t = 155 ms,
+  −20 dBFS@1m, reverb send 0.04. It is flat, wooden, and completely without drama. **The building
+  has stopped complaining and started confirming.**
+- The `noise:emit` still goes out at the **true** severity. The cooldown is a presentation
+  decision; it must never make the player safer than `Campers` thinks they are (§1.3's contract
+  cuts both ways).
+
+#### 4.12.5 The cascade
+
+`GAME_DESIGN.md` §3.2: at `creakDebt > 1.2`, "3–5 joins creak within 1.5 s… The cascade is the
+game's scariest moment and it is entirely the player's fault."
+
+v1.0 would have broken it. Its per-family cap was "max 3 simultaneous creaks" and its duck release
+was 1200 ms, so a five-creak cascade would have dropped two creaks and left the mix pinned flat
+under a single duck for the whole event.
+
+`AudioEngine` detects a cascade as **≥ 3 `build:creak` events within 1.5 s** and switches to a
+`CASCADE` handler:
+
+- **Family cap raised to 5**, for this case only, released when 1.5 s elapse with no new creak.
+- **One duck for the entire cascade** — `music −12`, `ambience −8`, `A 40 / H 1500 / R 1400` —
+  retriggered (hold extended) but never re-attacked by subsequent creaks in the same cascade.
+- Creaks are **voice-stacked with a 90 ms stagger** even if they arrive simultaneously, and
+  **pitch-spread ±300 ¢** around each one's own `f_center`. Simultaneous identical-band creaks
+  mask each other into a single wash; 90 ms and ±300 ¢ keeps five events sounding like *five
+  things*, which is the horror.
+- Tiers are computed per creak as normal, and the tier-4 cooldown applies within the cascade — a
+  cascade is at most one tier 4 and up to four tier 3s. That is more frightening than five tier
+  4s, because it is legible.
+- `Weather` is asked for a gust to cover it (design's own behaviour); the gust's wind rise is
+  audible in `gustLPF` (§4.16) about 400 ms after the cascade begins. The cabin screams and the
+  weather arrives to help. Nobody comments.
+
+### 4.13 The handsaw — `LIVE` plate, `BAKED` teeth
+
+`STORY.md` §2: "No blade at all until Night Four, and then only a handsaw, **and he hates using it
+because it is loud and it dulls.**" §4 Night Three: "cutting is the loudest sustained noise in the
+game… you must break it into passes between patrols. **The comedy: you cannot rush a saw. The
+monster is hostage to the physics of a saw.**"
+
+v1.0 had no saw. See conflicts **C1** (the `saw` kind) and **C2** (which night) — both flagged,
+neither resolved here, and the recipe works under either resolution.
+
+**Tooth rate, derived.** A 7 TPI handsaw at a cutting speed of 0.45 m/s:
+`0.45 / (0.0254/7) = 0.45 / 0.003629 = 124 teeth/second`.
+
+```
+strokes:   1.1 push strokes/second, each 620 ms; the return stroke is 380 ms
+teeth:     grainTrain(rate = 124 · strokeVel, jitter = 0.28)   [BAKED: saw.tooth]
+           each tooth: 1.2 ms noise → bandpass f = 1900·rand(0.8,1.3), Q = 4 → decay 6 ms
+plate:     modal([{f:340,Q:110,g:1.00,d:900},{f:620,Q:130,g:0.62,d:760},
+                  {f:1180,Q:140,g:0.40,d:600},{f:2260,Q:90,g:0.22,d:420}])   [LIVE]
+           excited continuously by the tooth train at −14 dB, and left RINGING between strokes
+kerf:      brown noise → lowpass fc = 260 + 180·cutDepth, Q 0.8 → gain −30 + 9·cutDepth
+```
+
+- **The push stroke cuts.** The return stroke does not: −9 dB, same tooth rate, bandpass dropped an
+  octave to 950 Hz. The asymmetry is the entire rhythm of sawing and it is why a saw sounds like
+  *work* and not like a machine.
+- **The plate rings between strokes.** That singing steel is the signature, and it is the only
+  sustained tonal element the player produces. Its decays are long enough (420–900 ms) that a
+  1.1 Hz stroke rate never lets it fully die, so the saw builds a continuous ringing pedal under
+  the noise. Once the player stops, it takes 900 ms to go away — and those 900 ms are audible to
+  every camper in range.
+- **The bind.** 12% of strokes: the tooth train **stops dead for 90 ms** and the plate mode rings
+  alone. That is the blade fighting you. Model it flatly (§1.5). It is funny because it is
+  physically accurate and because it costs the player time they do not have.
+- **Dulling.** `STORY.md` says it dulls. Over the course of a night's cutting, ramp the tooth
+  bandpass centre `1900 → 1400 Hz` and the tooth decay `6 → 11 ms`, and raise the kerf bed +4 dB.
+  A dull saw is duller *and louder*, which is a small tragedy delivered entirely through a filter
+  sweep across twenty minutes.
+
+**Noise emission.** Per **C1**, interim: `noise:emit { kind:'hammer', radius: 34, intensity: 0.55 }`
+once per push stroke — 1.1 emissions/second, sustained. This is the closest canonical kind and it
+under-serves the mechanic by a factor of ~7 in area. When `saw` is added at radius 90, change one
+row in §1.3 and one line in the emitter.
+
+### 4.14 Canvas tent flapping — `LIVE`
+
+Scheduled by `Weather`'s gust envelope: when `d(gust)/dt > 0.4`, fire 1–4 flaps 60–220 ms apart.
+
+- WHUMP: white noise, 140 ms, lowpass sweeping `3200 → 380 Hz` over 120 ms, `Q = 1.8`,
+  env `A 6 / D 130`, −22 dBFS@1m.
+- BODY: sine 68 Hz, 60 ms, −20 dBFS@1m — the pole taking the load.
+- SNAP (25%, high gust only): 2 ms noise burst highpassed at 3000, −12 dBFS@1m.
+- **Guy-line hum** (rare, gust > 0.8): `modal({f: 190·rand(0.9,1.1), Q: 280, decay 1400 ms})` at
+  −30 dBFS@1m. A tensioned line singing. Model it accurately and do not feature it; it is beautiful
+  and it is not a moment.
+
+### 4.15 Rain — `BAKED` grains, `LIVE` beds
+
+Three surface models blended by listener position and what is overhead, driven by
+`weather:change { rain }` in 0..1.
+
+**Rain on leaves** — the default.
+- BED `LIVE`: pink noise → bandpass `f = 1900, Q = 0.55` → highshelf `f = 7000, gain = −4` →
+  gain `−34 + 22·rain` dBFS@1m.
+- GRAIN `BAKED` (`rain_leaves.grain`): `grainTrain(rate = 30 + 420·rain, jitter = 1.0)`, each
+  grain 4 ms noise → bandpass `f = 2600·rand(0.5, 1.8), Q = 2.4` → decay 12 ms, −20 dBFS@1m.
+  Rate capped by `settings.tier(60, 140, 300, 450)` with the bed compensated so `low` still sounds
+  like rain rather than like a smaller amount of rain.
+- CANOPY `LIVE`: a very slow (0.08 Hz) random walk on the bed's bandpass between 1500 and 2400 Hz
+  — rain moving through the trees in sheets. Free, and it is 80% of the realism.
+
+**Rain on tin** (under the roof stage, near the shed)
+- BED `LIVE`: pink noise → highpass `f = 1400` → bandpass `f = 4200, Q = 0.7` → `−30 + 24·rain`.
+- GRAIN `BAKED` (`rain_tin.grain`): `grainTrain(rate = 50 + 700·rain)`, each grain
+  `modal(impulse(0.4ms), [{f:3900·r,Q:130,g:1,d:35}, {f:6800·r,Q:100,g:0.5,d:22}])`,
+  `r = rand(0.85, 1.2)`. **Pitched pings, not noise.** This is why tin rain is unmistakable.
+- SHEET: routed through the tin comb (§3.3.4) at `sendT = 0.45`.
+- **This is a gameplay gift.** `GAME_DESIGN.md` §3.3 gives rain a constant masking floor of
+  `0.30 · rain`. The mix must make that legible by getting genuinely loud — the player should
+  *feel* covered before they reason about it.
+
+**Rain on water** (the lake, within 25 m of shore)
+- BED `LIVE`: pink noise → lowpass `f = 900, Q = 0.7` → `−36 + 18·rain`. Dull, no top.
+- PLINKS `BAKED` (`rain_water.plink`): `grainTrain(rate = 4 + 26·rain, jitter = 1.0)`. Each plink
+  is the classic droplet model: a sine whose frequency **rises** `f0 → f0·1.18` over 9 ms then
+  holds, env `A 1 / D 45` exp, `f0 = 900·rand(0.6, 2.2)`, −22 dBFS@1m. **The rising pitch is what
+  makes it read as water and not as a bell.** Send 0.6 to `LAKE_EDGE`.
+
+**And rain plays the mask** (§2.5.2) at `rate = 3 + 26·rain`, on `body`. On a heavy night the
+player is inside a resonating porcelain plate being struck three dozen times a second. Nobody has
+to be told what that means.
+
+### 4.16 Wind through pines, and the whistle that stays put
+
+The forest bed's spine. Three parallel bands plus a sizzle, all `LIVE` (four persistent noise
+sources, four persistent filter chains — 14 nodes total, constructed once, never again):
+
+```
+src = PINK NOISE (shared buffer, 4 independent sources, random offsets)
+
+band A: bandpass f=380,  Q=0.75  → gainA
+band B: bandpass f=1150, Q=1.10  → gainB
+band C: bandpass f=2700, Q=1.40  → gainC
+sizzle: highpass f=5200 → bandpass f=7400, Q=0.6 → gainS
+                                   ↓
+                    sum → [gustLPF] → [windGain] → ambience
+```
+
+- `gainA/B/C/S` are each driven by an **independent** random walk: every 400–900 ms,
+  `setTargetAtTime(base·(0.55 + 0.9·rand()), now, 0.35)`. **The independence is the whole trick.**
+  Bands drifting against each other produce the endless, never-repeating breathing of a real
+  treeline. One correlated envelope sounds like a fan and always will.
+- `gustLPF`: lowpass tracking `Weather`'s gust envelope, `fc = 900 + 6500·gust`, `Q = 0.6`. Gusts
+  open the top end — that is what makes a gust *arrive* rather than merely get louder.
+- `windGain = −40 + 26·wind` dBFS@1m.
+- Base weights at `wind = 0.5`: A `1.00`, B `0.62`, C `0.40`, S `0.16`. As `wind` rises, C and S
+  rise faster (`^0.7` exponent) than A — **a hard wind is a hiss, a soft wind is a sigh.**
+- **Directionality:** modulate the stereo balance of **band C only**, 0.05 Hz LFO, ±0.35. The high
+  band is the most directional in reality, and this alone makes the wind move across the map.
+
+#### 4.16.1 The pine whistle — a landmark, not a startle
+
+v1.0: "Above `wind > 0.75`, add the pine whistle… retriggering every 4–9 s. **the first time a
+player hears it they will think it is a voice.**"
+
+That is a slot-machine scare, and §5.4 of this same document forbids it: "the cricket cut must be
+causally honest… the moment they stop trusting it, it stops being scary." A trunk that sounds like
+a voice on a timer teaches the player that the game lies.
+
+**The whistle is one specific tree, at one fixed world position, every night.**
+
+```
+position:  a single dead pine at a seeded, fixed location on the ridge, published by Forest at
+           world-gen and cached by AudioEngine at init. Same seed → same tree → same place, all
+           seven nights.
+recipe:    modal({f: 2410, Q: 340, decay 2.5 s}) excited by the local wind noise at −34 dBFS@1m
+gate:      wind > 0.62 at that position; retrigger every 4–9 s while gated
+```
+
+Note the **rising** resonance exception: as a gust builds, `f_center` climbs `2380 → 2440` and
+falls back. This is one of only two rising wood sounds in the game (§4.12.1) and it is the reason
+it reads as *breath* rather than as strain.
+
+**Why this is better.** The player will hear it on Night 1 from 90 m and it will frighten them.
+They will hear it again on Night 2 from a different angle. Somewhere around Night 3 they will walk
+to it, in the dark, and find a dead pine, and stop being afraid of it. From then on it is a
+**landmark** — a fixed audible bearing in a forest with no map — and the horror becomes what the
+player chooses to do with a landmark they now trust. That is a mechanic. A timer is not.
+
+### 4.17 Thunder — the skill ceiling, made timeable
+
+Three separate failures in v1.0, all fixed here.
+
+#### 4.17.1 Distance and delay — from `Weather`, verbatim
+
+`GAME_DESIGN.md` §3.3: `distance` is drawn from `rand.range(0.4, 4.2)` km and
+`thunderDelay = distance_km · 2.9 s`.
+
+**v1.0's "Near (< 400 m) — the crack" class was unreachable dead code.** `rand.range(0.4, 4.2)`
+never returns less than 0.4. The most dramatic thunder class in the document could not fire.
+**Deleted.** If a near strike is wanted, the request goes to the Director agent to widen
+`Weather`'s range to `rand.range(0.05, 4.2)`; until then there is no near class and no code
+pretending there is one.
+
+**Delay uses `2.9 s/km`, not `d/343`.** v1.0 scheduled at `distanceMetres / 343`, which is 343 m/s
+and disagrees with `Weather` by 60 ms at 4.2 km. Audio must be sample-accurate against the
+mechanic, not against physics. Take the design's constant.
+
+`AudioEngine` schedules thunder at `t_flash + 2.9 · distance_km` seconds. **Never fake this.** A
+3 km strike is 8.7 s of silence (§8 S4) and that silence is free horror the player counts.
+
+#### 4.17.2 The two classes
+
+**Mid (0.4–2.0 km).** No crack — the crack belongs to strikes under ~0.4 km and there are none.
+- Brown noise → lowpass `fc = 900·(400/d_m)^0.5` clamped [140, 700], `Q = 0.8`.
+- **Duration: `2.5 + 3.5·(1 − distance_km/4.2)` seconds, verbatim from `GAME_DESIGN.md` §3.3.**
+  v1.0 used `2.5 + d/500` with `d` in metres, giving 6.5 s at 2 km against the design's 4.33 s.
+  A player timing hammer strikes to a 6.5 s sound inside a 4.33 s `maskLevel()` window gets caught
+  on the last two taps of the ladder, every time, and it reads as the game cheating.
+- Amplitude is a **multi-tap sequence**, not one envelope: 4–8 gain lumps at irregular intervals
+  (0.2–1.4 s apart), each a `setTargetAtTime` up then down, overall decay `e^(−t/τ)`,
+  `τ = duration/2.5`. Thunder rolls because different parts of the channel are at different
+  distances. Model that literally and it sounds right.
+- Peak **−11 LUFS(M)**, ≤ 900 ms above −14.
+
+**Far (2.0–4.2 km).**
+- Lowpass at **340 Hz** — *not* v1.0's 110 Hz. See §4.17.3.
+- Plus a **sky-hiss layer**: pink noise → bandpass `f = 1100, Q = 0.5` → gain, with a 4.0 s attack
+  and a 3.0 s release, peaking at −30 dBFS@1m. This is the band that actually does the masking.
+- Duration by the same formula (6.0 s at 2 km falling to 2.5 s at 4.2 km); entirely lumps, no
+  transient.
+- Peak **−18 dBFS@1m**, not v1.0's −26.
+- Routed **0.7 wet into `LAKE_EDGE`** in addition to its dry path — legal now that all four
+  convolvers are resident (§3.3.1). Distant thunder is mostly reverb.
+
+Both classes are 2D stereo with a manual pan matching the flash's bearing, `rolloffFactor` not
+applicable (§3.1). Both use a `WaveShaper` on the leading lump with **`oversample: '4x'`**.
+
+Every thunder also asks `Weather` for a **+40% gust arriving 1.5 s after the sound** — the
+pressure wave. Audible through `gustLPF` (§4.16).
+
+#### 4.17.3 The masking invariant — why far thunder got louder
+
+`GAME_DESIGN.md` §3.3 ramps `maskLevel()` to **0.85 regardless of strike distance**. A 4 km strike
+suppresses `NoiseSystem` exactly as hard as a 0.5 km strike. But v1.0 mixed far thunder at
+**−26 dB through a 110 Hz lowpass** — a rumble with no energy above 110 Hz.
+
+The thing being masked is a hammer tap (§4.4), whose energy sits at 186–1830 Hz (wood modes) and
+3.1–3.8 kHz (nail modes). **A 110 Hz rumble masks none of it.** The AI would grant the player 85%
+suppression while the player's ear told them, correctly, that they were completely exposed. That
+is the exact shape of a mechanic players call cheating.
+
+**The invariant, stated as a testable contract:**
+
+> For the entire interval during which `Weather.maskLevel() > 0.5`, the thunder bed's loudness in
+> the **500 Hz – 4 kHz** band must be at least equal to the loudness of a single `hammer` tap
+> heard from **12 m**, measured in the same band.
+
+`tools/loudness-check.mjs` (§11.1) asserts this on a scripted storm scene with a third-octave
+analysis. The 340 Hz lowpass, the sky-hiss layer, and the −18 dBFS peak are the values that
+satisfy it; if the band content changes, re-derive them rather than adjusting by ear.
+
+#### 4.17.4 The window contract — the player must hear it open and close
+
+`GAME_DESIGN.md` calls thunder masking "the skill ceiling." A skill ceiling you cannot perceive is
+a lottery. v1.0 never mentioned `maskLevel()` at all.
+
+`Weather`'s window: `maskLevel` ramps 0 → 0.85 over **0.4 s**, holds, then decays over **1.2 s**,
+across a total envelope of `2.5 + 3.5·(1 − d/4.2)` seconds.
+
+Audio's obligations, in both directions:
+
+| Window event | Audible signal | Timing |
+|---|---|---|
+| **Open** | the **first lump's attack**, ramped over exactly **0.4 s** to match `maskLevel`'s ramp | at `t_flash + 2.9·d_km` |
+| **Full** | the bed is at peak and stable | 0.4 s after open |
+| **Close warning** | the **last lump's attack is placed exactly at `duration − 1.2 s`** — a final, distinctly louder swell whose only job is to say *this is the last one* | `duration − 1.2 s` |
+| **Closed** | the last lump's decay crosses −30 dBFS | `duration` |
+
+The last lump is not decorative. It is scheduled, deterministic, and always the loudest of the
+trailing lumps, so the player learns within two storms that when thunder swells *one more time*,
+they have 1.2 seconds of cover left. That is enough for one hammer tap at the ladder's tight end
+(taps 5 and 6 are 203 and 99 ms apart) and not enough for two. **That is the skill ceiling,
+expressed in audio.**
+
+Deaf players get the same information through the caption ladder in §7.5.
+
+#### 4.17.5 Photosensitivity
+
+`settings.photosensitive` caps lightning to 1 flash per 12 s and "**compensates** by lengthening
+thunder windows 1.4× so the masking mechanic is unharmed" (`GAME_DESIGN.md` §10.2). Audio must
+scale the envelope, the lump spacing, and the close-warning position by the same 1.4×, from
+`Weather`'s reported duration rather than recomputing it. **Never hard-code the 1.4.**
+
+### 4.18 Campfire — `LIVE` bed, `BAKED` grains
+
+The camp's audio landmark. Positioned, `refDistance 2.5`, `rolloffFactor 0.6`.
+
+- BED `LIVE`: brown noise → lowpass `f = 520, Q = 0.7` → −30 dBFS@1m, random-walked ±3 dB every
+  250 ms. The roar of combustion.
+- CRACKLE `BAKED` (`fire.crackle`): Poisson `grainTrain(rate = 9, jitter = 1.0)`, grains
+  `modal(impulse(0.6ms), [{f:2400·r,Q:26,g:1,d:14}, {f:5100·r,Q:18,g:0.4,d:8}])`,
+  `r = rand(0.5, 2.2)`, −18 dBFS@1m.
+- POP `BAKED` (`fire.pop`): 1 in 14 grains, adds `{f: 640·r, Q: 12, g: 1.2, d: 60}` and +7 dB; and
+  within 8 m, a 90 ms ember hiss bandpassed at 3800 with a downward sweep, −26 dBFS@1m.
+- RAIN HISS `LIVE`: at `rain > 0.3`, a continuous `f = 4600, Q = 0.6` bandpassed noise at
+  `−34 + 10·rain` and the bed drops −4 dB. A fire in the rain is a different, sadder sound.
+- **The clock.** `GAME_DESIGN.md` §6.3: "the camp's fires dying at 0.55." From `timeOfNight 0.50`
+  ramp the bed −9 dB and the crackle rate `9 → 2` over 120 s. The camp's fires going out is one of
+  the three diegetic clocks in the game and the player will read it before they can articulate it.
+
+### 4.19 Zipper — the gameplay siren — `BAKED` grains
+
+Tent doors: the sound that means someone is coming out.
+
+`grainTrain(rate = 110 → 170 → 90 across the duration, jitter 0.15)` — the rate curve *is* the
+hand speed. Each grain 1.5 ms noise → bandpass `f = 3400·rand(0.92, 1.08), Q = 6` → decay 7 ms.
+Sum → bandpass `f = 2900, Q = 1.2` → a `modal` slider body at `{f: 1250, Q: 16, decay 40 ms}`
+excited by the same train at −10 dB. Duration 400–900 ms. Ends with a hard stop and a single click
+(§4.20's transient).
+
+**This must be audible at 40 m through moderate rain.** `rolloffFactor 0.75`, +3 dB presence peak
+at 3.2 kHz, priority 2, and it is exempt from grain-rate tiering — the `low` tier gets the full
+rate, because this is information, not texture.
+
+### 4.20 Flashlight click — `LIVE`
+
+Two-part, 55 ms total, and it must be *crisp*: a camper's thumb on a switch is the most important
+55 ms in the game.
+
+- SWITCH TRANSIENT: 0.8 ms noise → bandpass `f = 3600, Q = 5.5` → decay 6 ms, −8 dBFS@1m.
+- PLASTIC BODY: `modal([{f:1880,Q:34,g:1,d:38}, {f:3720,Q:28,g:0.5,d:26},
+  {f:7100,Q:20,g:0.2,d:14}])`.
+- SPRING: 12% chance of a `{f: 5400, Q: 180, decay 220 ms, gain 0.15}` ring.
+
+Off-click is the same recipe at 0.94× frequency and −2 dB. **The player must be able to tell on
+from off by ear**, because in fog the beam appearing is sometimes not visible and the click always
+is. This 6% frequency difference is the smallest deliberate discrimination in the game; verify it
+in playtest at 25 m through rain, not at 1 m in a quiet room.
+
+The player's own lantern douse (`GAME_DESIGN.md` §4.4: "loud-ish click, `radius 5`") uses the
+same recipe at 0.88× and emits `noise:emit { kind:'brush', radius: 5, intensity: 0.10 }` — the
+nearest canonical kind to a small mechanical click at 5 m (see conflict **C4**; the same interim
+applies).
+
+---
 <!--CONTINUE-->
+
 

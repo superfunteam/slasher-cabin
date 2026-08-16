@@ -1275,22 +1275,32 @@ export class Terrain {
   // MATERIAL
   // ===========================================================================================
 
-  /** Ask the Materials system for a ground material. Probes several plausible API shapes. */
-  _requestGroundMaterial() {
+  /**
+   * The reference ground material from the shared library (`src/render/Materials.js`).
+   *
+   * We take its NUMBERS, not its shader. Materials patches its ground entries by replacing
+   * `<map_fragment>`, `<roughnessmap_fragment>` and `<normal_fragment_maps>` wholesale — and so
+   * does our splat. Two owners of the same chunk means whichever patch runs second silently
+   * finds no token and does nothing, which is exactly the class of bug that ships looking fine
+   * on the author's machine. So Terrain owns the ground shader and integrates with Materials
+   * through the two interfaces that compose cleanly: `globalUniforms` and the authored constants.
+   *
+   * `has()` is probed first so an unknown name never trips the library's fallback path (which
+   * returns a grey stand-in AND logs a warning — ARCHITECTURE.md §13 wants a clean console).
+   */
+  _referenceGroundMaterial() {
     const M = this.ctx?.systems?.get?.('Materials');
-    if (!M) return null;
-    const probes = [
-      () => M.getTerrainMaterial?.(),
-      () => M.get?.('terrain'),
-      () => M.get?.('ground'),
-      () => M.materials?.terrain,
-      () => M.terrain,
-    ];
-    for (const p of probes) {
+    if (!M || typeof M.get !== 'function') return null;
+    for (const name of GROUND_MATERIAL_NAMES) {
       try {
-        const r = p();
-        if (r && r.isMaterial && r.isMeshStandardMaterial) return r;
-      } catch { /* stub / different shape — fall through */ }
+        if (typeof M.has === 'function' && !M.has(name)) continue;
+        const m = M.get(name);
+        // Never adopt the library's own fallback — it is midSlate grey and would tint the
+        // whole world blue through `diffuseColor.rgb *= gAlbedo`.
+        if (m?.isMaterial && m.name !== 'sc-fallback') return m;
+      } catch (e) {
+        Log.once('terrain:mats', `Terrain: Materials.get('${name}') threw — using local constants.`, e);
+      }
     }
     return null;
   }

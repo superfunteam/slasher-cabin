@@ -2676,4 +2676,180 @@ Every spawn, every storm schedule, every blueprint layout derives from `ctx.sett
 - `Blueprint` output is not serialized (§14.1); it is regenerated.
 - Golden-image regression for the manual (§8.6) is possible at all.
 
+---
+
+## 19. ACCEPTANCE TESTS
+
+v1.0 contained roughly a dozen sentences doing the work that specification should do — "the
+cascade is **the game's scariest moment**", "**it is terrifying**", "the game's **best sequence**",
+"the player **will feel it in their stomach**", "**the thesis statement of the entire game**", and
+worst, as the acceptance test for the tutorial: "if the player does not physically flinch… **the
+game has failed** and the sequence must be retuned until it does" — retuned *how*, against *what
+measurement*?
+
+None of those is falsifiable and none tells an implementer what to build. Every one is now a row
+below, with an instrument and a remedy. **A target without an instrument is not a target.**
+
+**Instrumentation.** `settings.devTelemetry: true` (dev builds only) writes a ring buffer of input
+events, `player:move`, detection values, and all `build:*` / `noise:emit` traffic at 30 Hz to a
+downloadable JSON. Playtests are additionally screen- and input-captured. Startle is measured as
+**mouse/stick angular velocity > 400 px-equivalent within a 200 ms window, or a stop-and-crouch
+within 1.5 s** — either counts.
+
+| # | Claim being tested | Instrument | Threshold | Remedy if it fails |
+|---|---|---|---|---|
+| **A1** | The 4:39 first creak teaches that a badly-built cabin tells on you | first-time playtesters, n ≥ 20, telemetry + screen capture at 4:39 ± 3 s | **≥ 70% exhibit a measurable startle**, and ≥ 85% take a defensive action (re-seat / hide / freeze) within 6 s | raise creak `severity` in **0.05** steps (from 0.45) and shorten the delay from placement in **1 s** steps (from 9 s). Re-test after each step. Do not exceed severity 0.65 — past that the tutorial creak is louder than a Night-4 creak and the curve inverts. |
+| **A2** | Nights are the right length | telemetry `timeOfNight` at `night:complete`, n ≥ 20 per night | **median ∈ [0.82, 0.97]** per night | adjust `SLACK` (§5.2), **not** `nightDurationSeconds`. The night length is derived. |
+| **A3** | The 30% slack is enough for real play | same run set | **≤ 10% of runs hit `reason: 'dawn'`** on nights 1–5; ≤ 25% on nights 6 | raise `SLACK` by 0.05 and re-derive all seven lengths from §5.2 |
+| **A4** | The report chase is winnable when unencumbered and lost when encumbered | telemetry: short reports begun vs interrupted, split by `carrySlotsUsed` at report start | **unencumbered intercept 60–80%**; **encumbered intercept ≤ 5%** | if intercept > 85%, raise Panic speed to 3.10 m/s (§9.7) before touching anything else. If < 50%, extend the short report from 26 s to 30 s. |
+| **A5** | The four detection targets (§9.3) hold in the built game | automated scene test, not playtest: a scripted player at fixed poses/distances, 100 trials each | T1 **never** detected in 300 s; T2 **22 s ± 1.5**; T3 **3.6 s ± 0.4**; T4 **0.80 s ± 0.08** | the constants are solved, so a failure here is an implementation bug, not a tuning gap. Fix the code. |
+| **A6** | The settle cascade is a climax, not routine | telemetry: cascades per night per run | **≤ 1 cascade per run on nights 1–3**; **1–3 on nights 4–6**; **0 on night 7** (asserted, §12.8) | if > 1 on early nights, lower accrual from 0.10 toward 0.08. If 0 on nights 4–6, raise decay from 0.15 toward 0.12. Never change `CABIN_CAP`. |
+| **A7** | Players learn the 0.85 horizon tell in about three nights | post-session structured interview + telemetry (rate of "hurried" behaviour — sprint use, set-down→drop ratio — in the last 15% of the night) | **≥ 60% of players show a behaviour change after `timeOfNight` 0.85 by Night 3**, without ever having been told | if < 60%, raise the shift from 6% to 9% toward `#2a3340`. Do **not** add a clock. |
+| **A8** | Finding a missing part feels good with no words and no fanfare | post-session: unprompted mention of the checkbox/bell; telemetry: time-to-resume-building after `tool:found` | **≥ 50% mention it unprompted**; median resume < 8 s | if the reward reads as flat, lengthen the chime decay 1.4 → 1.8 s. Do **not** add text. |
+| **A9** | The manual is readable | automated, every golden render (§8.6) | **every part silhouette ≥ 40 px** at 1080p, default `manualContrast`; **0 arrow-arrow crossings** nights 1–5, ≤ 4 on night 6 | split the stage across two spreads. Never shrink below the invariant. |
+| **A10** | The manual's safety panel (§13.4) lands without commentary | post-session: unprompted mention; **and** a negative check — no participant should describe the game as "making fun of" the killings | **≥ 40% mention the panel**; **0% report the game as joking about the deaths** | the second threshold is a hard gate. If any participant reads the panel as a gag, redraw it flatter — fewer strokes, no expression on the mascot. |
+| **A11** | Night 6 is the worst night, and Night 5 is the scariest image | post-session ranking of the seven nights on "most frightened" and "most memorable image" | **Night 6 ranks top-2 on frightened for ≥ 60%**; **Night 5 top-2 on image for ≥ 50%** | if Night 6 under-ranks, lower its camper count floor from 2 to 1 before adding anything. Emptiness is the mechanism. |
+| **A12** | The game runs | automated capture, 1080p, `quality: 'ultra'`, M-series Mac, Night 6 storm with 5 campers and a cascade | **p99 frame ≤ 16.6 ms**; **0 frames > 33 ms**; raycasts/frame ≤ 12 (asserted in code); draw calls < 220 | §18.1 budgets are per-system; the offender is identifiable. Fix the offender. |
+| **A13** | Ending C is findable without a prompt | telemetry on Night 7: which ending fires, and time from house-complete to ending | **≥ 45% reach `ending_c` on a first playthrough**, median < 6 min | if < 25%, have `Blueprint`'s final page render the dotted chair outline at 1.15× scale. Never add a prompt, a marker, or an interact glyph. |
+| **A14** | The comedy dies on Night 4 | post-session: per-night humour rating, 1–5 | **mean rating drops ≥ 1.5 points between Night 3 and Night 5** | if it does not, the card is still editorialising (§15.3) or the VO bank is still funny past Night 4. Audit both against `STORY.md`'s non-negotiables. |
+
+---
+
+## 20. IMPLEMENTATION NOTES FOR MODULE OWNERS
+
+### 20.1 Ownership recap
+
+- **`BuildSystem.js`** owns `state.installed`, `state.inventory`, `state.creaks`,
+  `stats.perfectJoins`, `sawProgress`, and every `w` / `torque` value. It is the only writer of
+  `build:*` and `tool:*`.
+- **`Blueprint.js`** exposes `Blueprint.forNight(n, rand)` per §8.1 — **now including
+  `authorship`**, which v1.0's signature omitted despite `STORY.md §3` requiring it. It draws
+  nothing; `BlueprintUI.js` rasterises.
+- **`Campers.js`** is the only listener of `noise:emit` that changes behaviour. It owns
+  `state.suspicion`, `state.spotted`, `state.structureKnowledge`, and per-camper `familiarity`. It
+  is the only emitter of `player:spotted` / `player:hidden`.
+- **`Weather.js`** owns `weather:change` and must expose `nextStrikeIn()` and `maskLevel()` as
+  plain synchronous methods; `NoiseSystem` calls `maskLevel()` once per frame and caches it.
+  `Weather` must honour the **≤ 45 s strike guarantee** (§7.5).
+- **`NightManager.js`** owns `state.night`, `state.phase`, `state.timeOfNight`, and is the only
+  emitter of `night:*` and `story:beat`. It drives the `Scripted` camper state (§9.7).
+- **`Player.js`** must expose `Player.illumination` (0..1), `Player.carrySlotsUsed` (0..4),
+  `Player.flamePosition` (Vector3 | null) and `Player.lanternHooded` (bool) as read-only
+  properties; `Campers` null-checks all four.
+- **`CabinSite.js`** owns slot layout, silhouette features (§9.5), ruin anchors, and the
+  concealment volumes (§13.5).
+- Every tunable in this document belongs in a single exported `TUNING` object per module, so a
+  balance pass never requires editing logic.
+
+### 20.2 Requested `GameState` additions
+
+`ARCHITECTURE.md §8` is owned by the Engine agent. These fields are **requested**, not assumed;
+until they exist, every reader must null-check. All are plain serializable data (no Three.js
+objects), per the contract.
+
+```js
+state.structureKnowledge = { seenBy: [], enteredBy: [], reportedAs: null, featuresKnown: {} };
+state.campers            = { /* camperId → { familiarity:{}, alive:bool, state:string } */ };
+state.bodies             = [ /* { camperId, position:[x,y,z], concealment:string } */ ];
+state.sawProgress        = { /* partId → 0..1 */ };
+state.stats.reportsTotal      = 0;   // short + long, all nights — drives rung 5
+state.stats.shortReports      = 0;
+state.stats.longReports       = 0;
+state.stats.kills             = 0;
+state.stats.recuts            = 0;
+state.stats.creakDebtCarry    = 0;
+state.stats.metresHauled      = 0;
+```
+
+### 20.3 Requested `Settings` additions
+
+The full list is in §16. New in v2.0 beyond v1.0's request: `holdToCrouch`, `holdToToggle`,
+`lightningFlashes`, `reducedGore`, `manualContrast`, `devTelemetry`.
+
+### 20.4 The tier rule, restated without argument
+
+> **Gameplay constants must never be routed through `settings.tier()`.** Quality tiers change
+> pixels, never numbers that affect outcomes.
+
+Difficulty is `settings.difficulty` and only ever `settings.difficulty`. §6.5's seating band is:
+
+```js
+const h = { story: 0.150, standard: 0.075, gristle: 0.055 }[settings.get('difficulty')];
+```
+
+v1.0 wrote `bandWidth = settings.tier(0.28, 0.20, 0.16, 0.16)` and then argued with itself in the
+next clause — "no, use the **difficulty** setting, not the quality tier" — leaving a half-finished
+edit in a document whose first line reads "This is the document gameplay agents implement." An
+agent implementing literally would have shipped the wrong line. **A binding spec never
+deliberates.** If a decision is unresolved, it does not go in the document.
+
+The one place a quality tier touches something that *looks* like gameplay is §18.3's lantern shadow
+map, capped at 2048 on `ultra`. That is a pixel decision (shadow softness at a 22 m far plane) with
+no effect on `lum`, `flameVisibility`, detection, or noise. It is legal.
+
+### 20.5 Where this document declines the critique, and why
+
+The v1.0 review was right about most things and this document adopts most of it. Six places where
+it is partially or fully declined, stated here so the reasoning cannot be lost or re-litigated by
+someone reading only the diff.
+
+**1. "Every stealth verb must be a construction verb." — Partially adopted.**
+The *distraction* verb and the *cover* system are now construction verbs (§9.6: Provoke, and the
+cabin rewriting `Navmesh` and the occlusion grid), and the thrown bracket is deleted. But crouch,
+freeze, break-LOS and douse-the-lantern stay exactly as they are. They are the grammar of the form,
+like WASD; a player arriving from any stealth game must be able to *do* something on Night 1
+without being taught a bespoke vocabulary first. Replacing them with premise-native equivalents
+would make the game more original and worse. The correct target was the verb that was *lazy* (the
+noisemaker arrow with a caption pasted on), not the verbs that were *conventional*.
+
+**2. Uniform 12 Hz occlusion round-robin. — Declined in favour of a hot/cold split (§18.2).**
+A camper looking directly at you needs frame-accurate occlusion; at 12 Hz, ducking behind a trunk
+registers up to 83 ms late, at exactly the moment the player is judging whether the game is fair.
+A camper 60 m away facing the lake needs nothing. Uniform budgets spend equally on both. The split
+spends 5 rays/frame on the camper that matters and ~0.22 rays/frame on each that does not, for the
+same total.
+
+**3. "The chase fantasy is structurally impossible in both directions." — Half adopted.**
+The 90 m / 12 s arithmetic was indefensible and is fixed (§9.7: 26 s, 45 m cap, Panic 2.90 m/s +
+stumble). But the implied fix — that the player should generally win chases — is declined. **Ansel
+is not fast, and a running person should usually get away.** Panic speed is set so that a player
+who *anticipated* can close, not so that a player who *reacted* can. The real decision the sequence
+poses is "drop the 62 kg beam in the mud, or lose the night," and that is a better beat than a foot
+race. Target A4 encodes it: 60–80% intercept unencumbered, ≤ 5% encumbered — deliberately not 95%.
+
+**4. Wrong-part repair "at a brutal but survivable cost." — Adopted, with a scar.**
+Recut (§7.4) exists from Night 1 and clears `w = 1.0`. But it clears it to **0.10, not 0.00**,
+because you cannot unmake a split — you cut back to sound timber and sister the join, and it will
+always be slightly the worse for it. A recut join still creaks, faintly, forever. The death spiral
+is gone; the consequence is not. "The cabin is a record of your reading comprehension" (§12.8) has
+to remain true or the whole creak system is decorative.
+
+**5. "Felt pad → still 33 m, therefore the radius curve is broken." — Declined; the rate was
+broken, not the radius.** A 60 m groan is *supposed* to be terrifying. What made v1.0 unplayable
+was one such groan every **3.9 seconds, permanently**. With `PER_JOIN_CAP` at 1.5/min it is one
+every 40 s, and the felt pad's 33 m is then a meaningful mitigation rather than a rounding error on
+a siren. Capping the rate preserves the sound design (`AUDIO_DIRECTION.md §4.11` maps severity to a
+240 Hz centre frequency and a 1.9 s envelope — that sound *should* carry 60 m); capping the radius
+would have quietly deleted it.
+
+**6. "A map — any one of these would stop a AAA team on day one." — Adopted, and scoped.**
+§3 publishes the coordinate frame, the playable bounds, 21 named locations with exact distances,
+and the four ground types, because every stealth and time number in this document is computed
+against them and was unverifiable without them. It does **not** publish the full site geometry,
+tree placement, or building interiors — those belong to `Terrain.js`, `Forest.js` and `Props.js`,
+and putting them here would create a fifth document for those agents to diverge from. This section
+owns the **distances**. They own the world.
+
+### 20.6 First things to build, in order
+
+For an agent starting from zero, the dependency order that unblocks the most work fastest:
+
+1. `CabinSite` slot schema (§6.3) with `partId` and `yawCandidates` — everything downstream reads it
+2. `BuildSystem` place/correctness (§6.4) and the seating check (§6.5)
+3. `NoiseSystem`'s 2 m occlusion grid (§9.6) — `Campers` and `Physics` both depend on it existing
+4. `Blueprint` projection + HLR (§8.2–8.3) — the long pole; start it in parallel on day one
+5. `Campers` senses with the §9.3 constants and the §18.2 ray budget
+6. The creak model with its three caps (§7.1–7.3)
+7. Night 1 end-to-end against §17, then §19 row A1
+
 <!--SECTION-BREAK-->

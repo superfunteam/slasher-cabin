@@ -1585,10 +1585,19 @@ export class Materials {
     return material;
   }
 
-  /** Postprocessing may enable this if it renders into a multisampled target. */
+  /**
+   * Postprocessing owns whether the scene target is multisampled. Call this with `true` once
+   * it is, and the foliage cards drop their hard cutout in favour of true alpha-to-coverage
+   * (ART_DIRECTION trap 10 — no crawling edges). Call with `false` to restore the cutout.
+   */
   setAlphaToCoverage(enabled) {
-    for (const [, m] of this._materials) {
-      if (m.alphaTest > 0) { m.alphaToCoverage = !!enabled; m.needsUpdate = true; }
+    for (const [name, m] of this._materials) {
+      if (!SPECS[name]?.alphaToCoverage) continue;
+      m.alphaToCoverage = !!enabled;
+      m.alphaTest = enabled ? 0.10 : (SPECS[name].alphaTest ?? 0.30);
+      m.needsUpdate = true;
+      const dm = this._depthMaterials.get(name);
+      if (dm) { dm.alphaTest = m.alphaTest; dm.needsUpdate = true; }
     }
   }
 
@@ -1858,7 +1867,9 @@ export class Materials {
       uniforms: this._makeLocalUniforms(spec),
       textures: {
         cavity: spec.noCavity ? null : (set.cavity ?? null),
-        detail: this._detailNormal,
+        // SC_WATER reads its flow normal through the detail sampler — hand it the animated
+        // water normal when Textures baked one, otherwise the generic detail normal.
+        detail: (spec.water && set.normal) ? set.normal : this._detailNormal,
         alpha: set.alpha ?? null,
         triAlbedo: set.map ?? null,
         triNormal: set.normal ?? null,
