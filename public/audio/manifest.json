@@ -1,0 +1,241 @@
+{
+  "generated": true,
+  "loopCrossfadeSeconds": 2,
+  "beds": [
+    {
+      "id": "camp-radio-1984",
+      "file": "audio/bed/camp-radio-1984.mp3",
+      "bytes": 289271,
+      "seconds": 18,
+      "loop": true
+    },
+    {
+      "id": "campfire",
+      "file": "audio/bed/campfire.mp3",
+      "bytes": 289271,
+      "seconds": 18,
+      "loop": true
+    },
+    {
+      "id": "crickets-dense",
+      "file": "audio/bed/crickets-dense.mp3",
+      "bytes": 321036,
+      "seconds": 20,
+      "loop": true
+    },
+    {
+      "id": "forest-night-calm",
+      "file": "audio/bed/forest-night-calm.mp3",
+      "bytes": 353219,
+      "seconds": 22,
+      "loop": true
+    },
+    {
+      "id": "forest-night-tense",
+      "file": "audio/bed/forest-night-tense.mp3",
+      "bytes": 353219,
+      "seconds": 22,
+      "loop": true
+    },
+    {
+      "id": "lake-shore",
+      "file": "audio/bed/lake-shore.mp3",
+      "bytes": 321036,
+      "seconds": 20,
+      "loop": true
+    },
+    {
+      "id": "rain-on-leaves",
+      "file": "audio/bed/rain-on-leaves.mp3",
+      "bytes": 321036,
+      "seconds": 20,
+      "loop": true
+    },
+    {
+      "id": "rain-on-tin",
+      "file": "audio/bed/rain-on-tin.mp3",
+      "bytes": 289271,
+      "seconds": 18,
+      "loop": true
+    },
+    {
+      "id": "wind-pines-gust",
+      "file": "audio/bed/wind-pines-gust.mp3",
+      "bytes": 289271,
+      "seconds": 18,
+      "loop": true
+    },
+    {
+      "id": "wind-pines-light",
+      "file": "audio/bed/wind-pines-light.mp3",
+      "bytes": 321036,
+      "seconds": 20,
+      "loop": true
+    }
+  ],
+  "sfx": [
+    {
+      "id": "bracket-drop-rock",
+      "file": "audio/sfx/bracket-drop-rock.mp3",
+      "bytes": 33062,
+      "seconds": 2,
+      "loop": false
+    },
+    {
+      "id": "creak-t1",
+      "file": "audio/sfx/creak-t1.mp3",
+      "bytes": 48945,
+      "seconds": 3,
+      "loop": false
+    },
+    {
+      "id": "creak-t2",
+      "file": "audio/sfx/creak-t2.mp3",
+      "bytes": 65245,
+      "seconds": 4,
+      "loop": false
+    },
+    {
+      "id": "creak-t3",
+      "file": "audio/sfx/creak-t3.mp3",
+      "bytes": 81128,
+      "seconds": 5,
+      "loop": false
+    },
+    {
+      "id": "creak-t4",
+      "file": "audio/sfx/creak-t4.mp3",
+      "bytes": 112893,
+      "seconds": 7,
+      "loop": false
+    },
+    {
+      "id": "hammer-steel",
+      "file": "audio/sfx/hammer-steel.mp3",
+      "bytes": 33062,
+      "seconds": 2,
+      "loop": false
+    },
+    {
+      "id": "hammer-wood",
+      "file": "audio/sfx/hammer-wood.mp3",
+      "bytes": 33062,
+      "seconds": 2,
+      "loop": false
+    },
+    {
+      "id": "lantern-shutter",
+      "file": "audio/sfx/lantern-shutter.mp3",
+      "bytes": 33062,
+      "seconds": 2,
+      "loop": false
+    },
+    {
+      "id": "lumber-drop",
+      "file": "audio/sfx/lumber-drop.mp3",
+      "bytes": 48945,
+      "seconds": 3,
+      "loop": false
+    },
+    {
+      "id": "lumber-stack",
+      "file": "audio/sfx/lumber-stack.mp3",
+      "bytes": 48945,
+      "seconds": 3,
+      "loop": false
+    },
+    {
+      "id": "nail-pull",
+      "file": "audio/sfx/nail-pull.mp3",
+      "bytes": 48945,
+      "seconds": 3,
+      "loop": false
+    },
+    {
+      "id": "tarp-flap",
+      "file": "audio/sfx/tarp-flap.mp3",
+      "bytes": 65245,
+      "seconds": 4,
+      "loop": false
+    },
+    {
+      "id": "thunder-far",
+      "file": "audio/sfx/thunder-far.mp3",
+      "bytes": 193141,
+      "seconds": 12,
+      "loop": false
+    },
+    {
+      "id": "thunder-mid",
+      "file": "audio/sfx/thunder-mid.mp3",
+      "bytes": 177258,
+      "seconds": 11,
+      "loop": false
+    },
+    {
+      "id": "thunder-near",
+      "file": "audio/sfx/thunder-near.mp3",
+      "bytes": 145075,
+      "seconds": 9,
+      "loop": false
+    },
+    {
+      "id": "twig-snap",
+      "file": "audio/sfx/twig-snap.mp3",
+      "bytes": 33062,
+      "seconds": 2,
+      "loop": false
+    },
+    {
+      "id": "wood-split",
+      "file": "audio/sfx/wood-split.mp3",
+      "bytes": 48945,
+      "seconds": 3,
+      "loop": false
+    }
+  ],
+  "music": [
+    {
+      "id": "music-dawn",
+      "file": "audio/music/music-dawn.mp3",
+      "bytes": 800854,
+      "seconds": 50,
+      "loop": false
+    },
+    {
+      "id": "music-hunt",
+      "file": "audio/music/music-hunt.mp3",
+      "bytes": 960515,
+      "seconds": 60,
+      "loop": false
+    },
+    {
+      "id": "music-night7",
+      "file": "audio/music/music-night7.mp3",
+      "bytes": 1200005,
+      "seconds": 75,
+      "loop": false
+    },
+    {
+      "id": "music-tension",
+      "file": "audio/music/music-tension.mp3",
+      "bytes": 1200841,
+      "seconds": 75,
+      "loop": false
+    },
+    {
+      "id": "music-title",
+      "file": "audio/music/music-title.mp3",
+      "bytes": 960515,
+      "seconds": 60,
+      "loop": false
+    },
+    {
+      "id": "music-work",
+      "file": "audio/music/music-work.mp3",
+      "bytes": 1440750,
+      "seconds": 90,
+      "loop": false
+    }
+  ]
+}
