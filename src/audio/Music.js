@@ -3,9 +3,31 @@
  *
  * OWNER: Audio agent. Binding spec: AUDIO_DIRECTION.md §6 (music), §8 (silence rules).
  *
- * There are no linear tracks, no loops and no samples. Every note in this file is
- * synthesized in WebAudio and scheduled note-by-note against `AudioContext.currentTime`
- * by a ~120 ms lookahead scheduler driven from `update(dt)`.
+ * Every note in this file is synthesized in WebAudio and scheduled note-by-note against
+ * `AudioContext.currentTime` by a ~120 ms lookahead scheduler driven from `update(dt)`.
+ *
+ * ---------------------------------------------------------------------------------------
+ * THE GENERATED BED LAYER (added after `public/audio/` existed — see §"generated beds")
+ * ---------------------------------------------------------------------------------------
+ * `public/audio/manifest.json` may offer six pre-rendered score beds (music-title, -work,
+ * -tension, -hunt, -dawn, -night7). When it does, ONE of them plays underneath everything
+ * above as a HARMONIC FLOOR: highpassed out of the sub band, crossfaded equal-power on bar
+ * boundaries, and seam-crossfaded against itself so a 50–90 s bed never ticks at its loop.
+ *
+ * The synthesis is NOT replaced and NOT reduced. A fixed bed cannot react to
+ * `state.suspicion`, `Campers.nearestDistance` or build progress at the resolution this game
+ * needs; the pad, the prepared piano, the bowed metal and the string still do that on top,
+ * frame by frame. The bed is the floor. The synth is the room.
+ *
+ * DELETE `public/audio/` AND NOTHING CHANGES. The manifest fetch failing (404, offline,
+ * file://, CSP, a fresh clone) is a NORMAL state: it logs at debug level, sets
+ * `generatedAvailable = false`, and the score runs exactly as it did before this layer
+ * existed. Nothing in the boot path ever awaits it.
+ *
+ * The bed lives INSIDE `_sum`, i.e. behind `_gate`, so every §8 silence rule silences it
+ * too — and a total silence additionally closes the bed's own gate and stops its sources,
+ * because §8 is about the score STOPPING, and a bed ducked under a silence would be exactly
+ * the "fading the bed back up under a silence" that §8 S12 calls the one unforgivable sin.
  *
  * ---------------------------------------------------------------------------------------
  * HARMONIC LANGUAGE (stated once, obeyed everywhere) — AUDIO_DIRECTION.md §6.1
@@ -63,6 +85,9 @@
  *   music.collapse()               the escape collapse (§6.3 / §8 S5)
  *   music.currentMood              read-only string, safe to poll from anywhere
  *   music.update(dt, elapsed)      system lifecycle
+ *   music.generatedAvailable       false on a clone with no public/audio/ — informational
+ *   music.bedMood                  read-only string, which generated bed is wanted
+ *   music.setBeds(on)              force the generated bed layer off (synthesis is untouched)
  */
 
 import { Log } from '../core/Log.js';
@@ -137,6 +162,60 @@ function makeTanhCurve(drive) {
 }
 const CURVE_SOFT = makeTanhCurve(1.6);
 const CURVE_RADIO = makeTanhCurve(2.4);
+
+// ------------------------------------------------------------------- generated bed layer
+
+/**
+ * Mood → manifest id. These six are the only music ids this file will ever ask for; an id
+ * the manifest does not list simply never plays and the synthesis covers that mood alone.
+ *
+ *   title    the title screen
+ *   work     the player building undisturbed — STORY.md's emotional core: almost pleasant,
+ *            patient, faintly domestic. The bed under the work theme, not instead of it.
+ *   tension  rising dread
+ *   hunt     chase
+ *   dawn     exhausted resolution at first light (and it STOPS at §8 S11, see below)
+ *   night7   Night 7 only — all the comedy drained out; replaces work and tension entirely
+ */
+const MUSIC_BEDS = {
+  title: 'music-title',
+  work: 'music-work',
+  tension: 'music-tension',
+  hunt: 'music-hunt',
+  dawn: 'music-dawn',
+  night7: 'music-night7',
+};
+
+/**
+ * Per-mood bed trim, dB, inside the score's own mix (the `music` bus applies §2.1 on top).
+ * The bed is a FLOOR: it sits under the pad (−16) and well under the string's struck notes,
+ * so at no point is the synthesized layer competing with a recording for the same job.
+ */
+const BED_TRIM_DB = {
+  title: -16, work: -22, tension: -20, hunt: -17, dawn: -21, night7: -19,
+};
+
+/** Mood crossfade length, seconds. §6.3's transition window is 2–4 s; a hunt arrives sooner. */
+const BED_XFADE_S = 3.0;
+const BED_XFADE_FAST_S = 2.0;
+/** Minimum seconds between mood switches, so a crossfade always completes before the next. */
+const BED_DWELL_S = 8.0;
+/** Equal-power fades are drawn as this many linear segments (a curve without setValueCurve). */
+const XF_STEPS = 16;
+const HALF_PI = Math.PI / 2;
+/** How long a total §8 silence must hold before the bed's sources are stopped outright. */
+const BED_STOP_AFTER_S = 2.0;
+
+/** Honours Vite's `base`, so a subpath deploy still finds `public/audio/`. */
+function siteUrl(rel) {
+  let base = '/';
+  try { base = import.meta.env?.BASE_URL ?? '/'; } catch { /* non-Vite host */ }
+  if (!base.endsWith('/')) base += '/';
+  const path = String(rel ?? '').replace(/^\/+/, '');
+  const href = globalThis.location?.href ?? 'http://localhost/';
+  try { return new URL(`${base}${path}`, href).href; }
+  catch { return `${base}${path}`; }
+}
 
 /** Silence-rule priorities. Highest active rule wins; rules do not blend (§8). */
 const P = {
@@ -329,6 +408,12 @@ export class Music {
     this.currentMood = 'off';
     this.enabled = false;
     this.dread = 0;
+    /**
+     * True only once `public/audio/manifest.json` has been fetched, parsed, and found to
+     * list at least one music bed. FALSE IS A NORMAL STATE — it is what a fresh clone with
+     * no `public/audio/` looks like, and the score is complete without it.
+     */
+    this.generatedAvailable = false;
 
     // ---- audio graph (all null until init())
     this.ac = null;
@@ -383,6 +468,23 @@ export class Music {
     this._awaitArrival = false;
     this._gateLevel = 1;
 
+    // ---- generated bed layer (all inert until the manifest resolves; see _bedTick)
+    this._disposed = false;
+    this._bedFiles = new Map();      // id → { url, seconds }
+    this._bedBuffers = new Map();    // id → AudioBuffer, insertion-ordered = LRU
+    this._bedLoading = new Map();    // id → Promise, so we never fetch the same bed twice
+    this._bedDead = new Set();       // ids that 404'd or failed to decode — never retried
+    this._bedVoices = [];
+    this._bedCurrent = null;
+    this._bedWant = 'work';
+    this._bedOff = false;            // setBeds(false) — synthesis is unaffected either way
+    this._bedGateTarget = 0;
+    this._bedStopAt = Infinity;
+    this._bedSwitchOk = 0;
+    this._bedCacheMax = 3;
+    this._loopXfade = 2.0;           // overwritten by the manifest's loopCrossfadeSeconds
+    this._lastBedCut = -1;
+
     this._unsubs = [];
     this._resumeHandler = null;
 
@@ -413,6 +515,11 @@ export class Music {
       this.enabled = true;
       this.currentMood = 'ground';
       Log.debug(`[Music] score online — D Phrygian, A=${A4_HZ} Hz, ${this._padVoices.length} pad voices.`);
+
+      // The generated beds are strictly additive and strictly optional. Fetch the manifest
+      // WITHOUT awaiting it: boot must reach the title screen at the same speed whether or
+      // not `public/audio/` exists, and the score is already playing by this line.
+      this._initGeneratedBeds();
     } catch (e) {
       this.enabled = false;
       Log.warn('[Music] init failed — continuing silently.', e);
@@ -784,6 +891,48 @@ export class Music {
     this._rockLfo.connect(this._padRock.gain);
 
     this._strOut.gain.setValueAtTime(db(-30), now);
+
+    this._buildBedGraph();
+  }
+
+  /**
+   * The generated bed's chain. Built unconditionally (it costs four gains and two biquads at
+   * silence) so the manifest resolving later never has to touch the graph on the audio
+   * thread, and so `dispose()` has exactly one list of nodes to disconnect either way.
+   *
+   *   [voice.gain → voice.trim] ×4 → _bedMix → _bedHP → _bedLP → _bedGate → _sum → _gate → …
+   *
+   * _bedHP  §1.2 keeps the 20–80 Hz band for the score's own sub swell. A recorded bed with
+   *         energy down there would smear the one sub the score owns, so it is cut.
+   * _bedLP  the bed's only continuous reaction: it opens with dread, and the mask drops its
+   *         ceiling like everything else. It does NOT replace the synth's reactions.
+   * _bedGate  the §8 total-silence gate for the bed alone (see _updateBedGate).
+   */
+  _buildBedGraph() {
+    this._bedMix = this._gain(1);
+    this._bedHP = this._filter('highpass', 78, 0.7);
+    this._bedLP = this._filter('lowpass', 4200, 0.7);
+    this._bedGate = this._gain(0.0001);
+
+    this._bedMix.connect(this._bedHP);
+    this._bedHP.connect(this._bedLP);
+    this._bedLP.connect(this._bedGate);
+    this._bedGate.connect(this._sum);
+
+    // Four persistent voice slots: at most one playing bed, one incoming bed, one loop-seam
+    // successor, and one spare. Gains are created once here so playback allocates only a
+    // BufferSource — roughly one node per minute, against the score's several per second.
+    this._bedVoices = [];
+    for (let i = 0; i < 4; i++) {
+      const gain = this._gain(0);
+      const trim = this._gain(1);
+      gain.connect(trim);
+      trim.connect(this._bedMix);
+      this._bedVoices.push({
+        gain, trim, src: null, id: '', trimDb: -20,
+        level: 0, f: null, endAt: 0, seamAt: 0, seamDone: true, stopped: true,
+      });
+    }
   }
 
   /**
@@ -1019,6 +1168,7 @@ export class Music {
     if (!win && this._gateLevel < 0.02) {
       this._awaitArrival = true;
       this._gateLevel = target;
+      this._updateBedGate(now, win?.attack ?? 0.01);
       return;
     }
 
@@ -1026,6 +1176,34 @@ export class Music {
     const tau = (target < (prev?.level ?? 1) ? (win?.attack ?? 0.01) : (prev?.release ?? 0.15)) || 0.05;
     this._gate.gain.cancelAndHoldAtTime?.(now);
     this._gate.gain.setTargetAtTime(Math.max(0.0001, target), now, tau);
+
+    // The bed obeys the same rule on the same frame. A duck (pause, blueprint, the tier-3
+    // groan) reaches it through `_gate` like everything else; a TOTAL silence closes its own
+    // gate as well, so nothing can reopen `_gate` behind a silence rule and drag the bed back
+    // in with it — which is exactly what `night:failed` does for its one ringing string.
+    this._updateBedGate(now, win?.attack ?? 0.01);
+  }
+
+  /**
+   * §8, applied to the generated bed. Zero whenever the score is in a TOTAL silence (or
+   * waiting for the arrival that ends one), one otherwise; the bed's musical level lives in
+   * the per-voice trims, never here.
+   *
+   * Ramped, always — 6 ms at the sharpest, which is the whole of §8's "hard mute on the frame
+   * it fires" without the click. Allocation-free; safe to call from an event handler.
+   */
+  _updateBedGate(now, attackTau = 0.01) {
+    if (!this._bedGate) return;
+    const silent = this._gateLevel < 0.02 || this._awaitArrival;
+    const want = (silent || this._bedOff || !this.enabled) ? 0 : 1;
+    if (want === this._bedGateTarget) return;
+    this._bedGateTarget = want;
+    // Down: as fast as the winning rule's own attack (floored at 2.2 ms ⇒ ~6.6 ms of ramp).
+    // Up: 0.35 s, and only ever *behind* something that has already arrived (§8 S12).
+    const tau = want ? 0.35 : Math.max(0.0022, attackTau);
+    this._bedGate.gain.cancelAndHoldAtTime?.(now);
+    this._bedGate.gain.setTargetAtTime(want ? 1 : 0.0001, now, tau);
+    this._bedStopAt = want ? Infinity : now + BED_STOP_AFTER_S;
   }
 
   _suppressed() {
@@ -1194,6 +1372,47 @@ export class Music {
     else if (this._workMode) this.currentMood = 'work';
     else if (this._isOn('air')) this.currentMood = 'air';
     else this.currentMood = 'ground';
+
+    // ------------------------------------------------------------------ generated bed
+    // Which bed the moment wants. The scheduler acts on it at the next bar (`_bedTick`),
+    // never here, so a mood change can never cut.
+    this._bedWant = this._chooseBed(state, tod, d);
+    this._updateBedGate(now);
+
+    // The bed's one continuous parameter. It opens with dread and loses its ceiling under
+    // the mask, exactly like the pad — so the floor moves with the room even though it is a
+    // fixed recording. Everything that must move FASTER than this is still synthesized.
+    const bedCut = (2600 + 5200 * d) * padCeil;
+    if (Math.abs(bedCut - this._lastBedCut) > 60) {
+      this._lastBedCut = bedCut;
+      this._bedLP?.frequency.setTargetAtTime(bedCut, now, 0.6);
+    }
+  }
+
+  /**
+   * Mood → bed id, with hysteresis on the dread thresholds so a bed can never flap around a
+   * boundary (a crossfade costs 2–4 s; flapping would be audible mush).
+   *
+   * Night 7 replaces `work` and `tension` outright — per STORY.md the comedy is gone by then
+   * and the patient domestic bed would be a lie. `hunt` is still `hunt`: a chase is a chase.
+   */
+  _chooseBed(state, tod, d) {
+    const phase = state?.phase ?? 'build';
+    if (phase === 'menu') return 'title';
+
+    const prev = this._bedWant;
+    const hi = prev === 'hunt' ? 0.66 : 0.78;         // fall out of the hunt later than in
+    const mid = (prev === 'tension' || prev === 'hunt') ? 0.26 : 0.34;
+
+    let want;
+    if (this._spotted || phase === 'chase' || d > hi) want = 'hunt';
+    else if (tod > 0.80) want = 'dawn';               // §8 S11 silences it entirely at 0.92
+    else if (d > mid) want = 'tension';
+    else want = 'work';
+
+    const night = Number(state?.night) || 1;
+    if (night >= 7 && (want === 'work' || want === 'tension')) want = 'night7';
+    return want;
   }
 
   /** §6.3 — the dread scalar. Everything null-checked; a missing system contributes 0. */
@@ -1332,6 +1551,11 @@ export class Music {
       this._nextBeatTime += BEAT;
     }
 
+    // The bed is scheduled from here rather than from `_paramTick` because the watchdog
+    // drives this method too: a hidden tab or a paused frame loop must not be able to make a
+    // 50–90 s bed run off the end of its buffer with nobody scheduling the loop seam.
+    if (this.generatedAvailable) this._bedTick(now);
+
     if (this._radioOn) this._scheduleRadio(now);
   }
 
@@ -1348,6 +1572,9 @@ export class Music {
       this._awaitArrival = false;
       this._gate.gain.cancelAndHoldAtTime?.(this.ac.currentTime);
       this._gate.gain.setTargetAtTime(Math.max(0.0001, this._gateLevel), t - 0.03, 0.008);
+      // The bed comes back UNDER the arrival, not before it — the struck string is what ends
+      // the silence, and the floor swells in behind it over ~1 s.
+      this._updateBedGate(t - 0.03);
       this._playString(t, 0.85, 0);
       this._nextStringAt = t + this._rand.range(22, 40);
       return;
@@ -1523,6 +1750,321 @@ export class Music {
     p.exponentialRampToValueAtTime(0.0001, when + 0.065);
   }
 
+  // --------------------------------------------------------------------- generated beds
+
+  /**
+   * Start the optional generated-score layer. Nothing here is awaited by `init()` and
+   * nothing here can throw into the caller: the failure path IS the shipping path for any
+   * clone without `public/audio/`.
+   */
+  _initGeneratedBeds() {
+    const s = this.ctx?.settings ?? null;
+    // Decoded PCM is expensive (a 90 s stereo bed is ~35 MB at 48 kHz), so only a couple of
+    // beds are ever resident. Eviction never touches a bed that is sounding.
+    this._bedCacheMax = s?.tier ? s.tier(2, 2, 3, 3) : 3;
+
+    this._loadMusicManifest()
+      .then((ok) => {
+        if (this._disposed || !this.enabled) return;
+        this.generatedAvailable = !!ok;
+        if (!ok) {
+          Log.debug('[Music] no generated score manifest — pure synthesis. This is a valid state.');
+          return;
+        }
+        Log.debug(`[Music] generated score beds: ${this._bedFiles.size}, loop crossfade ${this._loopXfade}s.`);
+        // Warm the bed the current moment already wants so the first entry is not a wait.
+        this._ensureBedBuffer(MUSIC_BEDS[this._bedWant] ?? MUSIC_BEDS.work);
+      })
+      .catch(() => { this.generatedAvailable = false; });
+  }
+
+  /**
+   * Read `public/audio/manifest.json`. Returns false — quietly, at debug level — for a 404,
+   * a dev server answering with the SPA's index.html, an offline load, a `file://` origin, a
+   * CSP block, or a manifest with no `music` array.
+   */
+  async _loadMusicManifest() {
+    let res;
+    try {
+      // `no-cache` (revalidate), not `force-cache`: a dev server answers a not-yet-existing
+      // path with index.html, and a forced cache would pin that HTML for the session.
+      res = await fetch(siteUrl('audio/manifest.json'), { cache: 'no-cache' });
+    } catch {
+      return false;
+    }
+    if (!res || !res.ok) return false;
+    const type = res.headers?.get?.('content-type') ?? '';
+    if (type && type.indexOf('json') < 0) return false;   // the SPA fallback, not a manifest
+
+    let json;
+    try { json = await res.json(); } catch { return false; }
+    const list = Array.isArray(json?.music) ? json.music : null;
+    if (!list || list.length === 0) return false;
+
+    const xf = Number(json?.loopCrossfadeSeconds);
+    if (Number.isFinite(xf) && xf > 0) this._loopXfade = clamp(xf, 0.5, 4);
+
+    for (const e of list) {
+      const id = String(e?.id ?? '');
+      const file = String(e?.file ?? '');
+      if (!id || !file) continue;
+      this._bedFiles.set(id, { url: siteUrl(file), seconds: Number(e?.seconds) || 0 });
+    }
+    return this._bedFiles.size > 0;
+  }
+
+  /**
+   * The decoded buffer for `id`, or null. A miss starts exactly one background load and
+   * returns null immediately — the caller keeps synthesizing and asks again next tick.
+   */
+  _ensureBedBuffer(id) {
+    if (!id || !this.ac || this._disposed) return null;
+    const hit = this._bedBuffers.get(id);
+    if (hit) {
+      this._bedBuffers.delete(id);       // refresh LRU position
+      this._bedBuffers.set(id, hit);
+      return hit;
+    }
+    if (this._bedDead.has(id) || this._bedLoading.has(id)) return null;
+    const entry = this._bedFiles.get(id);
+    if (!entry) return null;
+
+    const p = (async () => {
+      try {
+        const res = await fetch(entry.url, { cache: 'default' });
+        if (!res.ok) throw new Error(String(res.status));
+        const ctype = res.headers?.get?.('content-type') ?? '';
+        if (ctype.indexOf('html') >= 0) throw new Error('got html, not audio');
+        const raw = await res.arrayBuffer();
+        if (this._disposed || !this.ac) return;
+        const buf = await this.ac.decodeAudioData(raw);
+        if (this._disposed || !this.ac) return;
+        this._bedBuffers.set(id, buf);
+        this._evictBeds(id);
+      } catch (e) {
+        // A missing or unplayable bed is not an error condition. Write it off for the
+        // session; that mood simply plays on synthesis alone, which is a complete sound.
+        this._bedDead.add(id);
+        Log.debug(`[Music] bed '${id}' unavailable (${e?.message ?? e}) — synthesis covers it.`);
+      } finally {
+        this._bedLoading.delete(id);
+      }
+    })();
+    this._bedLoading.set(id, p);
+    return null;
+  }
+
+  /** True while any voice slot is still sounding this bed. */
+  _bedInUse(id) {
+    for (const v of this._bedVoices) if (v.src && v.id === id) return true;
+    return false;
+  }
+
+  /** Drop the least recently used decoded bed until we are back under the cap. */
+  _evictBeds(keep) {
+    while (this._bedBuffers.size > this._bedCacheMax) {
+      let victim;
+      for (const k of this._bedBuffers.keys()) {
+        if (k === keep || this._bedInUse(k)) continue;
+        victim = k;
+        break;
+      }
+      if (victim === undefined) return;
+      this._bedBuffers.delete(victim);
+    }
+  }
+
+  /** The next 4 s bar boundary at or after `t`, on the same grid the layers use (§6.3). */
+  _nextBar(t) {
+    const bar = BEAT * 4;
+    return this._barZero + Math.ceil((t - this._barZero) / bar - 1e-6) * bar;
+  }
+
+  /**
+   * The bed scheduler. Runs at the scheduler's rate, allocates nothing in the steady state,
+   * and does exactly three things: stop when the score is silent, keep the loop seam fed,
+   * and cross into the wanted bed on a bar line.
+   */
+  _bedTick(now) {
+    if (this._bedOff || !this._bedGate || this._bedVoices.length === 0) return;
+
+    // 1. §8. A total silence is not a duck. Once it has held for a couple of seconds the
+    //    sources stop outright — nothing is left running under the hole, and whatever ends
+    //    the silence gets a genuine entry rather than a bed already mid-phrase.
+    if (this._bedGateTarget === 0) {
+      if (this._bedCurrent && now > this._bedStopAt) this._stopBedVoices(now);
+      return;
+    }
+
+    // A voice that reached the end of its buffer clears itself; forget it and re-enter.
+    if (this._bedCurrent && !this._bedCurrent.src) {
+      this._bedCurrent = null;
+      if (this._bedSwitchOk > now) this._bedSwitchOk = now;
+    }
+
+    // 2. THE LOOP SEAM. These beds are 50–90 s and `loop: true` on a BufferSource would tick
+    //    audibly at the join, so the bed is crossfaded against a second copy of itself over
+    //    the manifest's own `loopCrossfadeSeconds`. Scheduled a second early; the successor
+    //    inherits the trim, so the level does not move across the seam.
+    const cur = this._bedCurrent;
+    if (cur && cur.src && !cur.seamDone && now >= cur.seamAt - 1.0) {
+      const buf = this._bedBuffers.get(cur.id);
+      if (buf) {
+        cur.seamDone = true;
+        const nv = this._startBedVoice(cur.id, buf, cur.seamAt, this._loopXfade, cur.trimDb);
+        if (nv) {
+          this._fadeVoice(cur, 0, cur.seamAt, this._loopXfade);
+          this._endVoiceAfter(cur, cur.seamAt + this._loopXfade);
+          this._bedCurrent = nv;
+        }
+      } else {
+        // Evicted mid-flight (it cannot be — `_bedInUse` protects it — but the cache is not
+        // the only way a buffer can go). Re-request and try again next tick.
+        this._ensureBedBuffer(cur.id);
+      }
+    }
+
+    // 3. THE MOOD CROSSFADE. Equal power, on a bar line, 2–4 s, never a cut.
+    const id = MUSIC_BEDS[this._bedWant];
+    if (!id) return;
+    if (this._bedCurrent && this._bedCurrent.id === id) return;
+    if (now < this._bedSwitchOk) return;
+    const buf = this._ensureBedBuffer(id);
+    if (!buf) return;                        // still loading, or absent — synthesis carries it
+
+    const dur = this._bedWant === 'hunt' ? BED_XFADE_FAST_S : BED_XFADE_S;
+    const at = this._nextBar(now + 0.2);
+    const nv = this._startBedVoice(id, buf, at, dur, BED_TRIM_DB[this._bedWant] ?? -20);
+    if (!nv) return;
+    const old = this._bedCurrent;
+    if (old && old.src) {
+      this._fadeVoice(old, 0, at, dur);
+      this._endVoiceAfter(old, at + dur);
+      old.seamDone = true;                   // its seam belongs to a bed we are leaving
+    }
+    this._bedCurrent = nv;
+    this._bedSwitchOk = at + dur + BED_DWELL_S;
+  }
+
+  /** A slot with nothing playing, or the quietest one if we somehow ran out. */
+  _freeBedVoice(t) {
+    for (const v of this._bedVoices) if (!v.src) return v;
+    let best = null, bestLevel = Infinity;
+    for (const v of this._bedVoices) {
+      const l = this._voiceLevelAt(v, t);
+      if (l < bestLevel) { bestLevel = l; best = v; }
+    }
+    if (best && best.src) {
+      // Should not happen (two beds and a seam is three of four slots), but a slot is never
+      // reclaimed on a live gain: ramp it out first, then stop it.
+      this._fadeVoice(best, 0, t - 0.06, 0.05);
+      try { best.src.stop(Math.max(t, this.ac.currentTime + 0.01)); } catch { /* already stopped */ }
+      best.stopped = true;
+    }
+    return best;
+  }
+
+  /**
+   * Start `buf` on a free slot at `startT`, fading in equal-power over `fadeS`.
+   * One BufferSource is created here and nowhere else in this layer.
+   */
+  _startBedVoice(id, buf, startT, fadeS, trimDb) {
+    if (!this.ac || !buf) return null;
+    const ac = this.ac;
+    const when = Math.max(startT, ac.currentTime + 0.02);
+    const v = this._freeBedVoice(when);
+    if (!v) return null;
+
+    const src = ac.createBufferSource();
+    src.buffer = buf;
+    src.loop = false;                        // the seam is ours, not the BufferSource's
+    src.connect(v.gain);
+
+    v.gain.gain.cancelScheduledValues?.(when);
+    v.gain.gain.setValueAtTime(0, when);
+    v.trim.gain.setValueAtTime(db(trimDb), when);   // set while the voice is silent: no click
+
+    v.src = src;
+    v.id = id;
+    v.trimDb = trimDb;
+    v.level = 0;
+    v.f = null;
+    v.stopped = false;
+    v.endAt = when + buf.duration;
+    v.seamAt = clamp(v.endAt - this._loopXfade, when + fadeS + 1, v.endAt - 0.25);
+    v.seamDone = false;
+
+    src.start(when);
+    src.onended = () => {
+      try { src.disconnect(); } catch { /* noop */ }
+      if (v.src !== src) return;
+      v.src = null; v.id = ''; v.f = null; v.level = 0; v.stopped = true;
+      try { v.gain.gain.cancelScheduledValues?.(0); v.gain.gain.setValueAtTime(0, this.ac ? this.ac.currentTime : 0); } catch { /* graph gone */ }
+    };
+
+    this._fadeVoice(v, 1, when, fadeS);
+    return v;
+  }
+
+  /** The value a voice's fade will have at `t` — tracked in JS so nothing reads the graph. */
+  _voiceLevelAt(v, t) {
+    const f = v.f;
+    if (!f) return v.level;
+    if (t <= f.t0) return f.from;
+    if (t >= f.t0 + f.dur) return f.to;
+    const x = (t - f.t0) / f.dur;
+    return f.to > f.from
+      ? f.from + (f.to - f.from) * Math.sin(x * HALF_PI)
+      : f.to + (f.from - f.to) * Math.cos(x * HALF_PI);
+  }
+
+  /**
+   * Equal-power fade, drawn as XF_STEPS linear ramps rather than `setValueCurveAtTime` — a
+   * value curve cannot be pre-empted (any event landing inside one throws), and a crossfade
+   * that can never be interrupted is a crossfade that will one day be interrupted.
+   *
+   * sin/cos quarter-cycles: the two sides of a crossfade sum to constant POWER, so a bed
+   * handing over to another bed never dips in the middle the way a linear pair does.
+   */
+  _fadeVoice(v, to, startT, dur) {
+    const p = v.gain.gain;
+    const t0 = Math.max(startT, this.ac.currentTime);
+    const d = Math.max(0.02, dur);
+    const from = this._voiceLevelAt(v, t0);
+    if (typeof p.cancelAndHoldAtTime === 'function') p.cancelAndHoldAtTime(t0);
+    else p.cancelScheduledValues(t0);
+    p.setValueAtTime(from, t0);
+    const up = to > from;
+    for (let i = 1; i <= XF_STEPS; i++) {
+      const x = i / XF_STEPS;
+      const k = up
+        ? from + (to - from) * Math.sin(x * HALF_PI)
+        : to + (from - to) * Math.cos(x * HALF_PI);
+      p.linearRampToValueAtTime(k, t0 + d * x);
+    }
+    v.f = { from, to, t0, dur: d };
+    v.level = to;
+  }
+
+  /** Stop a voice once its fade has finished. Never mid-fade — that is the click. */
+  _endVoiceAfter(v, t) {
+    if (!v.src || v.stopped) return;
+    try { v.src.stop(t + 0.06); v.stopped = true; } catch { /* already scheduled */ }
+  }
+
+  /** Take the bed out entirely: a 60 ms ramp (under a closed gate anyway), then stop. */
+  _stopBedVoices(now) {
+    for (const v of this._bedVoices) {
+      if (!v.src) continue;
+      this._fadeVoice(v, 0, now, 0.06);
+      this._endVoiceAfter(v, now + 0.06);
+      v.seamDone = true;
+    }
+    this._bedCurrent = null;
+    this._bedStopAt = Infinity;
+    this._bedSwitchOk = 0;
+  }
+
   // ---------------------------------------------------------------------------- stinger
 
   /**
@@ -1652,6 +2194,29 @@ export class Music {
   }
 
   isLayerOn(name) { return this._isOn(String(name ?? '').toLowerCase()); }
+
+  /** Which generated bed the current moment wants: title|work|tension|hunt|dawn|night7. */
+  get bedMood() { return this._bedWant; }
+
+  /**
+   * Turn the generated bed layer off (or back on) at runtime — for A/B'ing the mix, or for a
+   * player-facing "synthesized score" option. The synthesis is completely unaffected either
+   * way: with the bed off this file behaves exactly as it does on a clone with no assets.
+   */
+  setBeds(on) {
+    const off = !on;
+    if (off === this._bedOff) return this.generatedAvailable;
+    this._bedOff = off;
+    if (!this.ac) return this.generatedAvailable;
+    const now = this.ac.currentTime;
+    if (off) {
+      this._updateBedGate(now, 0.08);      // 240 ms out — this is a mix change, not a cue
+      this._stopBedVoices(now + 0.3);
+    } else {
+      this._updateBedGate(now);
+    }
+    return this.generatedAvailable;
+  }
 
   /**
    * §6.3 / §8 S5 — THE COLLAPSE. Everything ramps out over 3.5 s except L0, L0 plays one

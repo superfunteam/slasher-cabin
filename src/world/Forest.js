@@ -85,6 +85,18 @@ const PHYLLO = 2.39996322972865332;
 const SP_FIR = 0, SP_PINE = 1, SP_BIRCH = 2, SP_SNAG = 3;
 const SPECIES_COUNT = 4;
 const SPECIES_NAME = ['fir', 'pine', 'birch', 'snag'];
+/**
+ * Every species is authored to this height at EVERY LOD. Variants differ in shape, lean and
+ * branch count — never in height — so the per-instance scale (target / CANON_H) is identical
+ * for all four meshes and a LOD swap cannot resize a tree.
+ */
+const CANON_H = 20;
+/** Per-LOD tessellation. Index is the LOD band; the impostor is generated separately. */
+const LOD_SIDES = [9, 6, 4];
+const LOD_SEGS = [13, 7, 4];
+const LOD_WHORLS = [10, 5, 3];
+const LOD_BRANCH = [6, 4, 3];
+
 /** Material keys per species: [bark, foliage|null]. */
 const SPECIES_MATS = [
   ['bark-pine', 'foliage-pine'],
@@ -99,7 +111,7 @@ export const FOREST_TUNING = {
   rMin: 3.1,               // densest spacing, metres
   rMax: 11.5,              // thinnest spacing before it reads as a clearing
   lod0: 34, lod1: 78, lod2: 165,
-  shadowRange: 34,         // LOD0 band == the cast-shadow band (ART §3.5 "trees < 40 m")
+  shadowRange: 45,         // beyond this a trunk shadow is under a shadow-map texel (ART §3.5)
   lodJitter: 0.14,         // per-tree +/- on the LOD rings so the transition is not an arc
   undergrowthChunksPerFrame: 3,
   rebuildMoveEps: 1.0,     // metres
@@ -352,10 +364,16 @@ export class Forest {
 
     this._variants = 4;
     this._time = 0;
+    this._shadows = true;
+    this._maxDist = 275;        // impostor cull distance, set from the tier in init()
+    this._ugFlat = null;        // flat list of undergrowth buckets, indexed by chunk.ug.b
+    this._ugKinds = null;       // [{ name, weight, idx, scale, tilt, sink, wet, shade, open }]
+    this._ugTotal = 0;
+    this._treeScaleResolved = false;
 
     this.stats = {
       trees: 0, visible: 0, drawCalls: 0, chunks: 0, chunksVisible: 0,
-      undergrowth: 0, rebuilds: 0, genMs: 0, buildMs: 0,
+      undergrowth: 0, ugVisible: 0, rebuilds: 0, genMs: 0, buildMs: 0,
     };
   }
 
@@ -752,6 +770,1076 @@ export class Forest {
       }
     }
     for (let i = 0; i < g.length; i++) g[i] = clamp01(g[i] / 2.4);
+  }
+
+  /** Chunk bounding spheres, recomputed once per-instance scales are known. */
+  _refreshChunkSpheres() {
+    for (let k = 0; k < this._chunks.length; k++) {
+      const c = this._chunks[k];
+      if (!c.trees || !c.trees.length) continue;
+      let minY = Infinity, maxY = -Infinity;
+      for (let t = 0; t < c.trees.length; t++) {
+        const i = c.trees[t];
+        const b = this._ty[i], h = this._thgt[i] || 24;
+        if (b < minY) minY = b;
+        if (b + h > maxY) maxY = b + h;
+      }
+      c.y = (minY + maxY) * 0.5;
+      c.r = Math.hypot(FT.chunkSize * 0.75, (maxY - minY) * 0.5) + 2;
+    }
+  }
+
+  // =========================================================================================
+  // TREE GEOMETRY
+  //
+  // Every species is authored to the SAME canonical height (CANON_H), at every LOD, so a tree
+  // crossing a LOD ring cannot change size — the per-instance scale is `target / CANON_H` and
+  // is identical for all four meshes. Variants differ in shape, lean, branch count and bark
+  // relief, never in height. That is the whole trick behind a silent LOD transition.
+  // =========================================================================================
+
+  /** Build the bark and foliage buffers for one (species, variant, lod). */
+  _genTree(spec, rand, lod) {
+    const bark = new Buf(), fol = new Buf();
+    let radius;
+    if (spec === SP_FIR) radius = this._genConifer(bark, fol, rand, lod, true);
+    else if (spec === SP_PINE) radius = this._genConifer(bark, fol, rand, lod, false);
+    else if (spec === SP_BIRCH) radius = this._genBirch(bark, fol, rand, lod);
+    else radius = this._genSnag(bark, rand, lod);
+    return { bark, fol, radius };
+  }
+
+  /**
+   * Fir (dense, drooping, skirted almost to the ground) or pine (bare stem, upswept crown).
+   * @returns {number} trunk radius at the base, before flare.
+   */
+  _genConifer(bark, fol, rand, lod, isFir) {
+    const H = CANON_H;
+    const r0 = isFir ? rand.range(0.24, 0.31) : rand.range(0.21, 0.28);
+    const sides = LOD_SIDES[lod], segs = LOD_SEGS[lod];
+    const swayA = rand.range(0.05, 0.55), swayP = rand.next() * TAU;
+
+    const pts = [], radii = [];
+    for (let i = 0; i <= segs; i++) {
+      const t = i / segs;
+      const y = -0.55 + (H + 0.55) * t;
+      const bend = swayA * t * t;
+      pts.push(new THREE.Vector3(
+        Math.sin(swayP + t * 2.1) * bend, y, Math.cos(swayP * 1.7 + t * 1.6) * bend));
+      radii.push(Math.max(0.018, r0 * Math.pow(1 - clamp01(y / H), isFir ? 0.95 : 0.78)));
+    }
+    emitTube(bark, pts, radii, sides, {
+      // Root flare: the bottom 1.6 m swells and lobes, so the tree sits IN the ground instead
+      // of being pushed into it like a pin. ART_DIRECTION §10 failure mode A2.
+      flare: { h: 1.6, amp: 0.85, lobes: rand.int(4, 6), phase: rand.next() * TAU },
+      bark: lod === 0 ? 0.055 : (lod === 1 ? 0.028 : 0),
+      cap: true, uvCirc: TAU * r0,
+    });
+
+    const whorls = LOD_WHORLS[lod];
+    const nb = LOD_BRANCH[lod] + (isFir ? 0 : -1);
+    const t0 = isFir ? 0.13 : 0.46;
+    const droop = isFir ? -0.30 : 0.12;
+    const crown0 = (isFir ? 0.30 : 0.27) * H;
+    const up = new THREE.Vector3(), side = new THREE.Vector3();
+    const nrm = new THREE.Vector3(), base = new THREE.Vector3();
+
+    for (let w = 0; w < whorls; w++) {
+      const tw = t0 + (0.955 - t0) * (whorls === 1 ? 0.55 : w / (whorls - 1));
+      const y = tw * H;
+      const shape = Math.pow(1 - (tw - t0) / (1.02 - t0), isFir ? 0.70 : 0.85);
+      const L = crown0 * shape * rand.range(0.80, 1.18) + 0.22;
+      const tr = Math.max(0.02, r0 * (1 - tw));
+      for (let b = 0; b < Math.max(2, nb); b++) {
+        const ang = w * PHYLLO + (b / Math.max(2, nb)) * TAU + rand.range(-0.19, 0.19);
+        const ca = Math.cos(ang), sa = Math.sin(ang);
+        up.set(ca, droop + rand.range(-0.10, 0.10), sa).normalize();
+        base.set(ca * tr * 0.8, y, sa * tr * 0.8);
+        side.set(-sa, 0, ca);
+        nrm.set(up.x * 0.35, 1, up.z * 0.35).normalize();
+        if (lod === 0 && tw < 0.68) {
+          // A real branch under the needles. This is the thing the lantern rim-lights.
+          const b0 = base.clone();
+          const b1 = base.clone().addScaledVector(up, L * 0.55); b1.y += L * 0.07;
+          const b2 = base.clone().addScaledVector(up, L * 0.96); b2.y += L * 0.04;
+          emitTube(bark, [b0, b1, b2], [tr * 0.55, tr * 0.30, tr * 0.11], 4,
+            { uvCirc: TAU * tr * 0.5 });
+        }
+        emitCross(fol, base, up, side, L * (isFir ? 0.60 : 0.72), L * 1.08, nrm,
+          isFir ? 0.32 : 0.44);
+        if (lod === 0) {
+          base.addScaledVector(up, L * 0.44);
+          emitCross(fol, base, up, side, L * 0.38, L * 0.52, nrm, 0.28);
+        }
+      }
+    }
+    up.set(0, 1, 0); side.set(1, 0, 0); nrm.set(0, 1, 0);
+    base.set(0, H * 0.92, 0);
+    emitCross(fol, base, up, side, crown0 * 0.22, H * 0.10, nrm, 0.10);
+    return r0;
+  }
+
+  /** Paper birch: pale slender stem that forks into leaders, ellipsoid crown. */
+  _genBirch(bark, fol, rand, lod) {
+    const H = CANON_H;
+    const r0 = rand.range(0.11, 0.16);
+    const sides = Math.max(4, LOD_SIDES[lod] - 1), segs = LOD_SEGS[lod];
+    const lean = rand.range(0.35, 1.5), lp = rand.next() * TAU;
+    const splitT = rand.range(0.42, 0.58);
+
+    const pts = [], radii = [];
+    const ns = Math.max(3, Math.round(segs * splitT) + 1);
+    for (let i = 0; i <= ns; i++) {
+      const t = i / ns;
+      const y = -0.5 + (H * splitT + 0.5) * t;
+      pts.push(new THREE.Vector3(
+        Math.sin(lp) * lean * t * t, y, Math.cos(lp) * lean * t * t));
+      radii.push(Math.max(0.02, r0 * (1 - 0.32 * clamp01(y / H))));
+    }
+    emitTube(bark, pts, radii, sides, {
+      flare: { h: 0.95, amp: 0.55, lobes: rand.int(3, 5), phase: rand.next() * TAU },
+      bark: lod === 0 ? 0.020 : 0, uvCirc: TAU * r0,
+    });
+
+    const top = pts[pts.length - 1];
+    const rTop = radii[radii.length - 1];
+    const leaders = lod === 0 ? 3 : 2;
+    for (let k = 0; k < leaders; k++) {
+      const a = rand.next() * TAU, spread = rand.range(0.09, 0.24);
+      const lpts = [], lrad = [];
+      const n2 = Math.max(2, Math.round(segs * 0.55));
+      for (let i = 0; i <= n2; i++) {
+        const t = i / n2;
+        const y = top.y + (H - top.y) * t;
+        const off = spread * (H - top.y) * t * t;
+        lpts.push(new THREE.Vector3(top.x + Math.cos(a) * off, y, top.z + Math.sin(a) * off));
+        lrad.push(Math.max(0.010, rTop * (1 - t * 0.92)));
+      }
+      emitTube(bark, lpts, lrad, Math.max(3, sides - 2), { uvCirc: TAU * r0 * 0.7, cap: true });
+    }
+
+    const clusters = [16, 8, 4][lod];
+    const cy = H * 0.74, rx = H * 0.30, ry = H * 0.24;
+    const up = new THREE.Vector3(), side = new THREE.Vector3();
+    const nrm = new THREE.Vector3(), base = new THREE.Vector3();
+    for (let c = 0; c < clusters; c++) {
+      const a = c * PHYLLO, rr = Math.sqrt((c + 0.5) / clusters);
+      const px = Math.cos(a) * rx * rr, pz = Math.sin(a) * rx * rr;
+      const py = cy + (rand.next() * 2 - 1) * ry * (1 - rr * 0.45);
+      base.set(px, py, pz);
+      up.set(px * 0.30, 1, pz * 0.30).normalize();
+      side.set(-Math.sin(a), 0, Math.cos(a));
+      nrm.set(px * 0.30, 1, pz * 0.30).normalize();
+      emitCross(fol, base, up, side, rx * 0.56, ry * 1.05, nrm, 0.58);
+    }
+    return r0;
+  }
+
+  /** A standing dead trunk: torn top, broken stubs, no foliage. */
+  _genSnag(bark, rand, lod) {
+    const H = CANON_H;
+    const r0 = rand.range(0.26, 0.36);
+    const sides = Math.max(4, LOD_SIDES[lod] - 1), segs = Math.max(3, LOD_SEGS[lod] - 2);
+    const lean = rand.range(0.2, 1.2), lp = rand.next() * TAU;
+    const pts = [], radii = [];
+    for (let i = 0; i <= segs; i++) {
+      const t = i / segs;
+      const y = -0.6 + (H + 0.6) * t;
+      pts.push(new THREE.Vector3(
+        Math.sin(lp) * lean * t * t, y, Math.cos(lp) * lean * t * t));
+      radii.push(Math.max(0.05, r0 * Math.pow(1 - clamp01(y / H), 0.55)));
+    }
+    emitTube(bark, pts, radii, sides, {
+      flare: { h: 2.0, amp: 1.0, lobes: rand.int(4, 7), phase: rand.next() * TAU },
+      bark: lod === 0 ? 0.085 : 0.035, uvCirc: TAU * r0,
+    });
+
+    const tp = pts[pts.length - 1], tipR = radii[radii.length - 1];
+    if (lod < 2) {
+      const nsp = lod === 0 ? 5 : 3;
+      for (let s = 0; s < nsp; s++) {
+        const a = (s / nsp) * TAU + rand.range(-0.25, 0.25);
+        const h = rand.range(0.3, 1.5);
+        emitTube(bark, [
+          new THREE.Vector3(tp.x + Math.cos(a) * tipR * 0.55, tp.y - 0.1, tp.z + Math.sin(a) * tipR * 0.55),
+          new THREE.Vector3(tp.x + Math.cos(a) * tipR * 0.85, tp.y + h, tp.z + Math.sin(a) * tipR * 0.85),
+        ], [tipR * 0.42, 0.012], 4, { cap: true, uvCirc: TAU * tipR * 0.42 });
+      }
+    }
+    const stubs = lod === 0 ? rand.int(3, 6) : (lod === 1 ? 2 : 0);
+    for (let s = 0; s < stubs; s++) {
+      const t = rand.range(0.20, 0.85);
+      const y = t * H, a = rand.next() * TAU;
+      const tr = Math.max(0.03, r0 * (1 - t) * 0.7);
+      const L = rand.range(0.5, 2.2);
+      const d = new THREE.Vector3(Math.cos(a), rand.range(-0.28, 0.14), Math.sin(a)).normalize();
+      const b0 = new THREE.Vector3(Math.cos(a) * tr * 0.7, y, Math.sin(a) * tr * 0.7);
+      emitTube(bark, [b0, b0.clone().addScaledVector(d, L)], [tr, tr * 0.22], 4,
+        { cap: true, uvCirc: TAU * tr });
+    }
+    return r0;
+  }
+
+  /**
+   * The distance impostor: three cards crossed about the vertical, tapered to the species
+   * silhouette. Not a screen-facing billboard on purpose — a billboard needs a per-frame
+   * rotation per instance, which is exactly the allocation-and-upload cost the whole LOD
+   * scheme exists to avoid, and at 165 m the parallax error of a fixed cross is sub-pixel.
+   */
+  _genImpostor(spec, rand) {
+    const H = CANON_H;
+    if (spec === SP_SNAG) {
+      const bark = new Buf();
+      emitTube(bark, [
+        new THREE.Vector3(0, -0.4, 0),
+        new THREE.Vector3(0.1, H * 0.55, 0.05),
+        new THREE.Vector3(0.22, H, 0.11),
+      ], [0.34, 0.17, 0.045], 4, { cap: true, uvCirc: 2.1 });
+      return { bark, fol: null, radius: 0.32 };
+    }
+    const fol = new Buf();
+    const w = (spec === SP_BIRCH ? 0.36 : 0.30) * H;
+    const y0 = (spec === SP_PINE ? 0.40 : (spec === SP_BIRCH ? 0.42 : 0.10)) * H;
+    const taper = spec === SP_BIRCH ? 0.78 : 0.10;
+    for (let k = 0; k < 3; k++) {
+      const a = (k / 3) * Math.PI + rand.range(-0.1, 0.1);
+      const ca = Math.cos(a), sa = Math.sin(a);
+      const nl = 1 / Math.max(1e-6, Math.hypot(sa, 0.25, -ca));
+      emitCard(fol, 0, y0, 0, 0, 1, 0, ca, 0, sa, w, H - y0,
+        sa * nl, 0.25 * nl, -ca * nl, taper);
+    }
+    return { bark: null, fol, radius: 0.24 };
+  }
+
+  // =========================================================================================
+  // BUCKETS — one InstancedMesh per (species, variant-group, LOD, part)
+  // =========================================================================================
+
+  /**
+   * Build a bucket: one shared, pre-sized instanceMatrix + aExposure, and 1..2 sub-meshes
+   * (bark and foliage, or wood and moss) that reference them. Both sub-meshes get their OWN
+   * aWind buffer because the flex override differs — a trunk bends by height, a canopy card
+   * must not fly a metre in a gust.
+   */
+  _makeBucket(name, cap, parts, opts = {}) {
+    if (!this.group || !parts || !parts.length) return null;
+    cap = Math.max(1, cap | 0);
+    const mat = new Float32Array(cap * 16);
+    const matAttr = new THREE.InstancedBufferAttribute(mat, 16);
+    matAttr.setUsage(THREE.DynamicDrawUsage);
+    const ex = new Float32Array(cap * 2);
+    for (let i = 0; i < cap; i++) { ex[i * 2] = 1; ex[i * 2 + 1] = 1; }
+    const exAttr = new THREE.InstancedBufferAttribute(ex, 2);
+    exAttr.setUsage(THREE.DynamicDrawUsage);
+
+    const bk = {
+      name, cap, count: 0, near: 1e9,
+      lod: opts.lod ?? 0, ug: !!opts.ug,
+      mat, matAttr, ex, exAttr, subs: [],
+    };
+
+    for (let i = 0; i < parts.length; i++) {
+      const p = parts[i];
+      if (!p || !p.geo || !p.mat) continue;
+      const wa = new Float32Array(cap * 2);
+      const flex = p.flex ?? 0;
+      if (flex > 0) for (let k = 0; k < cap; k++) wa[k * 2] = flex;
+      const waAttr = new THREE.InstancedBufferAttribute(wa, 2);
+      waAttr.setUsage(THREE.DynamicDrawUsage);
+      p.geo.setAttribute('aWind', waAttr);
+      p.geo.setAttribute('aExposure', exAttr);
+
+      const mesh = new THREE.InstancedMesh(p.geo, p.mat, cap);
+      mesh.instanceMatrix = matAttr;   // shared: bark and foliage cannot drift apart
+      mesh.count = 0;
+      mesh.visible = false;
+      mesh.frustumCulled = false;      // we cull per chunk ourselves
+      mesh.matrixAutoUpdate = false;
+      mesh.updateMatrix();
+      mesh.castShadow = !!p.cast;
+      mesh.receiveShadow = p.receive !== false;
+      mesh.name = `Forest.${name}.${p.name ?? 'part'}`;
+      if (p.depth) mesh.customDepthMaterial = p.depth;
+      this.group.add(mesh);
+      this._ownedGeometries.push(p.geo);
+      bk.subs.push({ mesh, wa, waAttr, cast: !!p.cast });
+    }
+    if (!bk.subs.length) return null;
+    this._buckets.push(bk);
+    return bk;
+  }
+
+  _buildTreeBuckets(rand) {
+    const t0 = (typeof performance !== 'undefined' ? performance.now() : 0);
+    const V = Math.max(1, this._variants | 0);
+    const groups = [V, 2, 1, 1];
+    const tierIdx = this.ctx?.settings?.tier?.(0, 1, 2, 3) ?? 2;
+    this._shadows = tierIdx >= 1;
+    this._maxDist = this.ctx?.settings?.tier?.(150, 210, 275, 340) ?? 275;
+
+    const perSpecies = new Int32Array(SPECIES_COUNT);
+    for (let i = 0; i < this._n; i++) perSpecies[this._tspec[i]]++;
+
+    const capOf = (lod, spec) => {
+      const t = Math.max(1, perSpecies[spec]);
+      if (lod === 0) return Math.min(t, 384);
+      if (lod === 1) return Math.min(t, 1600);
+      if (lod === 2) return Math.min(t, 6400);
+      return t;
+    };
+
+    const seedBase = (this.ctx?.settings?.get?.('seed') ?? 0x51a5cab) | 0;
+    const variantHeights = [];
+    this._treeBuckets = [];
+
+    for (let s = 0; s < SPECIES_COUNT; s++) {
+      const heights = [];
+      heights.radii = [];
+      this._treeBuckets[s] = [[], [], [], []];
+
+      const barkName = SPECIES_MATS[s][0], folName = SPECIES_MATS[s][1];
+      const barkMat = this._material(barkName, { color: 0x342d26, roughness: 0.9 });
+      const folMat = folName
+        ? this._material(folName, {
+          color: 0x16241c, roughness: 0.45, side: THREE.DoubleSide, alphaTest: 0.3,
+        }) : null;
+      const folDepth = folName ? this._depthMaterial(folName) : null;
+
+      for (let lod = 0; lod < 4; lod++) {
+        for (let v = 0; v < groups[lod]; v++) {
+          // The SAME seed for the same variant at every LOD: one tree, four fidelities.
+          const rep = lod >= 2 ? 0 : v;
+          const vr = new Rand(hashInt(((s + 1) * 7919 + (rep + 1) * 104729) ^ seedBase));
+          const geo = lod === 3 ? this._genImpostor(s, vr) : this._genTree(s, vr, lod);
+          if (lod === 0) { heights[v] = CANON_H; heights.radii[v] = geo.radius * 1.18; }
+
+          const parts = [];
+          const tag = `${SPECIES_NAME[s]}-l${lod}-v${v}`;
+          if (geo.bark && !geo.bark.empty) {
+            parts.push({
+              name: 'bark', geo: geo.bark.toGeometry(`${tag}-bark`), mat: barkMat,
+              flex: 0, cast: lod === 0, receive: true,
+            });
+          }
+          if (geo.fol && !geo.fol.empty && folMat) {
+            parts.push({
+              name: 'foliage', geo: geo.fol.toGeometry(`${tag}-fol`), mat: folMat,
+              flex: 0.45, cast: lod === 0, receive: true,
+              depth: lod === 0 ? folDepth : null,
+            });
+          }
+          this._treeBuckets[s][lod][v] = this._makeBucket(tag, capOf(lod, s), parts, { lod });
+        }
+      }
+      variantHeights[s] = heights;
+    }
+
+    // Now that variant heights exist, fold the per-instance scale into the baked matrices.
+    this._resolveScales(variantHeights);
+    this._refreshChunkSpheres();
+    this.stats.buildMs = (typeof performance !== 'undefined' ? performance.now() : 0) - t0;
+    void rand;
+  }
+
+  // =========================================================================================
+  // UNDERGROWTH — ferns, huckleberry, salal, deadfall, stumps, roots, saplings
+  // Bare ground between trees is the single loudest "this is a video game" tell.
+  // =========================================================================================
+
+  _genFern(rand, v) {
+    const buf = new Buf();
+    const n = 5 + v + rand.int(0, 3);
+    for (let i = 0; i < n; i++) {
+      const a = i * PHYLLO + rand.range(-0.25, 0.25);
+      const L = rand.range(0.42, 0.88);
+      const ca = Math.cos(a), sa = Math.sin(a);
+      const lift = rand.range(0.50, 1.20);
+      const ul = 1 / Math.hypot(ca, lift, sa);
+      const nl = 1 / Math.hypot(ca * 0.25, 1, sa * 0.25);
+      emitCard(buf, ca * 0.03, 0.015, sa * 0.03,
+        ca * ul, lift * ul, sa * ul, -sa, 0, ca,
+        L * 0.40, L, ca * 0.25 * nl, nl, sa * 0.25 * nl, 0.22);
+    }
+    return buf;
+  }
+
+  _genShrub(rand, v) {
+    const buf = new Buf();
+    const n = 7 + v * 3 + rand.int(0, 3);
+    const up = new THREE.Vector3(), side = new THREE.Vector3();
+    const nrm = new THREE.Vector3(), p = new THREE.Vector3();
+    const R = rand.range(0.35, 0.62), Hh = rand.range(0.45, 0.95);
+    for (let i = 0; i < n; i++) {
+      const a = i * PHYLLO, rr = Math.sqrt((i + 0.4) / n);
+      const px = Math.cos(a) * R * rr, pz = Math.sin(a) * R * rr;
+      const py = Hh * (0.25 + 0.70 * rand.next()) * (1 - rr * 0.35);
+      p.set(px, py * 0.35, pz);
+      up.set(px * 0.6, 1, pz * 0.6).normalize();
+      side.set(-Math.sin(a), 0, Math.cos(a));
+      nrm.set(px * 0.4, 1, pz * 0.4).normalize();
+      emitCross(buf, p, up, side, R * 0.62, Hh * 0.72, nrm, 0.55);
+    }
+    return buf;
+  }
+
+  _genSalal(rand, v) {
+    const buf = new Buf();
+    const n = 6 + v * 2 + rand.int(0, 3);
+    for (let i = 0; i < n; i++) {
+      const a = i * PHYLLO + rand.range(-0.2, 0.2);
+      const L = rand.range(0.26, 0.46);
+      const ca = Math.cos(a), sa = Math.sin(a);
+      const lift = rand.range(0.16, 0.52);
+      const ul = 1 / Math.hypot(ca, lift, sa);
+      emitCard(buf, ca * 0.04, 0.03 + rand.next() * 0.14, sa * 0.04,
+        ca * ul, lift * ul, sa * ul, -sa, 0, ca,
+        L * 0.82, L, 0, 1, 0, 0.85);
+    }
+    return buf;
+  }
+
+  /** A fallen log. The moss buffer keeps ONLY the up-facing quads — moss does not grow under. */
+  _genLog(rand, v) {
+    const wood = new Buf(), moss = new Buf();
+    const L = rand.range(2.6, 6.2), r = rand.range(0.16, 0.34);
+    const segs = 5, sag = rand.range(0.0, 0.11);
+    const pts = [], radii = [];
+    for (let i = 0; i <= segs; i++) {
+      const t = i / segs;
+      pts.push(new THREE.Vector3(
+        -L * 0.5 + L * t,
+        r * 0.72 - Math.sin(t * Math.PI) * sag,
+        Math.sin(t * 3.1 + v) * L * 0.035));
+      radii.push(r * (1 - 0.34 * t));
+    }
+    emitTube(wood, pts, radii, 7, { cap: true, bark: 0.055, uvCirc: TAU * r });
+    emitTube(moss, pts, radii, 7, { upOnly: { min: 0.26, offset: 0.014 }, uvCirc: TAU * r });
+    // A torn root plate at the butt end, half in the ground.
+    const nr = rand.int(2, 4);
+    for (let i = 0; i < nr; i++) {
+      const a = rand.next() * TAU;
+      const d = new THREE.Vector3(Math.cos(a) * 0.6, rand.range(-0.5, 0.6), Math.sin(a) * 0.6).normalize();
+      const b0 = new THREE.Vector3(-L * 0.5, r * 0.6, 0);
+      emitTube(wood, [b0, b0.clone().addScaledVector(d, rand.range(0.3, 0.8))],
+        [r * 0.34, r * 0.09], 4, { cap: true, uvCirc: TAU * r * 0.34 });
+    }
+    return { wood, moss };
+  }
+
+  _genStump(rand, v) {
+    const buf = new Buf();
+    const h = rand.range(0.32, 0.95) + v * 0.1, r = rand.range(0.22, 0.42);
+    const pts = [], radii = [];
+    for (let i = 0; i <= 3; i++) {
+      const t = i / 3, y = -0.45 + (h + 0.45) * t;
+      pts.push(new THREE.Vector3(0, y, 0));
+      radii.push(r * (1 - 0.14 * t));
+    }
+    emitTube(buf, pts, radii, 7, {
+      flare: { h: 0.72, amp: 1.15, lobes: rand.int(4, 7), phase: rand.next() * TAU },
+      bark: 0.07, cap: true, uvCirc: TAU * r,
+    });
+    const nsp = rand.int(3, 5);
+    for (let s = 0; s < nsp; s++) {
+      const a = (s / nsp) * TAU + rand.range(-0.3, 0.3);
+      emitTube(buf, [
+        new THREE.Vector3(Math.cos(a) * r * 0.5, h - 0.05, Math.sin(a) * r * 0.5),
+        new THREE.Vector3(Math.cos(a) * r * 0.75, h + rand.range(0.06, 0.34), Math.sin(a) * r * 0.75),
+      ], [r * 0.26, 0.012], 4, { cap: true, uvCirc: TAU * r * 0.26 });
+    }
+    return buf;
+  }
+
+  _genRoots(rand, v) {
+    const buf = new Buf();
+    const n = 3 + v + rand.int(0, 2);
+    for (let i = 0; i < n; i++) {
+      const a = i * PHYLLO + rand.range(-0.3, 0.3);
+      const ca = Math.cos(a), sa = Math.sin(a);
+      const L = rand.range(0.7, 1.9);
+      const rise = rand.range(0.06, 0.20);
+      const pts = [], radii = [];
+      for (let k = 0; k <= 4; k++) {
+        const t = k / 4;
+        pts.push(new THREE.Vector3(ca * L * t, rise * Math.sin(t * Math.PI) - 0.06, sa * L * t));
+        radii.push(Math.max(0.012, 0.10 * (1 - t * 0.82)));
+      }
+      emitTube(buf, pts, radii, 5, { bark: 0.06, uvCirc: TAU * 0.10 });
+    }
+    return buf;
+  }
+
+  /** Knee-high conifer regeneration — the thing that fills a gap in a real forest. */
+  _genSapling(rand) {
+    const bark = new Buf(), fol = new Buf();
+    const H = rand.range(1.1, 2.3), r = rand.range(0.026, 0.055);
+    emitTube(bark, [
+      new THREE.Vector3(0, -0.25, 0),
+      new THREE.Vector3(0, H * 0.5, 0),
+      new THREE.Vector3(rand.range(-0.05, 0.05), H, rand.range(-0.05, 0.05)),
+    ], [r * 1.6, r, r * 0.3], 5, { cap: true, uvCirc: TAU * r });
+    const up = new THREE.Vector3(), side = new THREE.Vector3();
+    const nrm = new THREE.Vector3(), base = new THREE.Vector3();
+    const whorls = 5;
+    for (let w = 0; w < whorls; w++) {
+      const tw = 0.16 + 0.78 * (w / (whorls - 1));
+      const L = 0.42 * H * Math.pow(1 - tw, 0.6) + 0.05;
+      for (let b = 0; b < 4; b++) {
+        const a = w * PHYLLO + (b / 4) * TAU;
+        const ca = Math.cos(a), sa = Math.sin(a);
+        up.set(ca, -0.16, sa).normalize();
+        side.set(-sa, 0, ca);
+        nrm.set(ca * 0.3, 1, sa * 0.3).normalize();
+        base.set(ca * r, tw * H, sa * r);
+        emitCross(fol, base, up, side, L * 0.62, L * 1.05, nrm, 0.32);
+      }
+    }
+    return { bark, fol };
+  }
+
+  _buildUndergrowthBuckets(rand) {
+    this._ugFlat = [];
+    this._ugKinds = [];
+    if (!this.group) return;
+
+    const tierIdx = this.ctx?.settings?.tier?.(0, 1, 2, 3) ?? 2;
+    const cap = this.ctx?.settings?.tier?.(240, 420, 640, 900) ?? 640;
+
+    const fernMat = this._material('foliage-fern', {
+      color: 0x1d2f22, roughness: 0.4, side: THREE.DoubleSide, alphaTest: 0.3,
+    });
+    const needleMat = this._material('foliage-pine', {
+      color: 0x16241c, roughness: 0.45, side: THREE.DoubleSide, alphaTest: 0.3,
+    });
+    const woodMat = this._material('weathered-wood', { color: 0x3a352c, roughness: 0.9 });
+    const mossMat = this._material('ground-moss', { color: 0x2b3a28, roughness: 0.8 });
+    const barkMat = this._material('bark-pine', { color: 0x342d26, roughness: 0.9 });
+    const fernDepth = this._depthMaterial('foliage-fern');
+    const needleDepth = this._depthMaterial('foliage-pine');
+
+    const add = (name, weight, variants, fn, opt) => {
+      const idx = [];
+      for (let v = 0; v < variants; v++) {
+        const r = rand.fork(`${name}:${v}`);
+        let parts = null;
+        try { parts = fn(r, v); } catch (e) { Log.once(`forest:ug:${name}`, `Forest: undergrowth '${name}' failed`, e); }
+        if (!parts || !parts.length) continue;
+        const bk = this._makeBucket(`ug-${name}-${v}`, cap, parts, { lod: 0, ug: true });
+        if (bk) { idx.push(this._ugFlat.length); this._ugFlat.push(bk); }
+      }
+      if (idx.length) {
+        this._ugKinds.push({
+          name, weight, idx,
+          scale: opt?.scale ?? [0.85, 1.35],
+          tilt: opt?.tilt ?? 0.85,
+          sink: opt?.sink ?? 0.05,
+          wet: opt?.wet ?? 0, shade: opt?.shade ?? 0, open: opt?.open ?? 0,
+        });
+      }
+    };
+
+    const cardPart = (name, buf, mat, depth, flex) => [{
+      name, geo: buf.toGeometry(`ug-${name}`), mat, flex: flex ?? 0,
+      cast: false, receive: true, depth: depth ?? null,
+    }];
+
+    add('fern', 0.26, 2, (r, v) => cardPart('fern', this._genFern(r, v), fernMat, tierIdx >= 2 ? fernDepth : null),
+      { scale: [0.8, 1.5], tilt: 0.75, wet: 0.6, shade: 0.5 });
+    add('huckleberry', 0.19, 2, (r, v) => cardPart('huck', this._genShrub(r, v), fernMat, null),
+      { scale: [0.75, 1.4], tilt: 0.6, shade: 0.2, open: 0.3 });
+    add('salal', 0.21, 2, (r, v) => cardPart('salal', this._genSalal(r, v), fernMat, null),
+      { scale: [0.9, 1.6], tilt: 0.95, wet: 0.3, shade: 0.4 });
+    add('deadfall', 0.06, 2, (r, v) => {
+      const g = this._genLog(r, v);
+      return [
+        { name: 'wood', geo: g.wood.toGeometry('ug-log'), mat: woodMat, flex: 0, cast: tierIdx >= 2, receive: true },
+        { name: 'moss', geo: g.moss.toGeometry('ug-logmoss'), mat: mossMat, flex: 0, cast: false, receive: true },
+      ];
+    }, { scale: [0.8, 1.35], tilt: 0.9, sink: 0.10, shade: 0.3 });
+    add('stump', 0.06, 2, (r, v) => [{
+      name: 'stump', geo: this._genStump(r, v).toGeometry('ug-stump'), mat: woodMat,
+      flex: 0, cast: tierIdx >= 2, receive: true,
+    }], { scale: [0.85, 1.5], tilt: 0.5, sink: 0.08 });
+    add('roots', 0.11, 2, (r, v) => [{
+      name: 'roots', geo: this._genRoots(r, v).toGeometry('ug-roots'), mat: barkMat,
+      flex: 0, cast: false, receive: true,
+    }], { scale: [0.8, 1.6], tilt: 1.0, sink: 0.02, shade: 0.5 });
+    add('sapling', 0.11, 1, (r) => {
+      const g = this._genSapling(r);
+      return [
+        { name: 'stem', geo: g.bark.toGeometry('ug-sap'), mat: barkMat, flex: 0, cast: false, receive: true },
+        { name: 'needles', geo: g.fol.toGeometry('ug-sapfol'), mat: needleMat, flex: 0.35, cast: false, receive: true, depth: tierIdx >= 2 ? needleDepth : null },
+      ];
+    }, { scale: [0.7, 1.5], tilt: 0.7, open: 0.6 });
+  }
+
+  /**
+   * Bake every undergrowth transform up front, per chunk. Streaming this at runtime was the
+   * obvious design and the wrong one: it allocates inside update(), which ARCHITECTURE §12
+   * forbids, and the whole table is under 3 MB.
+   */
+  _pregenUndergrowth() {
+    if (!this._ugFlat || !this._ugFlat.length || !this._chunks.length) return;
+    const t0 = (typeof performance !== 'undefined' ? performance.now() : 0);
+    const seed = (this.ctx?.settings?.get?.('seed') ?? 0x51a5cab) | 0;
+    const rand = new Rand(hashInt(seed ^ 0x0dec0de) | 0);
+    const T = this.terrain;
+    const cs = FT.chunkSize;
+    const per = this.ctx?.settings?.tier?.(52, 90, 140, 180) ?? 140;
+    const kinds = this._ugKinds;
+    if (!kinds.length) return;
+
+    const sB = new Uint8Array(per), sM = new Float32Array(per * 16);
+    const sE = new Float32Array(per), sP = new Float32Array(per);
+    const wts = new Float64Array(kinds.length);
+
+    const m = new THREE.Matrix4();
+    const qTilt = new THREE.Quaternion(), qYaw = new THREE.Quaternion(), qOut = new THREE.Quaternion();
+    const up = new THREE.Vector3(0, 1, 0), nrm = new THREE.Vector3();
+    const pos = new THREE.Vector3(), scl = new THREE.Vector3(), tgt = new THREE.Vector3();
+    const wl = T?.waterLevel ?? 0;
+    let total = 0;
+
+    for (let ci = 0; ci < this._chunks.length; ci++) {
+      const c = this._chunks[ci];
+      let k = 0;
+      for (let s = 0; s < per && k < per; s++) {
+        const x = c.x - cs * 0.5 + rand.next() * cs;
+        const z = c.z - cs * 0.5 + rand.next() * cs;
+        let y = 0, slope = 0, path = 0, dens = 0.55, wet = 0.3, expo = 1, surf = 'needles';
+        if (T) {
+          const p = T.sampleInfo(x, z, _info);
+          y = p.y; slope = p.slope; path = p.path; dens = p.density;
+          wet = p.wet; expo = p.exposure; surf = p.surface;
+          if (p.water) continue;
+        } else {
+          y = fbm2(x * 0.01, z * 0.01, 3, 2.0, 0.5) * 6;
+        }
+        if (y < wl + 0.12 || slope > 0.62 || path > 0.55 || surf === 'gravel') continue;
+
+        const canopy = this.canopyAt(x, z);
+        let accept = 0.22 + 0.78 * clamp01(0.35 + 0.85 * dens + 0.45 * canopy);
+        accept *= 1 - 0.85 * clamp01(path * 1.8);
+        if (surf === 'granite') accept *= 0.20;
+        else if (surf === 'moss') accept *= 1.12;
+        else if (surf === 'mud') accept *= 0.55;
+        if (rand.next() > clamp01(accept)) continue;
+
+        // Kind choice reads the ground: ferns in wet shade, saplings in the gaps.
+        let tw = 0;
+        for (let q = 0; q < kinds.length; q++) {
+          const kd = kinds[q];
+          let w = kd.weight;
+          w *= 1 + kd.wet * (wet * 2 - 0.6);
+          w *= 1 + kd.shade * (canopy * 1.6 - 0.5);
+          w *= 1 + kd.open * (1.2 - canopy * 1.8);
+          wts[q] = w > 0.0005 ? w : 0.0005;
+          tw += wts[q];
+        }
+        let pick = rand.next() * tw, kidx = kinds.length - 1;
+        for (let q = 0; q < kinds.length; q++) { pick -= wts[q]; if (pick <= 0) { kidx = q; break; } }
+        const kd = kinds[kidx];
+        const flat = kd.idx[rand.int(0, kd.idx.length - 1)];
+
+        if (T) T.normalAt(x, z, nrm); else nrm.set(0, 1, 0);
+        tgt.set(lerp(0, nrm.x, kd.tilt), 1, lerp(0, nrm.z, kd.tilt)).normalize();
+        qTilt.setFromUnitVectors(up, tgt);
+        qYaw.setFromAxisAngle(up, rand.next() * TAU);
+        qOut.copy(qTilt).multiply(qYaw);
+        const sc = rand.range(kd.scale[0], kd.scale[1]);
+        pos.set(x, y - kd.sink * sc, z);
+        scl.set(sc, sc, sc);
+        m.compose(pos, qOut, scl);
+        m.toArray(sM, k * 16);
+        sB[k] = flat;
+        sE[k] = clamp01(expo * (1 - 0.55 * canopy));
+        sP[k] = rand.next();
+        k++;
+
+        if (this.physics && (kd.name === 'deadfall' || kd.name === 'stump')) {
+          try {
+            const h = kd.name === 'stump' ? 0.9 * sc : 0.5 * sc;
+            const id = this.physics.addColliderAt(x, y - 0.15, z,
+              kd.name === 'stump' ? 'stump' : 'prop',
+              { shape: 'capsule', radius: 0.34 * sc, height: h, occlusion: 0.55 });
+            if (id >= 0) this._colliders.push(id);
+          } catch (e) { Log.once('forest:ugcol', 'Forest: undergrowth collider failed', e); }
+        }
+      }
+      if (k > 0) {
+        c.ug = { n: k, b: sB.slice(0, k), m: sM.slice(0, k * 16), e: sE.slice(0, k), p: sP.slice(0, k) };
+        total += k;
+      } else {
+        c.ug = null;
+      }
+      c.ugPending = false;
+    }
+    this._ugTotal = total;
+    this.stats.undergrowth = total;
+    Log.debug(`Forest: ${total} undergrowth instances in `
+      + `${((typeof performance !== 'undefined' ? performance.now() : 0) - t0).toFixed(0)} ms`);
+  }
+
+  // =========================================================================================
+  // COLLIDERS
+  // =========================================================================================
+
+  _registerColliders() {
+    const ph = this.physics;
+    if (!ph || typeof ph.addColliderAt !== 'function') return;
+    const n = this._n;
+    if (n > FT.colliderCap) {
+      Log.warn(`Forest: ${n} trunks exceeds colliderCap ${FT.colliderCap} — registering all `
+        + 'anyway; a tree you can walk through is a worse bug than a fat broadphase.');
+    }
+    for (let i = 0; i < n; i++) {
+      const r = Math.max(0.10, this._trad[i] || 0.28);
+      const h = Math.min(FT.colliderHeightCap, Math.max(1.2, this._thgt[i] || 18));
+      try {
+        const id = ph.addColliderAt(this._tx[i], this._ty[i] - 0.10, this._tz[i], 'trunk',
+          { shape: 'capsule', radius: r, height: h });
+        if (id >= 0) this._colliders.push(id);
+      } catch (e) {
+        Log.once('forest:col', 'Forest: trunk collider registration failed', e);
+        break;
+      }
+    }
+  }
+
+  // =========================================================================================
+  // PER-FRAME
+  // =========================================================================================
+
+  /**
+   * Select the LOD band for every tree in every visible chunk and refill the instance
+   * buffers. Zero allocation: every vector, sphere and frustum is module scope, every write
+   * is into a pre-sized Float32Array.
+   */
+  _rebuild(cam) {
+    const buckets = this._buckets;
+    for (let b = 0; b < buckets.length; b++) { buckets[b].count = 0; buckets[b].near = 1e9; }
+
+    _projScreen.multiplyMatrices(cam.projectionMatrix, cam.matrixWorldInverse);
+    _frustum.setFromProjectionMatrix(_projScreen);
+
+    const cx = _camPos.x, cy = _camPos.y, cz = _camPos.z;
+    const far = this._maxDist;
+    const l0 = FT.lod0, l1 = FT.lod1, l2 = FT.lod2;
+    const ugR = this._ugRadius, ugR2 = ugR * ugR;
+    const tb = this._treeBuckets, flat = this._ugFlat;
+    const chunks = this._chunks;
+    const V = Math.max(1, this._variants | 0);
+    let visChunks = 0, visTrees = 0, visUg = 0;
+
+    for (let k = 0; k < chunks.length; k++) {
+      const c = chunks[k];
+      const dx = c.x - cx, dz = c.z - cz;
+      const d2 = dx * dx + dz * dz;
+      const nearR = l0 + c.r;
+      const isNear = d2 < nearR * nearR;
+      if (!isNear) {
+        const fr = far + c.r;
+        if (d2 > fr * fr) continue;
+        // Near chunks skip the frustum test on purpose: the shadow pass needs trees that are
+        // behind the camera, and 9 chunks of overdraw is cheaper than a missing tree shadow.
+        _sphere.center.set(c.x, c.y, c.z);
+        _sphere.radius = c.r;
+        if (!_frustum.intersectsSphere(_sphere)) continue;
+      }
+      visChunks++;
+
+      const tr = c.trees;
+      if (tr && tb) {
+        for (let t = 0; t < tr.length; t++) {
+          const i = tr[t];
+          const ax = this._tx[i] - cx, ay = this._ty[i] - cy, az = this._tz[i] - cz;
+          const d = Math.sqrt(ax * ax + ay * ay + az * az) * this._tjit[i];
+          let lod, g;
+          if (d < l0) { lod = 0; g = this._tvar[i] % V; }
+          else if (d < l1) { lod = 1; g = this._tvar[i] & 1; }
+          else if (d < l2) { lod = 2; g = 0; }
+          else if (d < far) { lod = 3; g = 0; }
+          else continue;
+          const bk = tb[this._tspec[i]][lod][g];
+          if (bk) { this._push(bk, this._tmat, i * 16, this._texpo[i], this._tphase[i], d); visTrees++; }
+        }
+      }
+
+      const ug = c.ug;
+      if (ug && flat && d2 < (ugR + c.r) * (ugR + c.r)) {
+        const um = ug.m;
+        for (let j = 0; j < ug.n; j++) {
+          const o = j * 16;
+          const ex = um[o + 12] - cx, ez = um[o + 14] - cz;
+          const dd = ex * ex + ez * ez;
+          if (dd > ugR2) continue;
+          const bk = flat[ug.b[j]];
+          if (bk) { this._push(bk, um, o, ug.e[j], ug.p[j], Math.sqrt(dd)); visUg++; }
+        }
+      }
+    }
+
+    this.stats.chunksVisible = visChunks;
+    this.stats.visible = visTrees;
+    this.stats.ugVisible = visUg;
+    this._flush();
+  }
+
+  /** Copy one pre-baked 16-float matrix into a bucket. No Matrix4.compose(), no allocation. */
+  _push(bk, src, off, expo, phase, dist) {
+    const n = bk.count;
+    if (n >= bk.cap) return;
+    const d = bk.mat, o = n * 16;
+    d[o] = src[off]; d[o + 1] = src[off + 1]; d[o + 2] = src[off + 2]; d[o + 3] = src[off + 3];
+    d[o + 4] = src[off + 4]; d[o + 5] = src[off + 5]; d[o + 6] = src[off + 6]; d[o + 7] = src[off + 7];
+    d[o + 8] = src[off + 8]; d[o + 9] = src[off + 9]; d[o + 10] = src[off + 10]; d[o + 11] = src[off + 11];
+    d[o + 12] = src[off + 12]; d[o + 13] = src[off + 13]; d[o + 14] = src[off + 14]; d[o + 15] = src[off + 15];
+    const w = n * 2 + 1;
+    bk.ex[n * 2] = expo;
+    const subs = bk.subs;
+    for (let s = 0; s < subs.length; s++) subs[s].wa[w] = phase;
+    if (dist < bk.near) bk.near = dist;
+    bk.count = n + 1;
+  }
+
+  /** Publish counts, upload only the used range, and decide who casts a shadow. */
+  _flush() {
+    const shadowOn = this._shadows !== false;
+    const sr = FT.shadowRange;
+    let draws = 0;
+    const buckets = this._buckets;
+    for (let b = 0; b < buckets.length; b++) {
+      const bk = buckets[b];
+      const n = bk.count;
+      const vis = n > 0;
+      if (vis) {
+        const ma = bk.matAttr;
+        if (ma.clearUpdateRanges) { ma.clearUpdateRanges(); ma.addUpdateRange(0, n * 16); }
+        ma.needsUpdate = true;
+        const ea = bk.exAttr;
+        if (ea.clearUpdateRanges) { ea.clearUpdateRanges(); ea.addUpdateRange(0, n * 2); }
+        ea.needsUpdate = true;
+      }
+      // Shadow casting is a band, not a flag: past ~45 m a tree's shadow is smaller than a
+      // shadow-map texel and costs a full extra draw to render. ART_DIRECTION §3.5.
+      const cast = vis && shadowOn && bk.lod === 0 && bk.near < sr;
+      const subs = bk.subs;
+      for (let s = 0; s < subs.length; s++) {
+        const sub = subs[s];
+        sub.mesh.count = n;
+        sub.mesh.visible = vis;
+        sub.mesh.castShadow = cast && sub.cast;
+        if (vis) {
+          const wa = sub.waAttr;
+          if (wa.clearUpdateRanges) { wa.clearUpdateRanges(); wa.addUpdateRange(0, n * 2); }
+          wa.needsUpdate = true;
+          draws++;
+        }
+      }
+    }
+    this.stats.drawCalls = draws;
+  }
+
+  /**
+   * Per-frame. Cheap by construction: the visible set is only rebuilt when the camera has
+   * actually moved or turned, or every `rebuildMaxFrames` frames, whichever comes first.
+   */
+  update(dt, elapsed) {
+    if (this._disposed || !this.ready) return;
+    if (!this.enabled) return;
+    this._time = elapsed !== undefined ? elapsed : this._time + (dt || 0);
+
+    const cam = this.ctx?.camera;
+    if (!cam) return;
+
+    _camPos.setFromMatrixPosition(cam.matrixWorld);
+    _camQuat.setFromRotationMatrix(cam.matrixWorld);
+
+    this._framesSinceRebuild++;
+    const moved = _camPos.distanceToSquared(this._lastCamPos);
+    const turned = 1 - Math.abs(_camQuat.dot(this._lastCamQuat));
+
+    if (moved > FT.rebuildMoveEps * FT.rebuildMoveEps
+      || turned > FT.rebuildTurnEps
+      || this._framesSinceRebuild >= FT.rebuildMaxFrames) {
+      this._rebuild(cam);
+      this._lastCamPos.copy(_camPos);
+      this._lastCamQuat.copy(_camQuat);
+      this._framesSinceRebuild = 0;
+      this.stats.rebuilds++;
+    }
+  }
+
+  /** Nothing here is resolution-dependent. */
+  resize(_w, _h) { }
+
+  // =========================================================================================
+  // QUERIES
+  // =========================================================================================
+
+  /**
+   * Trunks near a point, for sound occlusion (NoiseSystem) and line of sight (Campers).
+   *
+   * @param {{x:number,y:number,z:number}} position
+   * @param {number} [radius=12]  metres, XZ
+   * @param {Array} [out]  filled in place and returned; a pooled internal array otherwise
+   * @returns {Array<{x,y,z,radius,height,species,dist}>}
+   *
+   * !! The ENTRY OBJECTS come from an internal pool and are overwritten by the next call.
+   *    Read what you need before calling again; never retain them.
+   */
+  occludersNear(position, radius = 12, out = null) {
+    const arr = Array.isArray(out) ? out : this._occOut;
+    arr.length = 0;
+    if (this._disposed || !position || !this._n || !this._chunks.length) return arr;
+
+    const r = Math.max(0.25, radius);
+    const px = position.x || 0, pz = position.z || 0;
+    const cs = FT.chunkSize;
+    const gx0 = clamp((((px - r) - this._cx0) / cs) | 0, 0, this._cnx - 1);
+    const gx1 = clamp((((px + r) - this._cx0) / cs) | 0, 0, this._cnx - 1);
+    const gz0 = clamp((((pz - r) - this._cz0) / cs) | 0, 0, this._cnz - 1);
+    const gz1 = clamp((((pz + r) - this._cz0) / cs) | 0, 0, this._cnz - 1);
+    const pool = this._occPool;
+    const cap = 96;
+
+    for (let gz = gz0; gz <= gz1; gz++) {
+      for (let gx = gx0; gx <= gx1; gx++) {
+        const c = this._chunks[gz * this._cnx + gx];
+        if (!c || !c.trees) continue;
+        for (let t = 0; t < c.trees.length; t++) {
+          const i = c.trees[t];
+          const dx = this._tx[i] - px, dz = this._tz[i] - pz;
+          const tr = this._trad[i] || 0.28;
+          const reach = r + tr;
+          const d2 = dx * dx + dz * dz;
+          if (d2 > reach * reach) continue;
+          const k = arr.length;
+          if (k >= cap) return arr;
+          let rec = pool[k];
+          if (!rec) { rec = { x: 0, y: 0, z: 0, radius: 0, height: 0, species: '', dist: 0 }; pool[k] = rec; }
+          rec.x = this._tx[i]; rec.y = this._ty[i]; rec.z = this._tz[i];
+          rec.radius = tr;
+          rec.height = this._thgt[i] || 18;
+          rec.species = SPECIES_NAME[this._tspec[i]] ?? 'fir';
+          rec.dist = Math.sqrt(d2);
+          arr.push(rec);
+        }
+      }
+    }
+    return arr;
+  }
+
+  /** Canopy density 0..1, bilinear. Weather reads this for shelter and drip. */
+  canopyAt(x, z) {
+    const g = this._canopy;
+    if (!g) return 0;
+    const N = this._cgN, cell = this._cgCell;
+    const fx = clamp((x - this._cgX0) / cell, 0, N - 1.001);
+    const fz = clamp((z - this._cgZ0) / cell, 0, N - 1.001);
+    const x0 = fx | 0, z0 = fz | 0;
+    const tx = fx - x0, tz = fz - z0;
+    const i0 = z0 * N + x0, i1 = i0 + N;
+    const a = g[i0] + (g[i0 + 1] - g[i0]) * tx;
+    const b = g[i1] + (g[i1 + 1] - g[i1]) * tx;
+    return clamp01(a + (b - a) * tz);
+  }
+
+  /** Same field. NoiseSystem, AudioEngine and VoiceBank all call it by this name. */
+  densityAt(x, z) { return this.canopyAt(x, z); }
+
+  /** Descriptor for one tree index. Fills `out` if given. */
+  treeAt(i, out) {
+    const o = out ?? { x: 0, y: 0, z: 0, radius: 0, height: 0, species: 'fir', index: -1 };
+    if (!this._n || i < 0 || i >= this._n) { o.index = -1; return o; }
+    o.index = i;
+    o.x = this._tx[i]; o.y = this._ty[i]; o.z = this._tz[i];
+    o.radius = this._trad[i] || 0.28;
+    o.height = this._thgt[i] || 18;
+    o.species = SPECIES_NAME[this._tspec[i]] ?? 'fir';
+    return o;
+  }
+
+  setEnabled(on) {
+    this.enabled = !!on;
+    if (this.group) this.group.visible = this.enabled;
+    if (this.enabled) this._framesSinceRebuild = 999;
+  }
+
+  // =========================================================================================
+  // TEARDOWN
+  // =========================================================================================
+
+  dispose() {
+    if (this._disposed) return;
+    this._disposed = true;
+    this.ready = false;
+
+    for (let i = 0; i < this._unsub.length; i++) {
+      try { this._unsub[i]?.(); } catch (e) { Log.once('forest:unsub', 'Forest: unsubscribe threw', e); }
+    }
+    this._unsub.length = 0;
+
+    const ph = this.physics;
+    if (ph && typeof ph.removeCollider === 'function') {
+      for (let i = 0; i < this._colliders.length; i++) {
+        try { ph.removeCollider(this._colliders[i]); } catch (e) { /* physics already gone */ }
+      }
+    }
+    this._colliders.length = 0;
+
+    for (let b = 0; b < this._buckets.length; b++) {
+      const bk = this._buckets[b];
+      for (let s = 0; s < bk.subs.length; s++) {
+        const mesh = bk.subs[s].mesh;
+        if (mesh.parent) mesh.parent.remove(mesh);
+        mesh.customDepthMaterial = null;
+        try { mesh.dispose?.(); } catch (e) { /* already released */ }
+      }
+      bk.subs.length = 0;
+      bk.mat = null; bk.ex = null; bk.matAttr = null; bk.exAttr = null;
+    }
+    this._buckets.length = 0;
+    this._treeBuckets = null;
+    this._ugBuckets = null;
+    this._ugFlat = null;
+    this._ugKinds = null;
+
+    for (let i = 0; i < this._ownedGeometries.length; i++) {
+      try { this._ownedGeometries[i].dispose(); } catch (e) { /* already released */ }
+    }
+    this._ownedGeometries.length = 0;
+    for (let i = 0; i < this._ownedMaterials.length; i++) {
+      try { this._ownedMaterials[i].dispose(); } catch (e) { /* already released */ }
+    }
+    this._ownedMaterials.length = 0;
+    for (let i = 0; i < this._ownedTextures.length; i++) {
+      try { this._ownedTextures[i].dispose(); } catch (e) { /* already released */ }
+    }
+    this._ownedTextures.length = 0;
+
+    if (this.group) {
+      if (this.group.parent) this.group.parent.remove(this.group);
+      this.group.clear?.();
+      this.group = null;
+    }
+
+    for (let i = 0; i < this._chunks.length; i++) {
+      const c = this._chunks[i];
+      if (c) { c.trees = null; c.ug = null; }
+    }
+    this._chunks.length = 0;
+    this._chunkIndex = null;
+    this._canopy = null;
+    this._tx = this._ty = this._tz = null;
+    this._tmat = null; this._tspec = null; this._tvar = null;
+    this._trad = null; this._thgt = null; this._tphase = null;
+    this._texpo = null; this._tjit = null;
+    this._occOut.length = 0;
+    this._occPool.length = 0;
+    this._ugQueue.length = 0;
+    this._n = 0;
+    this.terrain = null; this.mats = null; this.physics = null;
   }
 }
 

@@ -17,7 +17,7 @@ import * as THREE from 'three';
 import { Log } from '../core/Log.js';
 import { Rand } from '../core/Rand.js';
 import {
-  SFXBank, renderImpulseResponse, recipeInfo, resolveId, creakTier, dbToGain, SPACES,
+  SFXBank, renderImpulseResponse, recipeInfo, resolveId, creakTier, dbToGain, bufferPeak, SPACES,
 } from './ProceduralSFX.js';
 
 // ---------------------------------------------------------------- module scratch
@@ -104,6 +104,81 @@ const SURFACE_SFX = {
   hollow: 'step.wood.hollow', crawlspace: 'step.wood.hollow',
   tin: 'step.tin', metal: 'step.tin', roof: 'step.tin', shed: 'step.tin',
 };
+
+// ---------------------------------------------------------------- generated assets
+//
+// `public/audio/` is OPTIONAL. Everything below is a LAYER on top of the synthesis paths, not
+// a replacement for them: the folder can be deleted from a clone and the game still boots,
+// sounds like itself, and is fully playable. Nothing here ever throws, warns, or blocks boot —
+// a missing manifest is the default state of a fresh checkout, not an error.
+
+/** Where the pipeline writes its index, relative to the site root. */
+const GEN_MANIFEST = 'audio/manifest.json';
+const GEN_SECTIONS = ['beds', 'sfx', 'music'];
+
+/** Vite is configured with `base: './'`, so every URL is resolved against the document. */
+function genUrl(rel) {
+  let base = '/';
+  try { base = import.meta.env?.BASE_URL ?? '/'; } catch { /* non-Vite host */ }
+  if (!base.endsWith('/')) base += '/';
+  const clean = String(rel ?? '').replace(/^\/+/, '');
+  const href = globalThis.location?.href ?? 'http://localhost/';
+  try { return new URL(`${base}${clean}`, href).href; }
+  catch { return `${base}${clean}`; }
+}
+
+/**
+ * Our sfx id → the generated asset that replaces it. These are the "hero" sounds: fixed
+ * events where a real recording beats an oscillator. Everything the game must vary
+ * CONTINUOUSLY (footsteps by surface/speed/mass, carried-lumber impacts by velocity, the
+ * creak severity sweep between tiers, wind driven by the live wind vector) stays synthesized.
+ */
+const GEN_SFX = {
+  'creak.t1': 'creak-t1', 'creak.t2': 'creak-t2', 'creak.t3': 'creak-t3', 'creak.t4': 'creak-t4',
+  'wood.split': 'wood-split',
+  'nail.pull': 'nail-pull',
+  'thunder.near': 'thunder-near', 'thunder.mid': 'thunder-mid', 'thunder.far': 'thunder-far',
+  'lumber.drop': 'lumber-drop',
+  'lumber.stack': 'lumber-stack',
+  'hammer.wood': 'hammer-wood', 'hammer.steel': 'hammer-steel',
+  'bracket.drop.rock': 'bracket-drop-rock',
+  'lantern.shutter': 'lantern-shutter',
+  'tarp.flap': 'tarp-flap',
+  'twig.snap': 'twig-snap',
+};
+
+/**
+ * Ids the pipeline ships that ProceduralSFX has no recipe for. They are playable only when
+ * the folder exists; `play()` returns null for them otherwise, exactly as it does today.
+ * The mix hints stand in for the recipe's, including the calibrated 1 m peak.
+ */
+const GEN_ONLY_INFO = {
+  'lumber.stack': { family: 'build', priority: 2, peakDb: -12 },
+  'lantern.shutter': { family: 'world', priority: 2, peakDb: -20 },
+  'tarp.flap': { family: 'world', priority: 1, peakDb: -18 },
+};
+
+/**
+ * The bed set. `db` is the layer's own 1 m level; `place` names the world anchor for the beds
+ * that belong to a PLACE and must therefore be 3D-positioned through the panner path rather
+ * than played flat.
+ */
+const BED_DEFS = {
+  'forest-night-calm': { db: -25 },
+  'forest-night-tense': { db: -24 },
+  'wind-pines-light': { db: -27 },
+  'wind-pines-gust': { db: -23 },
+  'rain-on-leaves': { db: -23 },
+  'rain-on-tin': { db: -21 },
+  'crickets-dense': { db: -30, bus: 'cricket' },
+  'lake-shore': { db: -18, place: 'shore', rolloff: ROLLOFF.landmark, refDistance: 14 },
+  'campfire': { db: -14, place: 'fire', rolloff: ROLLOFF.landmark, refDistance: 3.5 },
+  'camp-radio-1984': { db: -16, place: 'camp', rolloff: ROLLOFF.landmark, refDistance: 7 },
+};
+
+/** Equal-power pair, so a crossfade between two beds never dips in the middle. */
+const eqIn = (t) => Math.sin(clamp01(t) * Math.PI * 0.5);
+const eqOut = (t) => Math.cos(clamp01(t) * Math.PI * 0.5);
 
 // ---------------------------------------------------------------- voice
 
@@ -263,6 +338,40 @@ export class AudioEngine {
     this._cricketClearAt = 0;
     this._cricketReturnT = 0;
     this._acc = 0;
+
+    // ---- generated assets (public/audio/). Public contract: `generatedAvailable` is false
+    // until a manifest with at least one playable entry has loaded, and stays false forever
+    // if the folder was deleted. Nothing in the game may branch on it being true.
+    /** @type {boolean} */
+    this.generatedAvailable = false;
+    this._genIndex = new Map();          // id → { id, section, url, seconds, loop }
+    this._genCache = new Map();          // id → { buffer, bytes, used, refs, cal }
+    this._genPending = new Map();        // id → Promise, so we fetch each file once
+    this._genBytes = 0;
+    this._genBudget = 48 * 1024 * 1024;  // decoded-float budget for the LRU
+    this._genMax = 20;                   // …and a hard entry cap on top of it
+    this._genClock = 0;                  // monotonic LRU stamp (no Date, no allocation)
+    this._genAbort = null;
+    this._manifestReady = null;
+    this._xfadeSec = 2.0;
+
+    // The crossfading bed player.
+    this._beds = new Map();              // name → track
+    this._bedList = [];                  // same tracks, index-iterable for update()
+    this._bedsOnline = false;
+    this._bedT = 0;
+    this._primaryBed = null;
+    this._primaryOverride = null;
+    this._genWindTrim = 1;               // procedural bed makes room for the generated one
+    this._genRainTrim = 1;
+    this._place = { fire: new THREE.Vector3(), camp: new THREE.Vector3(), shore: new THREE.Vector3() };
+    this._placeT = -1e9;
+    this._placeOK = false;
+
+    // Thunder scheduled off a real flash, waiting for Weather's own `audio:sfx` to claim it.
+    this._thunder = { at: 0, id: null, volume: 1, rate: 1 };
+    this._lastFlash = 0;
+    this._flashAt = -1e9;
   }
 
   // =============================================================== lifecycle
@@ -274,6 +383,11 @@ export class AudioEngine {
       this._buildVoices();
       this._bindEvents();
       this._installGestureResume();
+
+      // The generated-asset index. Started here, awaited by nobody: boot never waits on the
+      // network, and if `public/audio/` does not exist this resolves to null and the whole
+      // layer stays switched off.
+      this._manifestReady = this._loadManifest();
 
       this.sfx = new SFXBank(this.context, {
         rand: this.rand.fork('bank'),
@@ -294,6 +408,11 @@ export class AudioEngine {
         // The bed comes up with whatever rendered. A missing layer is a missing layer,
         // never a missing forest.
         try { this._startAmbience(); } catch (e) { Log.warn('Audio: ambience failed:', e?.message ?? e); }
+        // …and the generated beds layer on top of it, once we know whether they exist. This
+        // runs after _startAmbience() on purpose: the cricket bus it routes into is built
+        // there, and the generated chorus must be cut by the same gesture as the synth one.
+        this._manifestReady?.then(() => this._startGeneratedBeds())
+          .catch((e) => Log.debug('Audio: generated beds unavailable:', e?.message ?? e));
       });
 
       this._loadImpulseResponses()
@@ -585,16 +704,32 @@ export class AudioEngine {
    */
   play(id, opts = {}) {
     if (!this.enabled || !this.sfx) return null;
-    const resolved = resolveId(id);
+    let resolved = resolveId(id);
+    let genOnly = null;
     if (!resolved) {
-      Log.once(`audio:id:${id}`, `audio: unknown sfx id '${id}'.`);
-      return null;
+      // A handful of ids exist only as generated assets (no recipe was ever written for
+      // them). They are playable when the folder is there and silent when it is not, which
+      // is the same contract every other unknown id has today.
+      if (GEN_SFX[id] && GEN_ONLY_INFO[id]) { resolved = id; genOnly = GEN_ONLY_INFO[id]; }
+      else {
+        Log.once(`audio:id:${id}`, `audio: unknown sfx id '${id}'.`);
+        return null;
+      }
     }
-    const buf = opts.variant != null
-      ? this.sfx.variant(resolved, opts.variant)
-      : this.sfx.get(resolved, this.rand);
+    // The generated sample wins when it is resident; synthesis is the fallback and the
+    // first-play stand-in while the asset decodes.
+    const gen = opts.variant == null && this._genSelect(resolved);
+    let calGain = 1;
+    let buf = null;
+    if (gen) { buf = _gsel.buf; calGain = _gsel.gain; }
+    else if (genOnly) return null;               // no recipe and no sample — nothing to play
+    else {
+      buf = opts.variant != null
+        ? this.sfx.variant(resolved, opts.variant)
+        : this.sfx.get(resolved, this.rand);
+    }
     if (!buf) return null;                       // still rendering — drop it, never stall
-    const info = recipeInfo(resolved);
+    const info = genOnly ?? recipeInfo(resolved);
     const busName = opts.bus ?? (info?.family === 'ui' ? 'sfxUI' : 'sfxWorld');
     const spatial = !!opts.position && busName !== 'sfxUI' && busName !== 'body';
 
@@ -614,9 +749,11 @@ export class AudioEngine {
       priority: opts.priority ?? info?.priority ?? 2,
       bus: busName,
       position: spatial ? opts.position : null,
-      gain: gainValue,
-      rate: opts.rate ?? 1,
-      detune: opts.detune ?? 0,
+      gain: gainValue * calGain,
+      // A sample is a single take. Procedural rate/detune variation rides on top of it so a
+      // hammer struck ten times never sounds like the same recording ten times.
+      rate: (opts.rate ?? 1) * (gen && opts.rate == null ? this.rand.range(0.975, 1.025) : 1),
+      detune: opts.detune ?? (gen ? this.rand.range(-70, 70) : 0),
       loop: !!opts.loop,
       reverb: opts.reverb,
       occ,
@@ -1078,6 +1215,13 @@ export class AudioEngine {
 
   _onSfx(e) {
     if (!e?.id) return;
+    // Weather schedules its own thunder and emits it when the front arrives; that claims the
+    // roll we armed on the flash so the two never double up.
+    if (this._thunder.at && String(e.id).indexOf('thunder') === 0) {
+      this._thunder.at = 0;
+      this._thunder.id = null;
+      this.duck('ambience', 5, 5, 200, 1400);
+    }
     this.play(e.id, {
       position: e.position ?? null,
       volume: e.volume ?? 1,
@@ -1125,13 +1269,16 @@ export class AudioEngine {
       ? dbToGain(clamp(noiseDbFor(intensity) - info.peakDb, -18, 12))
       : 1;
 
-    this._playBuffer(this._pick(resolved), {
+    const buf = this._pick(resolved);
+    this._playBuffer(buf, {
       id: resolved,
       family: info?.family ?? 'sfx',
       priority: info?.priority ?? 2,
       bus: 'sfxWorld',
       position: e.position,
-      gain: mix.rel * adj,
+      // `_gsel.gain` re-levels a generated sample onto the recipe's calibrated peak, so the
+      // number the player hears is still exactly the number NoiseSystem gave the AI.
+      gain: mix.rel * adj * _gsel.gain,
       rate: kind === 'footstep-crouch' ? 0.85 : kind === 'footstep-run' ? 1.12 : 1,
       detune: this.rand.range(-140, 140),
       occ: mix.occ,
@@ -1142,7 +1289,14 @@ export class AudioEngine {
     });
   }
 
+  /**
+   * One buffer for `id`, generated if it is resident and synthesized otherwise. Sets
+   * `_gsel.gain` to the level correction that makes the sample match the recipe's calibrated
+   * `peakDb`, so §1.3's loudness contract holds whichever source we ended up with.
+   */
   _pick(id) {
+    if (this._genSelect(id)) return _gsel.buf;
+    _gsel.gain = 1;
     return this.sfx ? this.sfx.get(id, this.rand) : null;
   }
 
@@ -1338,7 +1492,21 @@ export class AudioEngine {
     const severity = clamp01(Number(e?.severity) || 0);
     const tier = creakTier(severity);
     const size = Number(e?.size) || (2.4 + (tier - 1) * 0.6);
-    const buf = this.sfx.creak(severity, size, this.rand);
+    // THE signature sound. Four generated takes, one per severity tier — but severity is
+    // continuous and the tier boundaries must not be audible as four fixed samples, so the
+    // within-tier position still sweeps the playback rate: heavier load, slower and lower.
+    const gen = this._genSelect(`creak.t${tier}`);
+    let buf = null;
+    let calGain = 1;
+    let rate = 1;
+    if (gen) {
+      buf = _gsel.buf;
+      calGain = _gsel.gain;
+      const frac = clamp01(severity * 4 - (tier - 1));
+      rate = (1.09 - 0.17 * frac) * (1 + 0.03 * clamp(2.4 / Math.max(0.8, size) - 1, -0.6, 0.6));
+    } else {
+      buf = this.sfx.creak(severity, size, this.rand);
+    }
     if (!buf) return;
 
     const pos = e?.position ?? null;
@@ -1365,8 +1533,8 @@ export class AudioEngine {
       priority: tier >= 2 ? 3 : 2,
       bus: 'sfxWorld',
       position: pos,
-      gain: 1,
-      rate: 1,
+      gain: calGain,
+      rate,
       detune: this.rand.range(-60, 60),
       occ,
       distance: dist,
@@ -1534,27 +1702,72 @@ export class AudioEngine {
   _onLightning(e) {
     if (!this.enabled) return;
     const distance = clamp(Number(e?.distance) || this.rand.range(600, 3400), 60, 9000);
+    this._strike(distance);
+  }
+
+  /**
+   * S4, from a real strike distance. The delay is `distance / 343` and the player counts it;
+   * a 3 km strike buys 8.7 s of silence that we did not have to write.
+   *
+   * Weather runs its own thunder schedule and emits `audio:sfx` when the front arrives, so we
+   * arm the roll rather than fire it: the duck, the cricket cut and the gust are ours, and the
+   * sound itself is Weather's unless Weather turns out not to be there — in which case we
+   * play it ourselves a beat later. Either way the class comes from the same distance and
+   * routes through the same near/mid/far generated take.
+   */
+  _strike(distanceMeters) {
+    const distance = clamp(Number(distanceMeters) || 1800, 60, 9000);
     const delay = distance / 343;
+    this._flashAt = this.now();
     for (const n of ['ambience', 'music', 'sfxWorld', 'vo']) {
       this.duck(n, 14, 110, delay * 1000, 260);
     }
     this._cutCrickets(delay + 2);
-    const id = distance < 400 ? 'thunder.near' : distance < 2000 ? 'thunder.mid' : 'thunder.far';
-    const when = this.now() + delay;
-    this._after(Math.max(0, delay - 0.1), () => {
-      // Thunder is not panned by distance — a 4 km source has no parallax (§3.1).
-      this.play(id, {
-        bus: 'sfxWorld',
-        volume: 1,
-        when,
-        priority: 3,
-        family: 'thunder',
-        reverb: distance > 2000 ? 0.7 : 0.3,
-      });
-      this.duck('ambience', 5, 5, 200, 1400);
-      // Every thunder also modulates the wind: a gust arriving 1.5 s later.
-      this._after(1.5, () => { this._gust = Math.min(1, this._gust + 0.4); });
+    // Weather's own class boundaries (1.2 km / 2.8 km), so both paths choose the same take.
+    const id = distance < 1200 ? 'thunder.near' : distance < 2800 ? 'thunder.mid' : 'thunder.far';
+    const near = clamp01(1 - distance / 4200);
+    this._thunder.at = this.now() + delay;
+    this._thunder.id = id;
+    this._thunder.volume = clamp01(0.35 + 0.65 * near);
+    this._thunder.rate = 1.06 - 0.14 * near;
+    // Every thunder also modulates the wind: a gust arriving 1.5 s after the roll.
+    this._after(delay + 1.5, () => { this._gust = Math.min(1, this._gust + 0.4); });
+  }
+
+  /** Fire the armed roll ourselves if Weather never claimed it. */
+  _updateThunder(now) {
+    const t = this._thunder;
+    if (!t.at || now < t.at + 1.2) return;
+    const id = t.id;
+    const volume = t.volume;
+    const rate = t.rate;
+    t.at = 0; t.id = null;
+    if (!id) return;
+    // Thunder is not panned by distance — a 4 km source has no parallax (§3.1).
+    this.play(id, {
+      bus: 'sfxWorld', volume, rate, priority: 3, family: 'thunder',
+      reverb: id === 'thunder.far' ? 0.7 : 0.3,
     });
+    this.duck('ambience', 5, 5, 200, 1400);
+  }
+
+  /**
+   * The flash. Weather does not emit a lightning event — it exposes `lightning` (the flash
+   * envelope) and `strikeDistanceKm` — so we watch the rising edge at 20 Hz and take the real
+   * distance from it. `thunderMaskRemaining` tells us a roll is already covering the world,
+   * which is when a second S4 duck would be a pumping generator rather than a silence.
+   */
+  _pollLightning(now) {
+    const w = this.ctx?.systems?.get?.('Weather');
+    if (!w) return;
+    const flash = Number(w.lightning) || 0;
+    const prev = this._lastFlash;
+    this._lastFlash = flash;
+    if (flash <= 0.16 || prev > 0.16) return;
+    if (now - this._flashAt < 1.5) return;
+    if ((Number(w.thunderMaskRemaining) || 0) > 6) return;   // already inside a roll
+    const km = Number(w.strikeDistanceKm);
+    this._strike(Number.isFinite(km) && km > 0 ? km * 1000 : 1800);
   }
 
   // --------------------------------------------------------------- mix helpers
@@ -1595,6 +1808,530 @@ export class AudioEngine {
     }, Math.max(0, sec * 1000));
     this._timers.add(t);
     return t;
+  }
+
+  // =============================================================== generated assets
+  //
+  // A LAYER, not a replacement. Delete `public/audio/` and every path below turns itself off
+  // at debug level and the game runs on pure synthesis exactly as it did before this existed.
+
+  /**
+   * Fetch and index `/audio/manifest.json`. Resolves to the manifest, or to null for every
+   * failure mode there is: no folder, 404, an SPA fallback serving HTML, malformed JSON,
+   * `generated: false`, no fetch at all. Never throws and never logs above debug.
+   * @returns {Promise<object|null>}
+   */
+  async _loadManifest() {
+    this.generatedAvailable = false;
+    if (typeof fetch !== 'function') return null;
+    try { this._genAbort = new globalThis.AbortController(); } catch { this._genAbort = null; }
+
+    let json = null;
+    try {
+      const res = await fetch(genUrl(GEN_MANIFEST), { cache: 'no-cache', signal: this._genAbort?.signal ?? undefined });
+      if (!res || !res.ok) {
+        Log.debug(`Audio: no generated manifest (${res?.status ?? 'no response'}) — pure synthesis.`);
+        return null;
+      }
+      // Belt and braces: a dev server's SPA fallback answers 200 with text/html.
+      const ctype = res.headers?.get?.('content-type') ?? '';
+      if (ctype.indexOf('html') >= 0) { Log.debug('Audio: manifest URL served HTML — pure synthesis.'); return null; }
+      json = await res.json();
+    } catch (e) {
+      Log.debug('Audio: generated manifest unavailable — pure synthesis.', e?.message ?? e);
+      return null;
+    }
+    if (!json || typeof json !== 'object' || json.generated === false) {
+      Log.debug('Audio: manifest declares no generated assets — pure synthesis.');
+      return null;
+    }
+    if (!this.context) return null;                 // disposed while we were on the network
+
+    let n = 0;
+    for (let s = 0; s < GEN_SECTIONS.length; s++) {
+      const section = GEN_SECTIONS[s];
+      const list = json[section];
+      if (!Array.isArray(list)) continue;
+      for (let i = 0; i < list.length; i++) {
+        const e = list[i];
+        if (!e || typeof e.id !== 'string' || typeof e.file !== 'string') continue;
+        this._genIndex.set(e.id, {
+          id: e.id,
+          section,
+          url: genUrl(e.file),
+          seconds: Number(e.seconds) || 0,
+          loop: !!e.loop,
+        });
+        n++;
+      }
+    }
+    if (n === 0) { Log.debug('Audio: manifest lists no assets — pure synthesis.'); return null; }
+
+    const xf = Number(json.loopCrossfadeSeconds);
+    if (Number.isFinite(xf) && xf > 0.05) this._xfadeSec = clamp(xf, 0.1, 8);
+    const s = this.settings;
+    this._genBudget = (s ? s.tier(24, 36, 56, 80) : 48) * 1024 * 1024;
+    this._genMax = s ? s.tier(10, 14, 20, 26) : 20;
+    this.generatedAvailable = true;
+    Log.debug(`Audio: generated assets available — ${n} entries, ${this._xfadeSec.toFixed(1)} s loop crossfade.`);
+    return json;
+  }
+
+  // --------------------------------------------------------------- the lazy LRU
+
+  /**
+   * The decoded buffer for a generated id, or null if it is not resident yet. NEVER decodes
+   * synchronously and never awaits: the first call schedules the fetch and returns null so
+   * the caller falls through to synthesis, and every call after it gets the sample. Decoding
+   * all 33 assets up front would stall boot and cost ~400 MB of Float32.
+   * @returns {AudioBuffer|null}
+   */
+  generatedBuffer(id) {
+    const e = this._genCache.get(id);
+    if (e) { e.used = ++this._genClock; return e.buffer; }
+    if (this.generatedAvailable && this._genIndex.has(id)) {
+      this.loadGenerated(id).catch(() => { /* already logged at debug */ });
+    }
+    return null;
+  }
+
+  /** True when the manifest lists `id`, whether or not it is decoded yet. */
+  hasGenerated(id) { return this._genIndex.has(id); }
+
+  /**
+   * Fetch + decode one asset into the LRU. Concurrent callers share one request. Resolves to
+   * null on any failure; the id is then dropped from the index so we never retry in a loop.
+   * @returns {Promise<AudioBuffer|null>}
+   */
+  loadGenerated(id) {
+    const cached = this._genCache.get(id);
+    if (cached) { cached.used = ++this._genClock; return Promise.resolve(cached.buffer); }
+    const pending = this._genPending.get(id);
+    if (pending) return pending;
+    const entry = this._genIndex.get(id);
+    if (!entry || !this.context) return Promise.resolve(null);
+
+    const p = (async () => {
+      try {
+        const res = await fetch(entry.url, { cache: 'default', signal: this._genAbort?.signal ?? undefined });
+        if (!res || !res.ok) throw new Error(String(res?.status ?? 'no response'));
+        const ctype = res.headers?.get?.('content-type') ?? '';
+        if (ctype.indexOf('html') >= 0) throw new Error('got html, not audio');
+        const raw = await res.arrayBuffer();
+        const c = this.context;
+        if (!c) return null;                        // disposed mid-flight
+        const buffer = await c.decodeAudioData(raw);
+        if (!buffer || !this.context) return null;
+        this._genStore(id, buffer);
+        return buffer;
+      } catch (e) {
+        // One asset missing is not a failure of the folder — drop it and keep synthesizing.
+        this._genIndex.delete(id);
+        Log.debug(`Audio: generated '${id}' unavailable — synthesis stands in.`, e?.message ?? e);
+        return null;
+      } finally {
+        this._genPending.delete(id);
+      }
+    })();
+    this._genPending.set(id, p);
+    return p;
+  }
+
+  /** Insert a decoded buffer, calibrate its level against the recipe, then evict. */
+  _genStore(id, buffer) {
+    // Level calibration. Every gain in this file is expressed against the recipe's own
+    // `peakDb`; a sample whose peak differs would break the §1.3 loudness contract, so we
+    // fold the correction into the buffer's own play gain rather than into the mix.
+    let cal = 1;
+    const target = this._genPeakDb(id);
+    if (target != null) {
+      let peak = 0;
+      try { peak = Number(bufferPeak(buffer)) || 0; } catch { peak = 0; }
+      if (peak > 1e-4) cal = clamp(dbToGain(target) / peak, 0.05, 8);
+    }
+    this._genCache.set(id, {
+      buffer,
+      bytes: buffer.length * buffer.numberOfChannels * 4,
+      used: ++this._genClock,
+      refs: 0,
+      cal,
+    });
+    this._genBytes += buffer.length * buffer.numberOfChannels * 4;
+    this._genEvict();
+  }
+
+  /** The calibrated 1 m peak this generated id must match, or null if we have no opinion. */
+  _genPeakDb(id) {
+    for (const key in GEN_SFX) {
+      if (GEN_SFX[key] !== id) continue;
+      const info = recipeInfo(key);
+      if (info?.peakDb != null) return info.peakDb;
+      return GEN_ONLY_INFO[key]?.peakDb ?? null;
+    }
+    return null;                                    // beds and music are levelled by the bed player
+  }
+
+  /** Least-recently-used eviction, by decoded bytes and by count. Never evicts a live bed. */
+  _genEvict() {
+    let guard = 64;
+    while (guard-- > 0
+      && (this._genBytes > this._genBudget || this._genCache.size > this._genMax)) {
+      let victim = null;
+      let oldest = Infinity;
+      // Linear scan rather than a sort: eviction is rare and must not allocate an array.
+      for (const [key, e] of this._genCache) {
+        if (e.refs > 0) continue;
+        if (e.used < oldest) { oldest = e.used; victim = key; }
+      }
+      if (victim == null) return;                   // everything resident is in use
+      const e = this._genCache.get(victim);
+      this._genBytes -= e.bytes;
+      this._genCache.delete(victim);
+      Log.debug(`Audio: evicted generated '${victim}' (${(e.bytes / 1048576).toFixed(1)} MB).`);
+    }
+  }
+
+  /**
+   * Resolve one of our sfx ids to a generated buffer, filling `_gsel` with the buffer and the
+   * calibration gain. Returns false when the sample is not resident — the caller then uses
+   * the procedural recipe, which is the permanent fallback, not a temporary one.
+   */
+  _genSelect(id) {
+    _gsel.buf = null; _gsel.gain = 1;
+    if (!this.generatedAvailable) return false;
+    const gid = GEN_SFX[id];
+    if (!gid) return false;
+    const buf = this.generatedBuffer(gid);
+    if (!buf) return false;
+    _gsel.buf = buf;
+    _gsel.gain = this._genCache.get(gid)?.cal ?? 1;
+    return true;
+  }
+
+  // --------------------------------------------------------------- the bed player
+
+  /** Build the generated bed layer. Idempotent, and a no-op without a manifest. */
+  _startGeneratedBeds() {
+    if (this._bedsOnline || !this.generatedAvailable || !this.enabled || !this.context) return;
+    if (!this.buses?.ambience) return;
+    this._bedsOnline = true;
+    // The synthesized wind and rain stay — they are the layers that track the live wind
+    // vector and the rain scalar — but they make room for the recordings underneath them.
+    this._genWindTrim = dbToGain(-3);
+    this._genRainTrim = dbToGain(-4);
+    Log.debug('Audio: generated ambience beds online.');
+  }
+
+  /**
+   * Get (or lazily build) one bed track. A track is a persistent gain — plus a panner for the
+   * beds that belong to a PLACE — and a rolling pair of buffer sources that equal-power
+   * crossfade into one another. Generated audio does not loop sample-accurately; a hard loop
+   * point clicks and pumps and on a 20 s bed the listener hears it inside a minute.
+   */
+  _bedTrack(name) {
+    let t = this._beds.get(name);
+    if (t) return t;
+    const def = BED_DEFS[name];
+    const c = this.context;
+    if (!def || !c || !this.generatedAvailable || !this._genIndex.has(name)) return null;
+
+    const gainNode = c.createGain();
+    gainNode.gain.value = MIN_G;
+    let panner = null;
+    // A place bed goes through the same panner path as everything else in the world, so the
+    // campfire is *at* the campfire and the lake is *over there*.
+    if (def.place) {
+      panner = c.createPanner();
+      panner.panningModel = 'equalpower';
+      panner.distanceModel = 'inverse';
+      panner.refDistance = def.refDistance ?? REF_DISTANCE;
+      panner.rolloffFactor = def.rolloff ?? ROLLOFF.landmark;
+      panner.maxDistance = MAX_DISTANCE;
+      gainNode.connect(panner);
+    }
+    const busKey = def.bus === 'cricket' && this.buses?.cricket ? 'cricket' : 'ambience';
+    const dest = this.buses[busKey]?.input ?? this.buses.ambience.input;
+    (panner ?? gainNode).connect(dest);
+
+    t = {
+      name,
+      def,
+      gain: gainNode,
+      panner,
+      buffer: null,
+      level: 0,           // 0..1 target, before the def's own dB
+      nextAt: 0,          // context time the next iteration must start at
+      srcs: [],
+      loading: false,
+      // A cricket bed that could not reach the cricket bus follows the cut scalar itself.
+      followCut: def.bus === 'cricket' && busKey !== 'cricket',
+    };
+    this._beds.set(name, t);
+    this._bedList.push(t);
+    return t;
+  }
+
+  /**
+   * Set a bed's level, ramped. `level` is 0..1 against the bed's own calibrated dB; a bed at
+   * 0 keeps scheduling nothing until it is asked for again.
+   */
+  _bedLevel(name, level, fadeSec = 2.0) {
+    const t = this._bedTrack(name);
+    if (!t) return null;
+    const lv = clamp01(level);
+    if (Math.abs(lv - t.level) < 1e-3) return t;
+    t.level = lv;
+    // Every gain move is ramped — an abrupt gain is an audible click (§9.2).
+    const tau = Math.max(0.005, fadeSec / 3);
+    this._set(t.gain.gain, lv > 1e-3 ? lv * dbToGain(t.def.db) : MIN_G, this.now(), tau);
+    if (lv > 1e-3 && !t.buffer && !t.loading) {
+      t.loading = true;
+      // Lazy: the bed is decoded on first use, not at boot.
+      this.loadGenerated(name).then((buf) => {
+        t.loading = false;
+        if (!buf || !this.context || !this._beds.has(name)) return;
+        t.buffer = buf;
+        const e = this._genCache.get(name);
+        if (e) e.refs++;                    // a live bed is never evicted out from under itself
+        t.nextAt = this.now() + 0.08;
+      }).catch(() => { t.loading = false; });
+    }
+    return t;
+  }
+
+  /**
+   * §9.5 — pick the primary ambience bed and crossfade the others of its family out.
+   * Passing null hands the choice back to the world-driven director.
+   * @param {string|null} name
+   * @param {{ fade?: number, level?: number }} [opts]
+   */
+  setBed(name, opts = {}) {
+    if (!this.generatedAvailable) return false;
+    const fade = Number.isFinite(opts.fade) ? Math.max(0.005, opts.fade) : this._xfadeSec;
+    if (name == null) { this._primaryOverride = null; return true; }
+    if (!BED_DEFS[name]) return false;
+    this._primaryOverride = name;
+    const level = Number.isFinite(opts.level) ? clamp01(opts.level) : 1;
+    for (const key in BED_DEFS) {
+      if (BED_DEFS[key].place || BED_DEFS[key].bus) continue;   // places and the chorus are stacked, not switched
+      if (key === name) this._bedLevel(key, level, fade);
+      else if (this._beds.has(key)) this._bedLevel(key, 0, fade);
+    }
+    this._primaryBed = name;
+    return true;
+  }
+
+  /**
+   * Equal-power crossfade between two named beds. Both are ramped across `seconds` so the sum
+   * holds constant power through the middle rather than dipping.
+   */
+  crossfadeBed(from, to, seconds = 2.0) {
+    if (!this.generatedAvailable) return false;
+    const dur = Math.max(0.005, Number(seconds) || this._xfadeSec);
+    let ok = false;
+    if (to && BED_DEFS[to]) { this._bedLevel(to, 1, dur); ok = true; }
+    if (from && this._beds.has(from)) { this._bedLevel(from, 0, dur); ok = true; }
+    if (to && BED_DEFS[to] && !BED_DEFS[to].place && !BED_DEFS[to].bus) this._primaryBed = to;
+    return ok;
+  }
+
+  /** The names the manifest actually shipped, for debug overlays. */
+  bedNames() {
+    const out = [];
+    for (const name in BED_DEFS) if (this._genIndex.has(name)) out.push(name);
+    return out;
+  }
+
+  /**
+   * Schedule the next iteration of one bed. The next source starts `loopCrossfadeSeconds`
+   * before the current one ends, and the two are equal-power crossfaded across the overlap.
+   */
+  _pumpBed(t, now) {
+    if (!t.buffer || !this.context) return;
+    if (t.level <= 1e-3 && t.srcs.length === 0) { t.nextAt = 0; return; }
+    if (t.nextAt <= 0) t.nextAt = now + 0.08;
+    const c = this.context;
+    const dur = t.buffer.duration;
+    if (!(dur > 0.2)) return;
+    const xf = Math.min(this._xfadeSec, dur * 0.45);
+
+    let guard = 4;
+    while (guard-- > 0 && t.nextAt < now + 0.75) {
+      const start = Math.max(now + 0.03, t.nextAt);
+      const g = c.createGain();
+      const src = c.createBufferSource();
+      src.buffer = t.buffer;
+      src.connect(g);
+      g.connect(t.gain);
+      const fadeAt = start + dur - xf;
+      try {
+        g.gain.setValueCurveAtTime(XF_UP, start, xf);
+        g.gain.setValueAtTime(1, start + xf);
+        g.gain.setValueCurveAtTime(XF_DOWN, fadeAt, xf);
+      } catch {
+        // Some engines refuse adjacent curves; a linear pair is close enough and silent.
+        try {
+          g.gain.setValueAtTime(MIN_G, start);
+          g.gain.linearRampToValueAtTime(1, start + xf);
+          g.gain.setValueAtTime(1, fadeAt);
+          g.gain.linearRampToValueAtTime(MIN_G, fadeAt + xf);
+        } catch { /* frozen param — it will simply play flat */ }
+      }
+      const rec = { src, g };
+      src.onended = () => {
+        try { src.disconnect(); } catch { /* gone */ }
+        try { g.disconnect(); } catch { /* gone */ }
+        const i = t.srcs.indexOf(rec);
+        if (i >= 0) t.srcs.splice(i, 1);
+      };
+      try {
+        src.start(start);
+        src.stop(start + dur + 0.03);
+      } catch (e) {
+        Log.once('audio:bed:start', 'bed source.start failed', e);
+        try { src.disconnect(); g.disconnect(); } catch { /* gone */ }
+        return;
+      }
+      t.srcs.push(rec);
+      t.nextAt = fadeAt;
+    }
+  }
+
+  /** Refresh the world anchors the place beds sit on. 1 Hz — none of them move. */
+  _updatePlaces(now) {
+    if (now - this._placeT < 1.0) return;
+    this._placeT = now;
+    const sys = this.ctx?.systems;
+    if (!sys) return;
+    let ok = false;
+    try {
+      const props = sys.get?.('Props');
+      if (props?.firePosition) { this._place.fire.copy(props.firePosition); ok = true; }
+      if (props?.campCenter) { this._place.camp.copy(props.campCenter); ok = true; }
+      const terrain = sys.get?.('Terrain');
+      const shore = terrain?.shorePoint ?? terrain?.dock;
+      if (shore) { this._place.shore.copy(shore); ok = true; }
+    } catch { /* world systems still being authored */ }
+    this._placeOK = ok;
+    if (!ok) return;
+    const t0 = this._beds.get('campfire');
+    const t1 = this._beds.get('camp-radio-1984');
+    const t2 = this._beds.get('lake-shore');
+    // The radio is at the mess hall, a little off the fire.
+    _v.copy(this._place.camp); _v.y += 1.2;
+    if (t1?.panner) this._setPannerPosition(t1.panner, _v, now, 0.05);
+    _v.copy(this._place.fire); _v.y += 0.4;
+    if (t0?.panner) this._setPannerPosition(t0.panner, _v, now, 0.05);
+    _v.copy(this._place.shore); _v.y += 0.3;
+    if (t2?.panner) this._setPannerPosition(t2.panner, _v, now, 0.05);
+  }
+
+  /**
+   * The director. The generated bed set answers the world, at 4 Hz, with no allocation:
+   * calm vs tense forest, light vs gusting pines, rain by surface, the lake by proximity,
+   * the camp by proximity, and the chorus by the one rule that matters — THE CRICKETS STOP.
+   */
+  _updateBeds(now, dt) {
+    if (!this._bedsOnline) return;
+    // Iteration scheduling has to run at full slow-tick rate; the director does not.
+    for (let i = 0; i < this._bedList.length; i++) this._pumpBed(this._bedList[i], now);
+    if (now - this._bedT < 0.25) return;
+    this._bedT = now;
+    this._updatePlaces(now);
+    void dt;
+
+    const sys = this.ctx?.systems;
+    const state = this.ctx?.state;
+    const w = sys?.get?.('Weather') ?? null;
+
+    // S7 and S1 take everything with them; the bed player must not fight a silence rule.
+    if (this._silenceRule === 'S7') {
+      for (let i = 0; i < this._bedList.length; i++) this._bedLevel(this._bedList[i].name, 0, 1.2);
+      return;
+    }
+
+    const rainRaw = Number(w?.rain);
+    const rain = clamp01(Number.isFinite(rainRaw) ? rainRaw : this._rain);
+    const gustRaw = Number(w?.windGust);
+    const gust = clamp01(Number.isFinite(gustRaw) ? gustRaw : this._gust);
+    const windRaw = Number(w?.windStrength);
+    const wind = clamp01(Number.isFinite(windRaw) ? windRaw : this._wind);
+
+    // ---- the forest: calm or tense. Equal-power so the pair never dips through the middle.
+    const near = clamp01(1 - this._nearestCamper / 26);
+    const tense = clamp01(0.55 * this.dread + 0.55 * near
+      + (state?.phase === 'chase' ? 1 : 0) + (this._held ? 0.5 : 0));
+    if (this._primaryOverride == null) {
+      // Tension arrives faster than it leaves — the same asymmetry as `dread`.
+      const up = tense > (this._bedTense ?? 0);
+      this._bedTense = tense;
+      const xf = up ? 2.5 : 6.0;
+      this._bedLevel('forest-night-calm', eqOut(tense), xf);
+      this._bedLevel('forest-night-tense', eqIn(tense), xf);
+      this._primaryBed = tense > 0.5 ? 'forest-night-tense' : 'forest-night-calm';
+    }
+
+    // ---- pines: the gust bed rides on top of the light one, both scaled by wind strength.
+    const windBody = 0.25 + 0.75 * wind;
+    this._bedLevel('wind-pines-light', eqOut(gust) * windBody, 1.6);
+    this._bedLevel('wind-pines-gust', eqIn(gust) * windBody * (0.35 + 0.65 * wind), 0.9);
+
+    // ---- rain, by what is overhead. Tin only under the cabin's tin roof — the whole point
+    // of that recording is that the player put the roof there.
+    const underRoof = this._space === 'TIN_ROOF';
+    this._bedLevel('rain-on-leaves', rain * (underRoof ? 0.3 : 1), 2.5);
+    this._bedLevel('rain-on-tin', underRoof ? rain : 0, 1.2);
+
+    // ---- the lake and the camp: landmarks, positioned, audible from a long way out.
+    this._listenerPosition(_lis);
+    if (this._placeOK) {
+      const dShore = _tmp.copy(this._place.shore).distanceTo(_lis);
+      this._bedLevel('lake-shore', clamp01(1 - dShore / 85), 3.0);
+      const dFire = _tmp.copy(this._place.fire).distanceTo(_lis);
+      // The fires start dying at lights-out (§4.18); the recording goes with them.
+      const t = clamp01(state?.timeOfNight ?? 0);
+      const fireLife = t > 0.55 ? clamp01(1 - (t - 0.55) / 0.25) : 1;
+      this._bedLevel('campfire', clamp01(1 - dFire / 55) * fireLife, 3.0);
+      const dCamp = _tmp.copy(this._place.camp).distanceTo(_lis);
+      // The radio is a clock: it goes off at timeOfNight 0.55, and the silence after it is
+      // the point. Music owns the synthesized radio; if it claims it, we stay out of the way.
+      const music = sys?.get?.('Music') ?? null;
+      const radioOwned = music?.ownsRadio === true;
+      const radioOn = !radioOwned && t < 0.55;
+      this._bedLevel('camp-radio-1984', radioOn ? clamp01(1 - dCamp / 110) : 0, radioOn ? 3.0 : 0.35);
+    }
+
+    // ---- the chorus. Routed into the cricket bus, so §5.4's cut takes the recording with
+    // the synthesized chirps in one gesture. That silence is a designed cue, not an accident.
+    const chorus = this._crickets ? 1 - clamp01(this._cricketCut) : 1;
+    const cricketTrack = this._beds.get('crickets-dense');
+    const rainThin = 1 - 0.4 * rain;
+    this._bedLevel('crickets-dense',
+      (cricketTrack?.followCut ? chorus : 1) * rainThin * (this._silenceRule ? 0 : 1),
+      0.35);
+  }
+
+  /** Stop and tear down every bed track. Used by dispose(). */
+  _stopBeds() {
+    for (let i = 0; i < this._bedList.length; i++) {
+      const t = this._bedList[i];
+      for (let j = 0; j < t.srcs.length; j++) {
+        const rec = t.srcs[j];
+        rec.src.onended = null;
+        try { rec.src.stop(); } catch { /* already stopped */ }
+        try { rec.src.disconnect(); } catch { /* gone */ }
+        try { rec.g.disconnect(); } catch { /* gone */ }
+      }
+      t.srcs.length = 0;
+      const e = this._genCache.get(t.name);
+      if (e && e.refs > 0) e.refs--;
+      t.buffer = null;
+      try { t.gain.disconnect(); } catch { /* not connected */ }
+      try { t.panner?.disconnect(); } catch { /* not connected */ }
+    }
+    this._bedList.length = 0;
+    this._beds.clear();
+    this._bedsOnline = false;
   }
 
   // =============================================================== §5 the bed
@@ -1776,7 +2513,7 @@ export class AudioEngine {
     if (!a || !this.context) return;
     const now = this.now();
     this._ambWindTarget = wind;
-    this._set(a.windGain.gain, wind * dbToGain(-40 + 26 * this._wind), now, tau / 3);
+    this._set(a.windGain.gain, wind * dbToGain(-40 + 26 * this._wind) * this._genWindTrim, now, tau / 3);
     this._set(a.distance.gain, distance * dbToGain(-42), now, tau / 3);
     if (a.roomTone) this._set(a.roomTone.gain, Math.max(wind, distance) > 0 ? dbToGain(-44) : MIN_G, now, tau / 3);
     if (this._crickets) {
@@ -1834,15 +2571,18 @@ export class AudioEngine {
     this._gust = clamp01(this._gust * 0.985 + (this.rand.next() < 0.02 ? this.rand.range(0, 0.5) : 0));
     // Gusts open the top end — that is what makes a gust *arrive*.
     this._set(a.gustLP.frequency, 900 + 6500 * this._gust * clamp01(this._wind + 0.2), now, 0.3);
-    this._set(a.windGain.gain, (this._ambWindTarget ?? 1) * dbToGain(-40 + 26 * this._wind), now, 0.5);
+    this._set(a.windGain.gain,
+      (this._ambWindTarget ?? 1) * dbToGain(-40 + 26 * this._wind) * this._genWindTrim, now, 0.5);
 
-    // Rain, blended by what is overhead.
+    // Rain, blended by what is overhead. The synthesized surfaces stay — they are what makes
+    // the rain track the live scalar — and step back a few dB under the generated beds.
     const r = dead ? 0 : this._rain;
     const underRoof = this._space === 'TIN_ROOF';
     const nearWater = this._space === 'LAKE_EDGE';
-    if (a.rain.leaves) this._set(a.rain.leaves.gain, r > 0.01 ? dbToGain(-34 + 22 * r) * (underRoof ? 0.35 : 1) : MIN_G, now, 0.6);
-    if (a.rain.tin) this._set(a.rain.tin.gain, r > 0.01 && underRoof ? dbToGain(-30 + 24 * r) : MIN_G, now, 0.5);
-    if (a.rain.water) this._set(a.rain.water.gain, r > 0.01 && nearWater ? dbToGain(-36 + 18 * r) : MIN_G, now, 0.8);
+    const rt = this._genRainTrim;
+    if (a.rain.leaves) this._set(a.rain.leaves.gain, r > 0.01 ? dbToGain(-34 + 22 * r) * (underRoof ? 0.35 : 1) * rt : MIN_G, now, 0.6);
+    if (a.rain.tin) this._set(a.rain.tin.gain, r > 0.01 && underRoof ? dbToGain(-30 + 24 * r) * rt : MIN_G, now, 0.5);
+    if (a.rain.water) this._set(a.rain.water.gain, r > 0.01 && nearWater ? dbToGain(-36 + 18 * r) * rt : MIN_G, now, 0.8);
 
     // S8 — the world gets quieter when you cannot see it.
     if (a.lantern) {
@@ -2079,6 +2819,11 @@ export class AudioEngine {
       this._updateCrickets(now);
       this._updateBody(now, slow);
       this._updateWorldQueries(now, slow);
+      // The flash envelope lasts a few hundred ms, so the edge detector runs at the slow
+      // tick's 20 Hz, not the 4 Hz world-query rate.
+      this._pollLightning(now);
+      this._updateThunder(now);
+      this._updateBeds(now, slow);
     }
     void elapsed;
   }
