@@ -26,26 +26,44 @@ const DEV_SERVER = 'http://127.0.0.1:5173';
  * The public API each module must expose, from ARCHITECTURE.md.
  * A module that parses but lacks these is truncated or faked.
  */
+/**
+ * Three separate agents have now shipped a file that parses, ends with a tidy
+ * `export default`, and contains a great deal of private infrastructure — while omitting the
+ * public API the rest of the game calls. Terrain had no heightAt(); Textures had no class at
+ * all; AudioEngine had a complete WebAudio graph and no play(). The pattern is that agents run
+ * out of steam on very large files and stop after the scaffolding.
+ *
+ * So this table is deliberately exhaustive rather than indicative: every method another module
+ * actually calls is listed, because "looks finished" is not a signal we can trust.
+ */
 const REQUIRED_API = {
-  'world/Terrain.js': ['heightAt', 'normalAt', 'surfaceAt', 'slopeAt', 'isWater', 'getSpawnCandidates'],
+  'world/Terrain.js': ['heightAt', 'normalAt', 'surfaceAt', 'slopeAt', 'isWater',
+                       'getSpawnCandidates', 'dispose'],
   'gameplay/Physics.js': ['raycast', 'moveCapsule', 'lineOfSight', 'addCollider', 'overlapSphere'],
-  'gameplay/Player.js': ['position', 'velocity', 'isCrouched'],
-  'gameplay/Navmesh.js': ['findPath', 'nearestNode', 'randomPatrolTarget', 'isWalkable'],
-  'gameplay/NoiseSystem.js': ['audibilityAt', 'recentNoises'],
-  'gameplay/Campers.js': ['agents', 'suspicion'],
-  'gameplay/BuildSystem.js': ['heldPart', 'progress'],
+  'gameplay/Player.js': ['position', 'velocity', 'isCrouched', 'update'],
+  'gameplay/Flashlight.js': ['toggle', 'light', 'visibilityContribution'],
+  'gameplay/Navmesh.js': ['findPath', 'nearestNode', 'randomPatrolTarget', 'isWalkable',
+                          'patrolRoutes'],
+  'gameplay/NoiseSystem.js': ['audibilityAt', 'recentNoises', 'maskLevel'],
+  'gameplay/Campers.js': ['agents', 'suspicion', 'update'],
+  'gameplay/BuildSystem.js': ['heldPart', 'progress', 'update'],
   'gameplay/Blueprint.js': ['forNight', 'renderPanel'],
+  'gameplay/Weather.js': ['rain', 'wind', 'lightning'],
+  'gameplay/NightManager.js': ['night', 'tension', 'update'],
   'world/CabinSite.js': ['slots', 'slotWorldTransform', 'setInstalled', 'showGhost', 'partMesh'],
-  'render/Textures.js': ['get'],
-  'render/Materials.js': ['get', 'globalUniforms'],
-  'render/Postprocessing.js': ['render'],
-  'render/Sky.js': ['moonDirection', 'flash'],
-  'render/VolumetricFog.js': ['target'],
-  'audio/AudioEngine.js': ['play', 'setBusVolume'],
+  'world/Forest.js': ['update', 'dispose'],
+  'world/Props.js': ['lights', 'dispose'],
+  'render/Textures.js': ['get', 'dispose'],
+  'render/Materials.js': ['get', 'globalUniforms', 'update'],
+  'render/Postprocessing.js': ['render', 'resize', 'dispose'],
+  'render/Sky.js': ['moonDirection', 'flash', 'update'],
+  'render/VolumetricFog.js': ['target', 'render'],
+  'audio/AudioEngine.js': ['play', 'playAt', 'stop', 'setBusVolume', 'listener'],
+  'audio/Music.js': ['setIntensity', 'update'],
   'audio/VoiceBank.js': ['say', 'available'],
-  'ui/HUD.js': ['toast', 'subtitle'],
-  'ui/BlueprintUI.js': ['open', 'close', 'toggle'],
-  'ui/Menu.js': ['showTitle', 'showNightEnd'],
+  'ui/HUD.js': ['toast', 'subtitle', 'setPrompt', 'setDetection'],
+  'ui/BlueprintUI.js': ['open', 'close', 'toggle', 'isOpen'],
+  'ui/Menu.js': ['showTitle', 'showPause', 'showNightEnd', 'showSettings'],
 };
 
 /** Markup that must never appear in a source file. */

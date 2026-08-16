@@ -1754,16 +1754,24 @@ export class Music {
 
     // Let the fade actually happen before tearing the chain down, or the "off" is a click
     // instead of a decay. The timer is tracked so dispose() can cancel it.
-    const doomed = this._radioNodes;
+    this._flushRadioNodes();
+    this._radioDoomed = this._radioNodes;
     this._radioNodes = [];
     this._radioHiss = null;
     this._radioIn = null;
     this._radioDrift = null;
-    if (this._radioKillTimer) globalThis.clearTimeout?.(this._radioKillTimer);
     this._radioKillTimer = globalThis.setTimeout?.(() => {
       this._radioKillTimer = 0;
-      for (const n of doomed) { try { n.disconnect?.(); } catch { /* noop */ } }
+      this._flushRadioNodes();
     }, Math.max(120, fadeMs + 260));
+  }
+
+  /** Disconnect any radio chain still waiting out its fade. Safe to call repeatedly. */
+  _flushRadioNodes() {
+    if (this._radioKillTimer) { globalThis.clearTimeout?.(this._radioKillTimer); this._radioKillTimer = 0; }
+    if (!this._radioDoomed) return;
+    for (const n of this._radioDoomed) { try { n.disconnect?.(); } catch { /* noop */ } }
+    this._radioDoomed = null;
   }
 
   _scheduleRadio(now) {
@@ -1877,6 +1885,7 @@ export class Music {
     this._removeResumeHandler();
 
     try { this.stopRadio(10, false); } catch { /* noop */ }
+    this._flushRadioNodes();          // no timer survives dispose()
     this._teardownGraph();
 
     if (this._ownsContext && this.ac) {

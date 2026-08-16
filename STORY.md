@@ -1672,3 +1672,151 @@ they are just people, audibly, in a wood.
 | `COO_FIRE_03` | Coop | "Bev. Bev. Tell the one about the bear." | wheedling | S | |
 | `BEV_FIRE_02` | Bev | "No." | complete sentence | S | |
 | `ROB_FIRE_02` | Robin | "My dad says a good dock outlives the man." | quiet, fond, N3 | S | |
+
+### 8.8 Arguments — small, domestic, real (N2–4)
+
+| ID | Speaker | Line | Delivery | Proj | Δ |
+|---|---|---|---|---|---|
+| `MRG_ARG_01` | Marg | "I *asked* you to do it before dark." | tired, not angry | S | |
+| `COO_ARG_01` | Coop | "And I said I would, and I'm doing it." | flat, hurt | S | |
+| `MRG_ARG_02` | Marg | "You do the bit instead of the thing." | true, and it lands | S | |
+| `COO_ARG_02` | Coop | "…Yeah. Okay. Yeah." | no bit available | S | |
+| `BEV_ARG_01` | Bev | "Not tonight. Both of you." | zero volume, total authority | S | |
+| `BEV_ARG_02` | Bev | "Sound carries over the water. Happens every year." | **kind, and wrong** | S | |
+| `BEV_ARG_03` | Bev | "It's a generator. It's always a generator." | patient, reasonable | S | |
+| `ROB_ARG_01` | Robin | "It wasn't the water. It was — okay. Fine." | giving up mid-sentence | S | |
+| `ROB_ARG_02` | Robin | "So that's a no. That's a no, Dale." | very controlled | S | |
+| `DAL_ARG_01` | Dale | "If we call it in, it's a report. Anyway." | won't meet her eye | S | |
+| `DAL_ARG_02` | Dale | "I need this job past August. That's all." | ashamed | S | |
+| `TED_ARG_01` | Teddy | "Are you guys — sorry. Never mind." | backing out of a room | S | |
+
+### 8.9 "I heard something" (N2–6)
+
+| ID | Speaker | Line | Delivery | Proj | Δ |
+|---|---|---|---|---|---|
+| `ROB_HEAR_01` | Robin | "Shh — shh. There. That." | dead still, whispered | S | |
+| `ROB_HEAR_02` | Robin | "That's a mallet. That's somebody driving a stake." | technical, unsettling | S | |
+| `ROB_HEAR_03` | Robin | "Four hits. Even. Nothing hits four times even." | building an argument | S | |
+| `ROB_HEAR_04` | Robin | "That's a *hand* saw. That's not a chainsaw." | N3, certain | S | |
+| `ROB_HEAR_05` | Robin | "It stops when we stop. Listen. Listen." | N4+ | S | |
+| `MRG_HEAR_01` | Marg | "Okay, I heard that one. I heard that." | conceding, not scared | S | |
+| `MRG_HEAR_02` | Marg | "It stopped. Why did it stop." | not a question | S | |
+| `MRG_HEAR_03` | Marg | "That's not the campground. That's close." | N4+ | S | |
+| `COO_HEAR_01` | Coop | "Deer. That's deer. That's a deer thing." | reassuring himself | S | |
+| `COO_HEAR_02` | Coop | "Okay that's — okay, that's not funny now." | bit collapsing in real time | S | |
+| `COO_HEAR_03` | Coop | "Do deer hammer? Is that a thing deer do?" | trying, failing | S | |
+| `DAL_HEAR_01` | Dale | "Huh." | one syllable, thoughtful | S | |
+| `DAL_HEAR_02` | Dale | "That's somebody working. That's work." | recognising it, N3 | S | |
+| `TED_HEAR_01` | Teddy | "Something moved. Over — there. Sorry." | pointing, small voice | S | |
+| `TED_HEAR_02` | Teddy | "It was going the same speed as us." | N5+, quiet | S | |
+| `BEV_HEAR_01` | Bev | "Quiet. Everybody. Quiet." | drops to nothing | S | |
+| `BEV_HEAR_02` | Bev | "That's a hammer. That's a claw hammer." | N5+, recognising work | S | |
+| `BEV_HEAR_03` | Bev | "Somebody's out past the point." | flat, N6 | S | |
+
+### 8.10 False alarms — the comedy that stops being comedy (N2–5)
+
+| ID | Speaker | Line | Delivery | Proj | Δ |
+|---|---|---|---|---|---|
+| `COO_FALSE_01` | Coop | "AH — okay. Okay. Raccoon. It's a raccoon." | genuine fright, fast recovery | S | |
+| `MRG_FALSE_01` | Marg | "You screamed. You actually screamed." | relieved laughing | S | |
+| `TED_FALSE_01` | Teddy | "Sorry! Sorry, that was me, sorry." | mortified | S | |
+| `ROB_FALSE_01` | Robin | "It's fine. It's fine. Everyone breathe." | doesn't believe it | S | |
+| `COO_FALSE_02` | Coop | "See? Nothing. Told you. Nothing." | the bit isn't working | S | |
+| `DAL_FALSE_01` | Dale | "Little guy's got more right to be here than us." | fond, about the raccoon | S | |
+| `MRG_FALSE_02` | Marg | "That's my *own torch*. That's my own torch." | laughing at herself, N4 | S | |
+| `TED_FALSE_02` | Teddy | "I thought it was — it was a coat. It's a coat." | shaky, N5 | S | |
+| `COO_FALSE_03` | Coop | "Ha. Ha ha. Okay. Yep." | N5, nothing behind it | S | |
+| `ROB_FALSE_02` | Robin | "Don't do that. Don't *do* that." | not laughing, N5 | S | |
+
+### 8.11 Searching (N4–7)
+
+| ID | Speaker | Line | Delivery | Proj | Δ |
+|---|---|---|---|---|---|
+| `MRG_SRCH_01` | Marg | "Pairs. Nobody goes out alone, I mean it." | commanding, steady | C | |
+| `MRG_SRCH_02` | Marg | "One, two — Robin, that's three, where's Coop?" | rising | C | |
+| `MRG_SRCH_03` | Marg | "We've been past that stump twice." | quiet realisation | S | |
+| `MRG_SRCH_04` | Marg | "Grid it. North to south. Like the swim test." | competent under pressure | C | |
+| `MRG_SRCH_05` | Marg | "Call back if you can hear me. Anyone." | N6+ | H | |
+| `COO_SRCH_01` | Coop | "Dale? Buddy? You messing with us?" | wants to be pranked | H | |
+| `COO_SRCH_02` | Coop | "Dale! Come on, man!" | shouting into trees | H | |
+| `COO_SRCH_03` | Coop | "He's at the truck. He's gonna be at the truck." | to himself | S | |
+| `COO_SRCH_04` | Coop | "I checked the truck." | very small | S | |
+| `ROB_SRCH_01` | Robin | "Check the boathouse. The door's *gone*." | flat, professional, N4 | C | |
+| `ROB_SRCH_02` | Robin | "Stop. Everybody stop. Listen." | commanding for the first time | C | |
+| `ROB_SRCH_03` | Robin | "Follow the sawdust. It goes somewhere." | N5+ | S | |
+| `ROB_SRCH_04` | Robin | "There's a path. It's not a deer path." | N5+ | S | |
+| `BEV_SRCH_01` | Bev | "Torches low. Watch the roots." | still doing her job | C | |
+| `BEV_SRCH_02` | Bev | "Back to the road. Now. Move." | no fear in it, only speed | H | |
+| `BEV_SRCH_03` | Bev | "Two hours. County said four. It's been two." | N6 | S | |
+| `BEV_SRCH_04` | Bev | "Kids in the hall. Doors shut. Go." | N6+ | C | |
+| `TED_SRCH_01` | Teddy | "How far do we go? Sorry — how far?" | asking permission again | S | |
+| `TED_SRCH_02` | Teddy | "I'll go with you. I'd rather go with you." | N5+ | S | |
+| `TED_SRCH_03` | Teddy | "Can we stop? Can we just — can we stop." | N6+ | S | |
+| `MRG_SRCH_06` | Marg | "Nobody signed out. I checked twice." | N5+ | S | |
+| `COO_SRCH_05` | Coop | "What do we even do. What do we *do*." | N6+, no bit | S | |
+| `ROB_SRCH_05` | Robin | "I'm going up to the point." | N6, decided, quiet | S | |
+| `BEV_SRCH_05` | Bev | "You are not. Robin. You are not." | N6, and she goes anyway | C | |
+
+### 8.12 Finding evidence (N4–7)
+
+| ID | Speaker | Line | Delivery | Proj | Δ |
+|---|---|---|---|---|---|
+| `ROB_EVID_01` | Robin | "This is sawdust. In June. From what?" | crouched, close | S | |
+| `ROB_EVID_02` | Robin | "There's a path here. Somebody's worn a path." | the moment it becomes real | S | |
+| `ROB_EVID_03` | Robin | **"That's a mortise. Somebody cut a *mortise*."** | technical, appalled | S | |
+| `ROB_EVID_04` | Robin | "The cut's clean. Whoever did this is *good*." | and that is the frightening part | S | |
+| `MRG_EVID_01` | Marg | "The door's gone. The whole *door*." | baffled, N4 | S | |
+| `MRG_EVID_02` | Marg | "Now the hinges. They came back for the hinges." | N6, and it lands | S | |
+| `MRG_EVID_03` | Marg | "Don't touch it. Don't — Teddy, don't touch it." | protective | C | |
+| `COO_EVID_01` | Coop | "Who takes a door. Who *takes a door*." | trying to make it funny | S | |
+| `COO_EVID_02` | Coop | "There's a *ladder* up there. That's our ladder." | N5 | S | |
+| `BEV_EVID_01` | Bev | "That's not camp lumber. That's milled." | recognising work | S | |
+| `BEV_EVID_02` | Bev | "Somebody's been out here months." | N6, quiet | S | |
+| `TED_EVID_01` | Teddy | "It's Dale's. That's Dale's torch. That's his." | voice going thin | S | |
+| `TED_EVID_02` | Teddy | "It's stood up. Someone stood it up." | N5, and nobody answers | S | |
+| `DAL_EVID_04` | Dale | "…the hell is this, chief." | to nobody, N4, unafraid | S | |
+
+### 8.13 Genuine fear (N5–7)
+
+| ID | Speaker | Line | Delivery | Proj | Δ |
+|---|---|---|---|---|---|
+| `TED_FEAR_01` | Teddy | "I want to go home. I'm sorry. I want to go home." | whispered, no performance | S | |
+| `TED_FEAR_02` | Teddy | "Is he still there? Is he still—" | cut off by his own breath | S | |
+| `TED_FEAR_03` | Teddy | "I'm not sorry. I'm not — I'm not saying sorry." | breaking, N7 | S | |
+| `ROB_FEAR_01` | Robin | "Okay. Okay. Okay okay okay." | self-soothing, fast | S | |
+| `ROB_FEAR_02` | Robin | **"He looks at you sideways."** | trying to describe it, and stopping | S | |
+| `ROB_FEAR_03` | Robin | "He wasn't running. Why wasn't he running." | N6+ | S | |
+| `COO_FEAR_01` | Coop | "Marg. Marg, look at me. Look at me." | trying to hold her together | S | |
+| `COO_FEAR_02` | Coop | "I'm not — I can't do a joke. I don't have one." | genuinely undone | S | |
+| `COO_FEAR_03` | Coop | "I keep waiting for it to be a bit." | N7, flat | S | |
+| `MRG_FEAR_01` | Marg | **"Nobody signed out. The board's clean."** | numb, and it is worse than a headcount | S | |
+| `MRG_FEAR_02` | Marg | "Run to the road. Don't stop at the truck." | commander to the last | H | |
+| `MRG_FEAR_03` | Marg | "I'm counting. I'm going to keep counting." | N7 | S | |
+| `BEV_FEAR_01` | Bev | **"Thirteen years. Never. Not once."** | first crack in her | S | |
+| `BEV_FEAR_02` | Bev | "This is my camp. This is *my* camp." | N7, and it isn't | S | |
+| `ROB_FEAR_04` | Robin | "He was *measuring*. He had a — he was measuring." | N6+, cannot make it sound sane | S | |
+| `TED_FEAR_04` | Teddy | "The buses come at nine. Nine o'clock." | dazed, repeating | S | |
+
+### 8.14 Very late — Nights 6 and 7 only
+
+| ID | Speaker | Line | Delivery | Proj | Δ |
+|---|---|---|---|---|---|
+| `BEV_LATE_01` | Bev | "County's four hours out. Four hours." | reporting a fact | S | |
+| `BEV_LATE_02` | Bev | "There was a family on this shore. Before us." | dawning | S | |
+| `BEV_LATE_03` | Bev | "Boy was big. Quiet. Fixed the dock for nothing." | remembering a kindness | S | |
+| `BEV_LATE_04` | Bev | **"His name was—"** | stops herself dead | S | |
+| `BEV_LATE_05` | Bev | "I never asked. Thirteen years. Never asked." | N7 | S | |
+| `BEV_LATE_06` | Bev | "It's still standing. That dock. It's still standing." | N7, and she doesn't know why she said it | S | |
+| `ROB_LATE_01` | Robin | "There's marks on the door. Pencil. Somebody's kid." | inside the house, whispering | S | |
+| `ROB_LATE_02` | Robin | "Fifty-three. Fifty-five. Fifty-seven." | reading four numbers she thinks are measurements | S | |
+| `ROB_LATE_03` | Robin | "This one's over my head. This one's — " | hand flat on the top mark | S | |
+| `ROB_LATE_04` | Robin | **"There's no nails in this. There's no *nails* in it."** | appalled, admiring, both | S | |
+| `ROB_LATE_05` | Robin | "There's two chairs." | N7, from the treeline, to nobody | S | |
+| `TED_LATE_01` | Teddy | "The buses come at nine. They're gonna come at nine." | shock, repeating | S | |
+| `COO_LATE_01` | Coop | "Is that a *window*? That's got a window in it." | N7, and it destroys him | S | |
+| `MRG_LATE_01` | Marg | "Whoever built that isn't finished." | N7, flat, correct | S | |
+
+**Bank total: 186 scripted lines + 36 `CHATTER_BED` takes.** Cut lines are listed in §8.2 and must
+not be regenerated.
+
+---

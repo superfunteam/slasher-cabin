@@ -2852,4 +2852,68 @@ For an agent starting from zero, the dependency order that unblocks the most wor
 6. The creak model with its three caps (§7.1–7.3)
 7. Night 1 end-to-end against §17, then §19 row A1
 
-<!--SECTION-BREAK-->
+---
+
+## APPENDIX A — v1.0 DEFECT LEDGER
+
+Every defect raised against v1.0, its disposition, and where the fix lives. Kept in the document so
+that a future reader can see what was decided and why, rather than re-deriving it from a diff.
+**"Declined" always carries a reason and a section reference.**
+
+| # | v1.0 defect | Disposition | Where |
+|---|---|---|---|
+| 1 | This doc and `STORY.md` describe two different games, night for night | **Fixed.** `STORY.md` declared canon on night content; §12 rewritten from it; `freeform` slot class and `saw` noise kind added to carry its mechanics | §0.1, §6.7, §7.6, §12 |
+| 2 | No story here, and the AI spec makes the story impossible | **Fixed.** Campers have `id`, `essentialUntilNight`, `scriptedFate`, `familiarity`; FSM gains `Scripted`; the grab moves to Night 4 | §9.1, §9.7, §13.3 |
+| 3 | Night clock arithmetically impossible (Night 1: 1410 s of content in 540 s) | **Fixed.** "Target" column deleted; one derivation formula published and run for all seven nights | §5.1, §5.2, §5.3 |
+| 4 | The named "best sequence" is impossible by the doc's own numbers | **Fixed**, and partially declined. 26 s report, 45 m cap, Panic 2.90 + stumble, targets published. Declined: the player should *not* generally win chases | §9.7, §20.5 (3) |
+| 5 | Creak formula is a one-mistake death spiral with no repair | **Fixed.** Three caps + Recut from Night 1. Arithmetic re-run in the document | §7.2, §7.3, §7.4 |
+| 6 | "Rotated" unreachable, and the doc contradicts itself about it | **Fixed.** Continuous snap angle replaced with discrete yaw candidates; the ghost is identical for all | §6.4.2 |
+| 7 | "Wrong slot" unimplementable against the `Slot` schema | **Fixed.** `partId` added; `w` 0.60 → 0.45; 90 s silence + 240 s clamped window | §6.3, §6.4.1 |
+| 8 | G4 impossible — the 2.6 m part was a different `acceptsType` | **Fixed.** `Beam-short` added, same `acceptsType`, `acceptsType` is length-agnostic by contract | §6.1, §6.8 |
+| 9 | Camper senses exceed the raycast contract by 3.75× | **Fixed**, with a different scheme than suggested. Hot/cold split, cone+distance+grid rejection, `NoiseSystem` casts zero rays, 10/12 budget published | §18.2, §20.5 (2) |
+| 10 | Night 5's "mandatory" thunder masking is mathematically unavailable | **Fixed by conflict resolution.** `ART_DIRECTION.md` puts the storm on Night 6; ~33 strikes, 6.0 s envelope floor, ≤ 45 s guarantee | §0.2 C2, §7.5, §12.7 |
+| 11 | Lightning's "double-edged" tension does not exist | **Fixed.** The flash now `flashMark`s campers with LOS — they walk toward you during the masked window | §9.4 |
+| 12 | The night-end card winks, breaking Pillar 1 | **Fixed.** All editorial copy deleted, register test published, card loses lines 12/12/12/11/9/6/1 to `ASSEMBLY COMPLETE.` | §15.2, §15.3 |
+| 13 | The doc mistook the ending for a gag and deleted the child's chair | **Fixed.** Two chairs; final interaction is `place` with the player as the part; the offending sentence deleted and named as v1.0's worst error | §12.9, §13.6 |
+| 14 | §4 Stealth is generic; nothing native to a building game | **Mostly fixed.** Provoke replaces the thrown bracket; cabin rewrites `Navmesh` and the occlusion grid; `Noticing` + `familiarity`. Declined: replacing crouch/freeze/LOS/douse | §9.5, §9.6, §20.5 (1) |
+| 15 | The AI has no concept of the house | **Fixed.** `structureKnowledge`, silhouette features, a separate notice curve, structure reports. Robin's 84 m beat falls out of the numbers | §9.5 |
+| 16 | Carry-slot arithmetic broken in three places | **Fixed.** 4 part slots + a separate 3-capacity tool belt; class C = 2 across the board | §6.2 |
+| 17 | Detection model specifies every input and never the output | **Fixed.** Four targets stated first, constants solved backwards, noise floor added, full derivation shown | §9.3 |
+| 18 | Lighting model gets the interesting case backwards | **Fixed.** The flame is a separate percept to 180 m, one ray, aim-independent, `hoodFactor` 0.18 | §9.4 |
+| 19 | Slot budgets contradict build targets; the curve inverts by accident | **Fixed.** One derived table; the Night 5 slot dip and Night 6 density dip are now deliberate and labelled | §2, §2.1, §12.1 |
+| 20 | "The only non-diegetic sound" contradicted twice | **Fixed.** Claim deleted; the complete list of three published; material-appropriate hint cues replace the metallic tick on paper and cloth | §6.9, §11.4 |
+| 21 | A 277 ms window described by a sentence that is not true | **Fixed.** Linear ramp, half-widths, windows published in ms (900/450/330), 120 ms latency allowance, `Input.lastEventTimestamp` sampling, thunder sentence rewritten | §6.5, §4.1 |
+| 22 | The doc argues with itself inside a binding spec | **Fixed.** Single expression; the rule restated without deliberation; whole document re-read for other survivors | §20.4 |
+| 23 | The hardest technical problem gets one sentence | **Fixed.** Projection, HLR, explode vectors, arrow routing, page packing, legibility invariant, `authorship`, golden-image regression. Own document requested | §8 |
+| 24 | Physics claims have no engine and no collision spec | **Fixed.** Swept 3-sphere chain vs a 4 m uniform grid of trunk cylinders, positional impulse only, 0.40 ms budget, stated fallback | §10.3 |
+| 25 | Assertion doing the work of specification, ~12 times | **Fixed.** All converted to §19 rows with instruments, thresholds and remedies | §19 |
+| 26a | **No map** | **Fixed**, scoped to distances | §3, §20.5 (6) |
+| 26b | **No controls** | **Fixed.** Full input map, gamepad, remapping, dead zones, latency budget | §4.1, §4.2 |
+| 26c | **No player body; the 4.5 s grab has no visual description** | **Fixed.** Pose table, IK/spring spec, and a second-by-second grab camera spec | §4.3, §4.5 |
+| 26d | **The hand-wipe appears nowhere** | **Fixed.** Its own section, in the timings table, and in the tutorial at t=0:07 | §4.4, §5.1, §17 |
+| 26e | **No save or retry** | **Fixed.** Autosave triggers, restore semantics, restart/replay options, game-over offers "Replay Night N" | §14 |
+| 26f | **No inventory legibility; no outcome for insufficient fasteners** | **Fixed.** The manual *is* the inventory display; **Under-fastened** added as a fifth outcome | §6.6, §6.4 |
+| 26g | **Body discovery has no test** | **Fixed.** Radius + light threshold + grid occlusion, three concealment classes, five named volumes | §13.5 |
+| 26h | **No audio mix budget** | **Fixed by reference + the deltas this doc owns.** `AUDIO_DIRECTION.md §2, §9` already specify the bus graph, ducking, voice pooling and CPU; §18.4 adds the cascade contract and confirms `CABIN_CAP` guarantees the 3-creak cap | §18.4 |
+| 26i | **The shadow cost is never mentioned** | **Fixed.** Full ledger; the lantern capped at 2048 even on `ultra`, 22 m far plane, every-2nd-frame reprojection, 4.20 ms budget | §18.3 |
+| 26j | **Total playtime never stated** | **Fixed.** 6,950 s = 1 h 55 m clean; 2 h 20 m – 2 h 45 m realistic | §2 |
+| B1 | `photosensitive` is a no-op *and* makes the game easier | **Fixed.** Perceptual-only accommodation; three flash modes; schedule, delay and envelopes identical in all three | §16.2 |
+| B2 | Ranger condition contradicts itself | **Fixed.** One rule, cited from both places | §0.2 C6, §13.1 |
+| B3 | "No word has been written on screen" is false | **Fixed.** Restated accurately | §17 |
+
+### A.1 Defects found during this rewrite that the review did not catch
+
+| # | Defect | Disposition |
+|---|---|---|
+| N1 | **`ART_DIRECTION.md §4.5` publishes a binding weather schedule that contradicts v1.0 §7 on all seven nights** — a third canon conflict, and the one that made defect 10 unfixable in place | Resolved: art is canon on weather, the storm moves to Night 6, and thunder masking becomes arithmetically available for the first time (§0.2 C2, §7.5) |
+| N2 | **`STORY.md` contradicts itself about the handsaw** — §2 says no blade until Night Four, §4 says the saw has been in the tool roll the whole time and is used on Night Three | Resolved: §2 refers to weapons; the saw is a tool and is available from Night 1, which is what lets Recut exist as a Night-1 repair verb (§0.2 C4, §7.4) |
+| N3 | v1.0's hint ladder played a **metallic tick on an errata slip (paper) and a fastener bag (cloth)** | Fixed: material-appropriate cues, and stone gets no cue at all — which is Night 1's actual lesson (§6.9) |
+| N4 | v1.0 had **no floor on patrol density**, so the escalation ladder could raise Night 6 above 2 campers and destroy the emptiness that makes it the worst night | Fixed: `patrolDensity` is floored as well as capped per night, and §5.4's pacing band may not touch it (§13.1, §12.7) |
+| N5 | v1.0's cascade fired **3–5 simultaneous creaks** against `AUDIO_DIRECTION.md §9.1`'s per-family cap of **3** | Fixed: `CABIN_CAP` guarantees the cap, and surplus creaks are dropped rather than queued — the AI hears what the player does not (§18.4) |
+| N6 | Night 7 would still have creaked from wrong joins carried forward, destroying `STORY.md §8`'s central image (a house that is silent everywhere) | Fixed: `BuildSystem` asserts `Σ lambda === 0` at Night 7 start; surviving wrong joins are silently recut between nights (§12.8) |
+
+---
+
+**Version 2.0.** Canon order §0.1. Conflicts closed §0.2. Night table §2. Everything else derives
+from those three.
+

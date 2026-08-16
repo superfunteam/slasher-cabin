@@ -33,10 +33,25 @@ const _projScreen = new THREE.Matrix4();
 const _mat4 = new THREE.Matrix4();
 const _quat = new THREE.Quaternion();
 const _scale = new THREE.Vector3();
+/** Constant. Never used as an out-parameter — see _normalScratch. */
 const _fallbackNormal = new THREE.Vector3(0, 1, 0);
+/** Where normalAt() writes when the caller passes no `out`. */
+const _normalScratch = new THREE.Vector3(0, 1, 0);
+/** Reusable descriptor so getSpawnCandidates() only allocates for points it actually keeps. */
+const _infoScratch = {
+  x: 0, y: 0, z: 0, nx: 0, ny: 1, nz: 0, slope: 0,
+  surface: 'needles', surfaceId: 0, wet: 0, exposure: 1,
+  density: 0, flow: 0, path: 0, water: false,
+};
 
 /** Canonical surface ids. surfaceAt() returns one of these strings. */
 export const SURFACES = ['needles', 'mud', 'moss', 'granite', 'water', 'gravel'];
+
+/**
+ * Shared-library material names Terrain will take its ground constants from, best first.
+ * These are the real keys in src/render/Materials.js — not guesses.
+ */
+const GROUND_MATERIAL_NAMES = ['ground-needles', 'ground-duff', 'ground-mud', 'granite'];
 const S_NEEDLES = 0, S_MUD = 1, S_MOSS = 2, S_GRANITE = 3, S_WATER = 4, S_GRAVEL = 5;
 
 /**
@@ -236,14 +251,18 @@ export class Terrain {
 
     // ---- public landmarks (other systems read these; populated in init()) ----
     this.waterLevel = T.waterLevel;
-    this.bounds = {
-      minX: this.x0, maxX: this.x0 + size,
-      minZ: this.z0, maxZ: this.z0 + size,
-      minY: -12, maxY: 48,
-      size,
-      box: new THREE.Box3(new THREE.Vector3(this.x0, -12, this.z0),
-        new THREE.Vector3(this.x0 + size, 48, this.z0 + size)),
-    };
+    // `bounds` IS a THREE.Box3 — Physics/Navmesh/Forest hand it straight to intersectsBox() —
+    // with the flat scalars hung off it so `bounds.minX` and `bounds.box` both keep working.
+    // min.y / max.y are tightened to the real height range at the end of generation.
+    this.bounds = new THREE.Box3(
+      new THREE.Vector3(this.x0, -12, this.z0),
+      new THREE.Vector3(this.x0 + size, 48, this.z0 + size),
+    );
+    this.bounds.minX = this.x0; this.bounds.maxX = this.x0 + size;
+    this.bounds.minZ = this.z0; this.bounds.maxZ = this.z0 + size;
+    this.bounds.minY = -12; this.bounds.maxY = 48;
+    this.bounds.size = size;
+    this.bounds.box = this.bounds;
     this.campCenter = new THREE.Vector3(T.camp.x, 0, T.camp.z);
     this.buildSiteCenter = new THREE.Vector3(T.buildPad.x, 0, T.buildPad.z);
     this.latrine = new THREE.Vector3(T.latrine.x, 0, T.latrine.z);
@@ -1313,18 +1332,27 @@ export class Terrain {
   }
 
   _buildMaterial() {
-    const provided = this._requestGroundMaterial();
-    this._ownMaterial = !provided;
+    const ref = this._referenceGroundMaterial();
+    // We always construct (and therefore always own) the ground material. Cloning a library
+    // material would drop its onBeforeCompile anyway — three's Material.copy() does not carry
+    // it — so a clone buys nothing but a wrong base colour.
+    this._ownMaterial = true;
 
-    const mat = provided
-      ? provided.clone()
-      : new THREE.MeshStandardMaterial({
-        color: 0xffffff, roughness: 0.85, metalness: 0.0,
-        dithering: true, side: THREE.FrontSide,
-      });
+    const mat = new THREE.MeshStandardMaterial({
+      // WHITE on purpose: the splat in _patchFragment IS the albedo (`diffuseColor.rgb *=
+      // gAlbedo`). Any tint here multiplies the whole art-directed palette a second time.
+      color: 0xffffff,
+      // roughness/metalness are overwritten per-pixel by the splat; these are the values three
+      // uses for anything the patch does not reach, so keep them in step with the library.
+      roughness: Number.isFinite(ref?.roughness) ? ref.roughness : 0.85,
+      metalness: Number.isFinite(ref?.metalness) ? ref.metalness : 0.0,
+      dithering: true, side: THREE.FrontSide,
+    });
+    if (Number.isFinite(ref?.envMapIntensity)) mat.envMapIntensity = ref.envMapIntensity;
     mat.name = 'terrain.ground';
     mat.vertexColors = false;
     mat.flatShading = false;
+    if (ref) Log.debug(`Terrain: ground constants from Materials '${ref.name}'.`);
 
     const g = this._globalUniforms();
     const U = {
@@ -1332,7 +1360,9 @@ export class Terrain {
       tNrm: { value: this.texNormal },
       uRain: g?.uRain ?? { value: 0.15 },
       uTime: g?.uTime ?? { value: 0 },
-      uWet: { value: 0.35 },
+      // Share the library's wetness integrator when it exists, so the ground is exactly as wet
+      // as every trunk, plank and bracket around it (ART_DIRECTION §5.1). Falls back to our own.
+      uWet: g?.uWetness ?? { value: 0.35 },
       uMicro: { value: T.microSink },
       uHeightFog: { value: 1 },
       uFogNear: { value: new THREE.Color(0x2a3a44) },
@@ -1344,15 +1374,12 @@ export class Terrain {
     };
     this._uniforms = U;
 
-    const prevOBC = typeof mat.onBeforeCompile === 'function' ? mat.onBeforeCompile.bind(mat) : null;
-    mat.onBeforeCompile = (shader, renderer) => {
-      if (prevOBC) { try { prevOBC(shader, renderer); } catch (e) { Log.once('terrain:obc', 'Terrain: upstream onBeforeCompile threw', e); } }
+    mat.onBeforeCompile = (shader) => {
       Object.assign(shader.uniforms, U);
       shader.vertexShader = this._patchVertex(shader.vertexShader);
       shader.fragmentShader = this._patchFragment(shader.fragmentShader);
     };
-    const prevKey = mat.customProgramCacheKey?.bind(mat);
-    mat.customProgramCacheKey = () => `terrain-splat-v1|${prevKey ? prevKey() : ''}`;
+    mat.customProgramCacheKey = () => 'terrain-splat-v1';
 
     this.material = mat;
     this._disposables.push(mat);
@@ -2233,7 +2260,9 @@ diffuseColor.rgb = mix( diffuseColor.rgb, vec3( 0.070, 0.062, 0.036 ), smoothste
    * @returns {THREE.Vector3}
    */
   normalAt(x, z, outVector3) {
-    const out = outVector3 ?? _fallbackNormal;
+    // NB not _fallbackNormal: that is a shared constant (+Y) used as a rotation axis elsewhere,
+    // and writing the ground normal into it would quietly corrupt every later reader.
+    const out = outVector3 ?? _normalScratch;
     const e = this.cell;
     const hl = this.heightAt(x - e, z), hr = this.heightAt(x + e, z);
     const hd = this.heightAt(x, z - e), hu = this.heightAt(x, z + e);

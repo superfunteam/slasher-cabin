@@ -1952,7 +1952,185 @@ before the player has pressed anything. The last stroke lands when the bake comp
 finishes early the drawing finishes at its own pace and the button appears after it, because a
 diagram that stops mid-stroke is worse than a two-second wait.
 
+---
+
+## 15. WEATHER × PUZZLE — THE DIFFICULTY DIAL
+
+Revision 1's weather table had columns for rain, wind, and fog, and **none for the thing the player
+is actually doing.** It scheduled the whiteout (visibility 24 m) and the storm (rain 0.90, wind 0.85)
+back-to-back at exactly the point where assembly is most complex, and both of those attack
+part-finding and diagram-recall maximally. Nobody noticed because the table was written by a
+cinematographer and read by nobody else.
+
+**Weather is a difficulty dial, not a mood dial.** Every row below balances.
+
+| N | State | rain / wind / fog | Vis. | **Parts required** | **Largest part** | **Max search radius** | **Creak masking** | Why it balances |
+|---|---|---|---|---|---|---|---|---|
+| **1** | `clear` | 0.15 / 0.20 / 0.35 | 78 m | **6** | 0.9 m stone | 24 m | none (×1.00) | Teaching night. Best moon, best visibility, fewest parts, tightest radius. The player learns the §4.1 three-cue funnel with nothing else going on |
+| **2** | `drizzle` | 0.40 / 0.35 / 0.50 | 52 m | **9** | 3.6 m joist | 42 m | low (×0.86) | First missing part, first trespass. Drizzle darkens the mud 22% and the bracket 1%, so §6.1 *raises* contrast to 9.4:1 while the world gets moodier. The night looks harder and plays easier |
+| **3** | `windy-mist` | 0.10 / 0.55 / 0.65 | 44 m | **12** | 2.74 m stud | 55 m | medium (×0.62 — canopy roar) | 12 near-identical studs: the difficulty is **orientation and count**, not search. So the search radius is the biggest of the first half and the masking is generous |
+| **4** | `rain` | 0.75 / 0.60 / 0.55 | 38 m | **14** | 4.1 m rafter | 48 m | high (×0.44) | The highest-contrast night in the game (§6.1: wet spangle glint luminance 0.31 vs 0.14 dry) and the second-best masking. Heavy rain is our *easiest* search night and it looks like our hardest |
+| **5** | `whiteout` | 0.25 / 0.30 / 0.85 | **24 m** | **3** | **5.2 m ridge beam** | **34 m** | none (×1.00) | **Inverted.** The scariest, least-visible night gets three enormous parts inside a half-visibility walk. You are not hunting for a bracket in fog; you are carrying a beam through it, alone, slowly, and you can hear everything. The fear is the payload, not the puzzle |
+| **6** | `storm` | 0.90 / 0.85 / 0.60 | 30 m | **17** | 2.4 m sheathing panel | **70 m** | **highest (×0.21 — thunder + rain + wind)** | **The high-part-count night**, because it is the only night the world forgives noise. Revision 1 itself noted "creaks are masked by thunder" and then failed to spend it. Seventeen parts, the widest radius in the game, and a soundtrack that lets you get away with murder — which is the one thing you will not do |
+| **7** | `clear`, dead still | 0.05 / 0.10 / 0.25 | 95 m | **5** | 2.0 m door | 45 m | **none, and worse than none (×1.30 — the still air carries)** | Everything is legible and that is worse. Five parts, all fine work: door, hinges, glazing, step, trim. Perfect visibility both directions. **The only night where a creak is *more* audible than baseline** |
+
+**Creak masking, defined.** Base creak detection radius is **180 m**. `Weather.creakMask` multiplies
+it. Night 6's ×0.21 gives 38 m — you can be wrong seventeen times and get away with it. Night 7's
+×1.30 gives 234 m — the entire camp hears a single bad joint. The player is never told these
+numbers; they learn them from §7.5's chain, which is visible.
+
+**The part-size ladder** also does readability work. §4.1 requires a 9 px silhouette at max search
+distance; a 5.2 m ridge beam clears that at 34 m by a factor of thirty, which is exactly why it is
+the whiteout's payload. `CabinSite.assertSearchability()` runs the §4.2 check against each night's
+part list at that night's weather, at bake time, and refuses to generate an unsatisfiable night.
+
+---
+
+## 16. THE TWELVE SHOTS
+
+If these twelve frames are right, the art direction is right. Each is a screenshot regression test
+(`ctx.settings.seed` fixed, camera transform hard-coded) run in CI, captured over a 90-frame window,
+median-compared at ΔE < 1.5, and checked against its §3.1.1 luminance row and §12.4 black point.
+**Four of them (3, 5, 10, 11) are additionally captured as 30-frame motion clips** for §17.
+
+**1 — THE ARRIVAL.** Night 1, `timeOfNight 0.05`. The treeline. Two enormous wet fir trunks entering
+left and right, filling 30% of screen area, moonlit rims at `#aebcdc` running vertically down each
+side. Centre: 60 m of black ground mist and one tiny warm point — the camp's sodium lamp at
+`#ff8a2b`, blooming to 9 px. Nothing else. *Story:* he has not started. *Feeling:* the smallness of
+the light, the vastness of the dark, and the ache of a task not yet begun.
+
+**2 — THE FLAT-PACK.** POV down at a pile of lumber, brackets and a rolled tarp on wet mud. Lantern
+at 0.9 m, raking. `#a8875c` sawn lumber is the brightest thing in frame at +0.55 stops; the
+galvanized brackets throw the §4.3 spangle streak; a puddle beside the pile holds a perfect inverted
+fir crown against `#54697a` sky. **The pile is stacked, not scattered** (§4.4, §19 Trap B2) — sorted
+by length, ends flush, a tarp corner squared. *Feeling:* this is mine, and it is going to take all
+week.
+
+**3 — THE DIAGRAM.** The manual open, 62% of screen height. Bone page, four panels, BJÖRN holding a
+joist two-handed. The §13.8 page-bounce spot kisses the gloved forearm from the left; the near-field
+bounce term catches the knuckles. Behind and around the page: a 90:1-darker blurred blue-black void
+in which, at the very top-right corner, half a torch beam sweeps past. *Feeling:* the funniest and
+most dangerous frame in the game, simultaneously.
+
+**4 — THE MISSING BRACKET.** A single panel, magnified. A `#d92b2b` exclamation lozenge. BJÖRN in
+`shrugging-at-missing-hardware`, arms out, mask blank. Beside him an empty outlined rectangle with
+the `◐` shape badge and **five** quantity glyphs where the crate holds four. *Feeling:* comedy. Pure,
+deadpan, formal. *And:* the magnifier callout in the corner shows a canoe's chine — the only
+instruction the game will give you about where to go.
+
+**5 — THE CREAK.** Low camera at the plot. A misaligned joist, `SEATED_WRONG`: the 4 mm gap runs the
+length of the joint with a continuous `moon.rim` line down it (§7.3), and the part has just finished
+rocking. `build:creak` fires on the damp-out. In mid-distance, out of focus at f/2.8, **three torch
+cones stop sweeping, one after another, 0.4 s apart.** The near joint is tack-sharp; the threat is
+soft. *Feeling:* the specific nausea of having made a noise. **Motion clip mandatory** — the rock,
+the line staying lit, and the three cones stopping is the game's entire causal spine in 2.1 s.
+
+**6 — UNDER THE PORCH.** Prone under the mess-hall porch. Above, a `#ff8a2b` sodium lamp casts hard
+slats through the deck boards onto his hands. A camper's sneakers cross 40 cm from the lens, kicking
+dust motes that catch the sodium in a volumetric plume. On the wall behind, a clipboard: the only
+date in the game. *Feeling:* held breath.
+
+**7 — THE LAKE PATH.** Night 5, whiteout. Visibility 24 m. The frame is 80% `#54697a` fog with a
+barely-perceptible darker mass where the trees are. In the exact centre, at 22 m, one triangular
+silhouette (Becca) stands motionless facing away. No light on it at all. **Measured average frame
+luminance ≈ 0.107, which is legal** — this frame is asserted against the `whiteout` row of §3.1.1
+(0.070–0.130), not the clear-night row. Revision 1 asserted a single global window and would have
+flagged its own best frame as a bug. *Feeling:* seeing almost nothing, and knowing that means
+nothing good.
+
+**8 — THE FRAME AT FOUR NIGHTS.** Wide, from the treeline, the Shot 1 camera exactly. The stud walls
+stand: a pale orthogonal skeleton at `#a8875c`, geometric and *wrong* in an organic black forest,
+occupying **7.9% of screen area** (§7.2, asserted ±0.6%). The moon is behind it at 19° and it casts
+**its own god rays** through 21 slots across the mist. *Feeling:* pride. Actual, uncomplicated
+pride, which is horrifying.
+
+**9 — THE HAMMER.** Extreme close, the joint, f/1.8. A galvanized bracket, a rusted nail, a gloved
+hand with four nights of `blood.dry` in the creases and one `blood.fresh` line across the left palm.
+Rain lands on the steel and beads. The lantern is clipped to a stake at 30° raking, so every saw
+kerf throws a 2 mm shadow — with a **PCSS penumbra of ~3 mm** (§3.4), which is the whole reason to
+have written PCSS. Background: total black except a 20 px vertical smear of orange from a campfire
+60 m away. *Feeling:* craft. Focus. The pleasure of a thing seated correctly.
+
+**10 — THE TORCH.** A camper, 9 m, has turned. Her `#ffe6bb` beam is 6° off him and the mist wake he
+left crossing the path is **back-lit into a visible trough pointing straight at his feet** (§9.5).
+His own lantern has just guttered to 0.10 — he hooded it without being asked. **Exposure 0.62. FOV
+72°. No chromatic transient. No red vignette. No zoom.** The frame is darker than the frame before
+it and nothing about the camera has changed. Her face is a rim of `#6b5148` wet skin and one corneal
+catchlight at 9 m — the closest legal face outside the Night 5 exception (§8.6). *Feeling:* caught,
+and the world did not announce it. **Motion clip mandatory** — this shot exists specifically to prove
+§9.5 works without a single lens effect.
+
+**11 — THE STORM.** Night 6, lightning at peak. For 60 ms every surface within 200 m is lit at
+`#c9d6ee` intensity 4.5: the whole forest legible, rain a million lit streaks, the half-built cabin
+in silhouette — and Dana **inside the frame**, one step closer than the last flash. Then 1.4 s of
+recovery in which the frame is darker than it started. The **one** scripted lens-water moment. CA
+runs +18% for those 60 ms and no longer (§12.5). *Feeling:* revelation, then blindness. **Motion
+clip mandatory.**
+
+**12 — DAWN.** Night 7 complete. The grade cross-fades to `dawn`, exposure ramps to 0.95, fog scale
+height drops to 3.4 m so mist sits knee-high and glows. The cabin: small, tidy, correctly assembled,
+corrugated tin beading water, closed door, one square window, swept step. The lumber is a
+stratigraphy — `#4f4335` at the sill, `#a8875c` at the door (§6.4). **In the window: a warm lantern
+he lit and left inside**, the only warm light in the frame, and it is not his. The manual squared on
+the step. Then, faint on the road: a yellow school bus. *Feeling:* satisfaction curdling into dread.
+The last frame of a furniture commercial, followed by the first frame of a horror film.
+
+---
+
+## 17. THE COMPARISON PROTOCOL
+
+The brief demands the visuals stand blind side-by-side with *Call of Duty*. Revision 1 never
+mentioned CoD once and offered a vibe in its place: *"if a screenshot could be mistaken for Friday
+the 13th we have failed."* That is a still-frame test, and **every remaining gap between us and that
+bar is a motion gap.**
+
+### 17.1 The named reference frames
+
+Ten frames, checked into `ref/`, with the timecode and source noted. We compare against these, not
+against memory.
+
+| # | Source | What we compare |
+|---|---|---|
+| R1 | *CoD: MW* (2019), "Piccadilly", night street | Material frequency density: how many distinct roughness scales are visible in one square metre |
+| R2 | *CoD: MW* (2019), "Clean House", NVG-off interior, practicals only | Falloff discipline; how a single practical carries a room |
+| R3 | *CoD: MW* (2019), first-person hands, weapon inspect | Hero near-field rendering. **The bar we most obviously must meet, because our hands are on screen for seven hours** |
+| R4 | *CoD: MW2* (2022), rain-night exterior | Rain streak lighting, wet specular density, puddle reflection quality |
+| R5 | *The Witch* (2015), forest at dusk | Silhouette-mass foliage; near-zero fill; the black we are aiming at |
+| R6 | *The Revenant* (2015), the river at night | Damp, breath, grazing key |
+| R7 | *It Follows* (2014), the pool/sodium sequence | Warm-source-as-human discipline |
+| R8 | *Alien* (1979), corridor smoke | Volumetrics as a lens |
+| R9 | *Friday the 13th: The Game*, any night forest | **The negative reference.** If we converge, we have failed |
+| R10 | Our own Shot 8, previous milestone | Drift detection |
+
+### 17.2 The protocol
+
+1. **Blind still A/B.** Ten reviewers, unlabelled pairs, one of ours against one reference, "which is
+   the game and which is the film / which is the AAA title." Recorded as a confusion rate. Target:
+   ≥ 30% confusion against R1/R2/R4. Against R9 we want **≤ 5%** — being mistaken for the negative
+   reference is the failure condition.
+2. **The motion A/B.** *This is the one that matters.* **30-second captures**, 1080p60, not
+   screenshots, from Shots 3, 5, 10 and 11, played against R1–R4 clips of similar length. Motion
+   exposes everything a still hides: foliage crawl, TAA ghosting on ferns and rain, camper gait
+   stiffness, LOD pops, shadow cascade snapping, light-assignment pops (§3.6), stochastic alpha
+   resolve time, and grain that is secretly static.
+3. **The 8-second rule.** A reviewer who watches a clip for 8 seconds and cannot name what is wrong
+   passes it. Under 8 seconds, whatever they named goes on the cut list.
+4. **Cadence.** Every milestone, and always on the same reference machine at `high`, because a clip
+   captured at `ultra` on an RTX 3070 is a lie about the game we ship.
+
+### 17.3 The three things that will always give us away — and what we do about each
+
+Honest list. Anyone who claims we have closed one of these must show the capture.
+
+| Gap | Why it is permanent | The compensating strategy |
+|---|---|---|
+| **1. No baked global illumination.** No lightmaps, no irradiance volumes, no path-traced bounce. Every AAA night scene has bounce light we cannot afford to bake at runtime in a browser | Baking GI needs an offline pipeline and binary assets; we have neither by design | **We build a world with almost no bounce in it.** A soaked black conifer forest genuinely has near-zero interreflection — §3.2's ambient at 0.10 with an 1.8× upward bias is not a cheat, it is a measurement. Missing GI is invisible in a scene that would have had none. Where bounce would show — the mess porch, the lit tent interior, the cabin at dawn — we place **explicit artist-authored bounce cards** (the §6.3 emissive card is one) and count them in §3.6's light budget. GTAO + the SH probe + per-vertex `aExposure` carry the rest |
+| **2. No hero character rendering.** No scanned faces, no groom, no wrinkle maps, no eye caustics, no subsurface profile per skin type | It is six weeks of specialist work per character and we have zero binary assets | **We refuse the fight at faces** (§8.6) and win at silhouette, gait, garment, catchlight and breath. Our closest legal face is 8 m in fog, back-lit, for 1.9 s. Add the fact that **CoD's characters are almost never the frightening thing in a horror frame anyway** — a shape at 40 m is — and our design converts a technical deficit into an aesthetic |
+| **3. No motion-matched animation, no mocap.** Everything is procedural IK and noise | Mocap is binary data | §8.7's gait signatures, head gaze-stabilisation, torch-arm stabilisation and idle weight-shifts. And the framing law: **we never show a full-body run at close range.** Campers walk, stand, and turn. A character who never sprints past the camera never exposes the absence of a run cycle |
+| *(4, the honest fourth)* | **No virtual texturing / limited unique material frequency.** CoD has vastly more unique texel density per square metre | We are procedural at 2048² max | Two-scale normals + Toksvig roughness (§6.2), POM on the nearest bark LOD, geometric corrugation instead of normal-mapped, and **the darkness itself**: at EV −3.2, texel density above what we ship is not resolvable. This is the one place where our night is a genuine technical advantage rather than an excuse |
+
 <!--CURSOR-->
+
 
 
 
