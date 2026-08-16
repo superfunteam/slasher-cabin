@@ -2074,6 +2074,2020 @@ nearest canonical kind to a small mechanical click at 5 m (see conflict **C4**; 
 applies).
 
 ---
-<!--CONTINUE-->
+### 4.21 Twig snap and `brush` — `LIVE`
+
+#### 4.21.1 Twig snap
+
+The player's most common mistake and therefore the sound they will most learn to fear. Fired by
+`Physics` on a footfall over deadfall.
+
+- 2 ms noise burst → highpass 2200 → −4 dBFS@1m.
+- `modal([{f:920·r,Q:44,g:1,d:60}, {f:2140·r,Q:36,g:0.6,d:38}, {f:4900·r,Q:24,g:0.25,d:20}])`,
+  `r = rand(0.7, 1.5)` — thickness variation.
+- FIBRE TAIL: pink noise 130 ms, bandpass sweeping `3000 → 1100`, `Q = 2`, exp decay,
+  −18 dBFS@1m.
+- Small twig (`r > 1.2`): everything × 0.6, −6 dB. Big branch (`r < 0.85`): × 1.7, +4 dB, plus a
+  74 Hz sine thump.
+
+Emits `noise:emit { kind:'brush', radius: 6, intensity: 0.12 }` — the canonical row. v1.0 gave
+twigs private radii of 22 m and 55 m at intensities of 0.20 and 0.48, none of which exist. A twig
+snap is loud *to the player* and quiet *to the world*, and the 6 m radius is what makes the
+game survivable.
+
+#### 4.21.2 `brush` — the sound of being too big for this forest
+
+`GAME_DESIGN.md` §5.1: "Capsule radius 0.42 m vs a typical 0.3 — you clip undergrowth constantly,
+which emits `brush` noise. **You are too big for this forest.**" This is one of the six numbers the
+design uses to communicate weight, and v1.0 gave it no sound at all.
+
+```
+LIVE, gated to capsule-vs-foliage contact, minimum 400 ms between emissions:
+  grainTrain(rate = 30 + 120·speed, jitter = 1.0, dur = 260 + 600·speed ms)
+  each grain: 3 ms pink noise → bandpass f = 3100·rand(0.6, 1.5), Q = 3.0 → decay 16 ms
+  bed:  pink noise → bandpass f = 1400, Q = 0.8 → env A 30 / D (dur−30) → −30 dBFS@1m
+  peak: −25.0 dBFS@1m  (§1.3, intensity 0.12)
+```
+
+Duration scales with speed because a body pushing through wet undergrowth keeps making noise for
+as long as the branches are returning. At a sprint that is nearly a full second of rustle
+*trailing behind the player*, which is exactly the tell `GAME_DESIGN.md` §11 t=0:34 relies on: the
+branch rustles for 1.1 s and the distant counselor's torch stops moving for 2 s.
+
+30% of `brush` events also strike the mask (§2.5.2).
+
+### 4.22 The throw decoy
+
+`GAME_DESIGN.md` §4.4: "**Throw a bracket** — costs 1 hardware item; arcs to a point;
+`noise:emit { kind:'throw', radius:18, intensity:0.40 }` at impact. **The comedy: you are throwing
+away the hardware you are already short of.**"
+
+Three parts, and the ordering matters:
+
+1. **Release** — on `body`, non-spatialized, −38 dBFS@1m: a 180 ms cloth swish, pink noise →
+   bandpass `f = 1600, Q = 0.9` sweeping `1200 → 2200`, env `A 20 / D 160`. **No `noise:emit`.**
+   The player needs to know the throw happened even in total darkness, and this is the only
+   confirmation they get.
+2. **Flight** — silence. A 1.2 kg bracket does not whistle. Do not add a whoosh.
+3. **Impact** — the §4.6 bracket recipe against whatever surface it lands on, at the impact point,
+   plus `noise:emit { kind:'throw', radius: 18, intensity: 0.40 }` **at the impact point, not at
+   the player** (the design is explicit and it is the entire mechanic).
+
+The gap between (1) and (3) is the arc time, typically 0.6–1.4 s, and it is dead silent. That gap
+is the player listening for their own decoy to land, and it is the single most tense second of
+voluntary silence the game offers.
+
+### 4.23 Ladder, hoist, rigging — Night 5's improvisation
+
+`STORY.md` §4 Night Five: the 4.8 m / 71 kg panel "physically cannot be seated by one man"; the
+player improvises a counterweight and a lever from Dale's canoe, a rope, a stump, a ladder. "The
+solution is ugly. **It is the first thing Ansel builds that his mother did not draw.**"
+
+Every sound in this section must be *unrehearsed* — none of them belongs to the manual's clean
+vocabulary, and that is the point.
+
+**Ladder rung** (class B contact, per rung): `modal([{f:412,Q:22,g:1,d:110},
+{f:1180,Q:18,g:0.5,d:70}, {f:2430,Q:14,g:0.22,d:40}])`, −20 dBFS@1m, plus a 12 ms boot scuff from
+the wood material family. **Rails flex:** every 3rd rung, add `{f: 96, Q: 5, g: 0.4, d: 420}` — a
+long, low, slightly sickening bend. `noise:emit { kind:'footstep', radius: 9, intensity: 0.18 }`
+per rung.
+
+Climbing at height on Night 5 also puts the player's own footsteps above every camper, so §3.1.1's
+elevation shelf is at its maximum: the world below gets 2.7 dB darker while the player's own body
+sounds unchanged. Nobody will name it. Everyone will feel exposed.
+
+**Hoist rope over a limb**: `frictionOsc, slipRate 9 + 40·speed, N ∝ duration,
+f_center 340·(1 + 0.6·load), Q = 22, pitchDrop 120 ¢`, plus a fibre bed (pink noise → bandpass
+`f = 2100, Q = 1.1`, −30 dBFS@1m). Low `Q` — rope on bark does not ring. **The rope's pitch tracks
+load**, so a player hauling the panel hears the tension rise and hears the moment it takes the
+weight.
+
+**Rope creak under static load**: `frictionOsc, slipRate 2.5, N = 4, f_center 280 → 250, Q = 60`,
+every 3–7 s while loaded, −28 dBFS@1m. Four slow pops from something holding 71 kg. It is not a
+`build:creak` and it must not be quantized as one; it emits nothing and means nothing mechanically.
+It is just the sound of a bad idea working.
+
+**Canoe as counterweight** (`STORY.md` §7.13 — "one gunwale crushed under a wall panel"): a hull
+groan, `modal([{f:74,Q:9,g:1,d:900},{f:168,Q:12,g:0.6,d:700},{f:390,Q:8,g:0.3,d:500}])` excited by
+a slow friction bed. Fibreglass and cedar are stiff and low-loss, so the decays are long. Under
+final load, one 240 ms splintering `grainTrain(rate=40, jitter=1.0)` of wood ticks — **not** a
+split (§4.8), because the canoe does not fail; it just stops being a canoe.
+
+**The seat.** When the panel finally seats with `correct: true` for a join the manual never
+specified (`STORY.md`: "the only time in the game"), play `join_seat` — the standard, perfect,
+unmodified `join_seat` from §4.9. Same recipe, same +2 dB, same everything. **The game's reward
+sound, given to something the manual did not ask for.** Do not annotate it. Do not add a variant.
+The fact that it is identical is the entire meaning.
+
+### 4.24 Shim, felt, tallow, digging
+
+The quiet mitigations. `GAME_DESIGN.md` §3.3 marks the shim and the tallow "silent" — which means
+*silent to campers*, not silent to the player. A mitigation with no sound is a mitigation the
+player cannot confirm.
+
+| Action | Sound | `noise:emit` |
+|---|---|---|
+| **Shim wedge** (2.5 s) | Three taps of a wooden wedge, `modal([{f:640,Q:18,g:1,d:60},{f:1490,Q:14,g:0.5,d:40}])` at t = 0, 380, 690 ms, −26 dBFS@1m, **each 3% higher in pitch than the last** (the wedge biting). Then a 90 ms `frictionOsc` settle. | **none** |
+| **Tallow tin** (3.0 s) | Lid: a 40 ms steel scrape + a 120 ms `{f:1830,Q:70,d:300}` ring. Application: a 1.8 s `frictionOsc` at `slipRate 70, f_center 900 → 620, Q = 12` — **low Q, high slip rate**, which is a creak with the creak taken out of it. That is literally what grease does and it is legible as such. | **none** |
+| **Felt pad** (4.0 s, N5+) | Compression: 400 ms of brown noise through a lowpass sweeping `800 → 220`, `Q = 0.8`, env `A 120 / D 280`, −30 dBFS@1m. Dull, soft, absorbing. Then **nothing** — the pad's whole job is that this join stops speaking. | **none** |
+| **Digging** (pier footings, N1) | Per spade stroke, 1.4 s apart: bite (`brush` grain family at 1.5× rate, 180 ms), lift (a 90 ms low noise thud), throw (a 260 ms soil-scatter `grainTrain(rate=70, jitter=1.0)` of 4 ms bandpass-900 grains). | `{ kind:'brush', radius: 6, intensity: 0.12 }` per stroke |
+
+**The tallow is a mix event as well as a sound.** For its 150 s of effect on joins within 3 m
+(`GAME_DESIGN.md` §3.3, `lambda × 0.45`), those joins' creaks — when they do fire — are additionally
+lowpassed at 1400 Hz and dropped 3 dB. The player hears the cabin talking *through a mouthful*,
+and hears it come back when the tallow wears off, with no timer and no UI.
+
+### 4.25 The clean universe — the manual's three words
+
+Per conflict **C7**: there is exactly one non-diegetic timbre family and it has three members. All
+three are on `sfxUI`: dry, mono, centred, distance-invariant, reverb send 0.00, never touched by
+the mask chain, never occluded, never ducked by anything.
+
+**Shared timbre.** A struck sine plus a triangle at the same frequency, mixed 1.0 : 0.22, env
+`A 6 / D (dur − 6)` exponential, no noise component, no detune, no vibrato. It is the sound of a
+tuning fork drawn by an architect. Nothing else in the game sounds like it because nothing else in
+the game is *tidy*.
+
+#### 4.25.1 `manual_tick` — the smallest word
+
+One tone, `f = 2100 Hz`, 40 ms, **−22 dBFS@1m**. Used for:
+
+- The pre-observation tell (§6.4), 1.2 s early.
+- Menu navigation, at −30 dBFS@1m.
+- Each line of the night-end card as it prints (§4.28.5), at −28 dBFS@1m.
+
+#### 4.25.2 `hardware_chime` — "you found it"
+
+`GAME_DESIGN.md` §2.5: "a single clean bell — a struck 2.1 kHz sine with 1.4 s decay." Verbatim:
+one tone, `f = 2100 Hz`, decay **1400 ms**, −16 dBFS@1m, on `tool:found`.
+
+This is the same pitch as `manual_tick` and thirty-five times its length. The tick is the manual
+noticing; the chime is the manual *satisfied*. One family, two lengths.
+
+**`hardware_tick` is a different sound entirely** (conflict **C6**) — see §4.28.1. It is diegetic,
+positioned, occluded, and one character away in its id. The registry flags both.
+
+#### 4.25.3 `stage_chime` — the one that rots
+
+`build:stage-complete`, played alone into S6's mandated 1.4 s of silence.
+
+Two tones, 140 ms each, the first always at **880.0 Hz**. v1.0 specified "always exactly −16 dB,
+**always identical**" for seven nights. `STORY.md` requires the opposite: the manual is the audio's
+only comedian and "**it stops being funny on Night Four**," and `Blueprint.js` exposes per-panel
+`authorship: 'marit' | 'ansel'` precisely so the pages can stop being his mother's confident single
+stroke and become his own doubled, over-corrected hand.
+
+**The chime is the manual's voice. It is the one element that must carry that arc.**
+
+`stage = clamp(floor(4 · anselPanelFraction), 0, 4)` from `Blueprint.stageAuthorship()` (§0.4).
+Fallback night table, from `STORY.md` §3 ("By Night Five roughly a third of the panels are his. By
+Night Six, most"): N1–3 → 0, N4 → 1, N5 → 2, N6 → 3, N7 → 4.
+
+| Stage | Hand | Interval | `f2` (Hz) | Gap (ms) | Per-strike jitter on `f2` | Extra |
+|---|---|---|---|---|---|---|
+| **0** | Marit | 498 ¢ (4:3) | **1173.3** | 60 | **0 ¢ — identical every time** | — |
+| 1 | Ansel | 520 ¢ | 1188.3 | 78 | ±40 ¢ | — |
+| 2 | Ansel | 548 ¢ | 1207.7 | 86 | ±55 ¢ | — |
+| 3 | Ansel | 578 ¢ | 1228.8 | 94 | ±70 ¢ | — |
+| **4** | Ansel | **600 ¢ (tritone)** | **1244.5** | 104 | ±85 ¢ | second tone doubled by a **2 ms noise transient at −14 dB** |
+
+Two axes, and they are different things. The **interval widens** because he is drawing the chime
+himself now and he is drawing it wrong — a perfect fourth becoming a tritone across four stages.
+The **jitter grows** because his hand is not steady, so the same panel does not produce the same
+tone twice. By stage 4 the second tone is the reserved tritone (§6.1 — the interval that appears
+nowhere else in the game until a camper has seen the player), it is unstable by nearly a
+semitone, and it has a scratch on the front of it.
+
+`stage_chime` is always **−16 dBFS@1m**. The level never changes. Only the tuning rots.
+
+> **Nothing announces this. Nobody comments. No music. Do not add a variation cue, a filter sweep,
+> or a "darker" reverb. If a playtester says "the chime sounds off tonight," that is the entire
+> success condition, and if they cannot say why, it is a total success.**
+
+### 4.26 The grab, the body, the water
+
+`GAME_DESIGN.md` §8.3, from Night 3: "4.5 s of contact from behind an unaware camper, silent. It
+solves the immediate problem and creates three new ones." v1.0 contained **zero** specification for
+any of it — no contact, no drag, no water, no discovery. There is no kill in the slasher game.
+
+**"Silent" means silent to campers.** It is not silent to the player, and the four movements below
+are the closest this game comes to a set piece. There is no music in any of them.
+
+#### 4.26.1 Movement 1 — contact, 0–180 ms
+
+- Canvas on canvas (his coveralls against their jacket): brown noise → bandpass `f = 900, Q = 1.3`,
+  env `A 8 / D 160`, −24 dBFS@1m.
+- One hand: `modal([{f: 210, Q: 8, g: 1, d: 90}])`, 40 ms, dull.
+- **No transient above 2 kHz.** A hand on a torso has no crack in it. Every instinct in sound
+  design says to add a snap here. Do not.
+
+#### 4.26.2 Movement 2 — the held silence, 180 ms – 3.6 s
+
+**Ansel's breath does not change.** Whatever state it was in (§4.27.1) continues, on schedule, at
+level, uninterrupted, for the entire 4.5 seconds. This is the rule and it is the whole scene.
+`STORY.md` §2: "He never speaks. Not a grunt of exertion, not a roar."
+
+The victim:
+
+- **One aborted inhale at 260 ms.** A 180 ms pink-noise inhale, bandpass sweeping `700 → 1350 Hz`
+  upward, that **stops at 180 ms** with an 11 ms glottal closure — the bandpass `Q` jumps
+  `1.4 → 9` and the gain drops 22 dB in 11 ms, *not to zero*. −22 dBFS@1m.
+
+  This is **synthesized on `sfxWorld`, not VO.** The review asked for a `GRAB` VO category from
+  Night 3; that would have required lines this document does not own, and both `STORY.md` and
+  `ARCHITECTURE.md` require the game to work with `public/audio/vo/` deleted. A kill that is silent
+  in the default build is a broken kill.
+
+  It is **the same closure model as Ansel's Night 7 breath catch** (§4.27.3), transposed up 7
+  semitones and 14 dB quieter. Nobody will consciously notice. It is the only formal connection
+  the game draws between what he does to them and what happens to him, and no VO line could have
+  made it.
+- **Boot scuffs, 400 ms – 3.4 s:** `grainTrain(rate = 6, jitter = 1.0, dur = 2900 ms)`,
+  **decelerating**, of the surface's baked material layer at 0.4× gain.
+  `noise:emit { kind:'brush', radius: 6, intensity: 0.12 }` every 0.5 s.
+
+#### 4.26.3 Movements 3 and 4 — the give, and the settle
+
+**3.6–4.1 s, the give.** The scuffs stop. One 90 ms cloth settle at −28 dBFS@1m. Nothing else.
+**Do not duck. Do not impose silence.** The scene runs out of things to make and the bed is still
+there. That is different from a silence rule and it must feel different.
+
+**4.1–4.5 s, the settle.** The body reaching the ground:
+- The surface's footstep IMPACT layer at 2.2× gain and **0.7× frequency** — a body is heavier and
+  slower than a boot, and the frequency scaling is what encodes mass.
+- A class-D `drop_lumber` sub layer at 0.6× gain.
+- **No bounce.** §4.3's restitution model is deleted for this one case. Bodies do not bounce, and
+  a designer who leaves the bounce in has made the worst possible sound in this game.
+- `noise:emit { kind:'drop', radius: 26, intensity: 0.55 }` — the **class-C** row, not class-D,
+  because a person settling onto duff from a held position is genuinely quieter than a 62 kg beam
+  dropped on rock. The design's class-E carry rules govern the *drag*; the settle is its own event.
+
+**And the heartbeat's first of its two appearances in the entire game** (§4.27.2): six beats,
+starting 900 ms after the settle, 78 bpm, −24 dBFS@1m, `hbCutoff 200 Hz`. Then gone. Six beats,
+not a loop, no fade. He is not frightened. He has just done something with his body.
+
+#### 4.26.4 The body drag — a second friction layer, no wood
+
+Class E, 2.6× noise, 0.34× speed (`GAME_DESIGN.md` §2.1). **`drag_lumber` (§4.3) is completely
+wrong here** — it models wood on duff and its whole character is the sawn-wood modal bank. A body
+has no modal bank.
+
+```
+bed:   brown noise → lowpass fc = 340 + 620·speed, Q 0.8 → −22 dBFS@1m
+slip:  frictionOsc, slipRate = 5 + 22·speed, f_center = 520·(1 + 0.5·speed),
+       Q = 26, pitchDrop 40 ¢          ← low Q on purpose: wet cloth on wet needles does not ring
+grain: grainTrain(rate = 22 + 70·speed, jitter 1.0) of 5 ms bandpass-1400, Q 2 grains, −26 dBFS@1m
+limb:  every 1.4–2.6 s, a heel or a hand catching — a 60 ms surface IMPACT at 0.5× gain, and the
+       whole bed ducks −6 dB for 90 ms and returns
+```
+
+`noise:emit { kind:'drag', radius: 22, intensity: 0.38 }` every 0.5 s — the canonical row. The
+design's "2.6× noise" for class E is already expressed in that row's numbers; do not multiply
+again.
+
+**The limb catch is the sound that makes it a person.** Everything else in the recipe could be a
+tarp full of sand. A wet, irregular, unpredictable interruption every couple of seconds is what
+the ear uses to decide otherwise, and it costs one scheduled envelope.
+
+#### 4.26.5 The water
+
+`GAME_DESIGN.md` §8.3 allows hiding a body "under the boathouse / in the lake / under the build."
+
+**Entry, 0–400 ms:** a displacement — brown noise 260 ms through a lowpass at 420 Hz, plus the
+`rain_water.plink` family at **6× count and 0.5× f0** (big, low plinks read as a large object),
+plus a 0.8 send into `LAKE_EDGE`.
+**Closing, 400 ms – 2.4 s:** a bandpass rising `300 → 900 Hz` over 900 ms on a pink bed at
+−28 dBFS@1m, then a 1.5 s decay of individual laps against the shore.
+
+**And the loon answers it.** 3.2 ± 0.9 s after entry, the tremolo variant (§5.3), from the far
+shore at 380 m. **This is the only time in the game the loon's scream is caused by the player.**
+
+A player who has learned the loon — and §5.3 makes it learnable by making it causal — will
+understand instantly that something across the lake noticed the water. That is the entire argument
+for defect 18's fix, delivered: a startle on a timer could never have meant anything, and this
+means something specific and terrible.
+
+**Under the boathouse / under the build:** the drag's reverb send switches to `CABIN_SHELL` at
+0.55 for 900 ms and back. The space tells the player the body is inside something. No other cue.
+
+#### 4.26.6 Body found — the crickets do not come back
+
+`GAME_DESIGN.md` §8.1, rung 4: "+0.35, head counselor spawns with whistle, kids are recalled to
+cabins (**fewer wanderers — the forest gets emptier and worse**)."
+
+At the moment of discovery: **nothing from audio.** No sting, no duck, no music. The campers' own
+VO carries it (`TED_EVID_01`, `MRG_EVID_02`) and if the VO folder is empty, the discovery is
+completely silent, which is worse and is correct.
+
+The consequence is §5.4's **condition 7**: from that moment, **the chorus does not return for the
+rest of the night.**
+
+This is a permanent violation of §5.4's duty-cycle invariant, and it is the one permitted
+exception, stated explicitly so nobody "fixes" it: the invariant governs the chorus *as a sensor*.
+Once it is permanently off, it has stopped being a sensor and become the state.
+
+The player must be told, and told once, in the only honest way available: **the chorus attempts to
+return.** Six seconds after the last camper leaves the discovery site, the staggered return begins
+normally — three crickets come back over 1.4 s — and then they stop, and go out again over 2.0 s,
+and that is the last cricket in the night. One failed return. Nothing else. That is the sound of
+the forest being emptied and it costs one scheduling branch.
+
+### 4.27 ANSEL — the three sounds that are him
+
+`STORY.md` §2 is unambiguous: "He never speaks. Not a grunt of exertion, not a roar. **The loudest
+sound he makes all game is the moment on Night Seven when his breath catches.** `AudioEngine`
+should treat his breathing as a tracked emitter at all times so the absence of a voice is
+*audible*."
+
+Everything on the `body` bus: never spatialized, never reverbed, never occluded, inside his skull.
+
+#### 4.27.1 Breathing — three states, and `HELD`
+
+**Model.** One inhale plus one exhale per cycle.
+- INHALE: pink noise → bandpass at `f_in`, `Q_in`, gain env `A 35% / D 65%` of the inhale
+  duration, bandpass sweeping **upward** (air accelerating through the throat).
+- EXHALE: pink noise → bandpass at `f_ex`, `Q_ex`, sweeping **downward**, fast attack and a long
+  tail. Always ≈ 1.4× the inhale's duration and ≈ 2 dB quieter.
+- `highshelf f = 6000, gain = −9` on both. Breath has no air on top; it has body.
+
+| State | Period | Inhale | `f_in` sweep | `f_ex` sweep | `Q` | Gain (dBFS@1m) |
+|---|---|---|---|---|---|---|
+| `CALM` | 4.4 s | 1.1 s | 420 → 680 | 640 → 380 | 1.1 | −34 |
+| `WALK` | 3.2 s | 0.9 s | 480 → 820 | 780 → 420 | 1.3 | −29 |
+| `HEAVY` | 1.9 s | 0.6 s | 560 → 1150 | 1080 → 480 | 1.8 | −22 |
+| `HELD` | — | — | — | — | — | silence (§2.4) |
+
+**`FEAR` is deleted.** v1.0 had a fifth state — "2.4 s, irregular, triggered by
+`state.suspicion > 0.45` or a camper within 10 m" — plus a heart running to 148 bpm. That makes a
+6'6", 280 lb, thirty-five-year-old man frightened of a seventeen-year-old with a torch. It inverts
+the premise of the entire game, and *muffled world plus pounding heart* is the single most generic
+move available in horror audio.
+
+**The tension is carried by the world going quiet around a man who does not react.** That is what
+§2.4 does now, it is scarier, and it is specific to this game and no other.
+
+Rules:
+- **`HEAVY` adds a voiced component** and only this: a 108 Hz sawtooth through a lowpass at 700 Hz,
+  −34 dBFS@1m, **on the exhale only**. He is a big man and you hear the weight in his chest.
+  **Never make it a grunt.** He does not perform effort; he is simply heavy. The difference between
+  those two is the difference between this game and every other slasher game.
+- **`HEAVY` emits.** `GAME_DESIGN.md` §5.2: "above 60% stamina drain… your own breathing is an
+  emitted noise. Campers at < 5 m can hear it." Interim per conflict **C4**:
+  `noise:emit { kind:'brush', radius: 6, intensity: 0.12 }` once per exhale while `HEAVY`.
+- Transitions crossfade over one full cycle. **Never cut mid-breath.**
+- Under the mask (always — §2.5), the breath additionally gets +6 dB at **620 Hz** (the eyehole
+  ports, not v1.0's invented 680 Hz shell resonance) and −8 dB above 4 kHz. Wearing the mask makes
+  the player sound, to himself, like he is inside a plate. He always has been.
+
+#### 4.27.2 The heartbeat — twice, in the whole game
+
+On `body`. Two thumps per beat: `lub` at t = 0, `dub` at `t = 0.30·period`, dub at −5 dB.
+Each thump: a sine from 56 → 38 Hz over 90 ms (`exponentialRampToValueAtTime`), env `A 6 / D 110`;
+plus 45 ms of brown noise through a lowpass at `hbCutoff = 200 Hz`, at −10 dB relative to the sub.
+
+**It exists exactly twice:**
+
+1. **The first grab** (§4.26.3) — six beats, 78 bpm, −24 dBFS@1m. The *first* one only; subsequent
+   grabs have no heartbeat at all, for the rest of the run.
+2. **The Night 7 breath catch** (§4.27.3) — four beats, 64 bpm, −26 dBFS@1m.
+
+Ten beats in a seven-night game. That is the entire budget and it is not negotiable. A heartbeat
+that appears whenever tension rises is wallpaper by Night 2 and means nothing by Night 4. A
+heartbeat that appears twice is an event both times, and the second one lands because of the
+first.
+
+Do not add a heartbeat to: the chase phase, the held breath, tier-4 creaks, the cascade, the
+Ranger's headlights, or any ending. `Music.js` provides the "critical detection" cue that
+`GAME_DESIGN.md` §4.1 asks for — "a single low heartbeat-rate string tone from `Music.js`" — and
+that is a *string tone at heartbeat rate*, not a heartbeat. Do not conflate them; do not let them
+play together.
+
+#### 4.27.3 The Night 7 breath catch — the loudest sound he makes
+
+On `story:beat { id: 'n7_final' }`, at the moment the player first opens the manual to the blank
+spread (`STORY.md` §8: "The player opens the manual. The wipe animation plays. The pages are
+blank.").
+
+```
+An inhale that begins as CALM: 1100 ms, bandpass 420 → 680 Hz, Q 1.1
+
+at t = 240 ms:  IT STOPS.
+                Q ramps 1.1 → 9.0 over 40 ms
+                gain drops 22 dB over 18 ms — to −22 dB relative, NOT to zero
+                hold 380 ms.  The bandpass does not move. Nothing else plays.
+
+at t = 660 ms:  the inhale resumes at 0.55× its original rate and completes at t = 1520 ms
+                peak −18 dBFS@1m — 16 dB above CALM, the loudest body-bus event in the game
+```
+
+Then the heartbeat's second and last appearance: four beats, 64 bpm, starting 300 ms after the
+catch. Then nothing.
+
+**The next breath is `CALM` and exactly on schedule.** No music. No duck of anything, because
+nothing else is playing. No `noise:emit`. No caption beyond §7.5's, which reads simply
+`[breath]` — the only caption in the game with no direction and no distance, because it is not in
+the world.
+
+This is the same closure model as the victim's aborted inhale (§4.26.2), 7 semitones lower and
+14 dB louder. It took seven nights to arrive.
+
+#### 4.27.4 The hand-wipe — two strokes, and the timing never changes
+
+`STORY.md` §2: "**Before he touches the manual, he wipes his hands on his thighs.** Every single
+time. Two strokes, palms flat, unhurried — the way you'd dry your hands before picking up a baby…
+On Night Four he does it when they are covered in Dale Pruitt, **and the animation does not
+change, and the timing does not change, and that is the most frightening second in the game,
+because the priority is not the blood, the priority is *the paper*.**"
+
+A mandatory 0.9 s lockout on `ui:blueprint-open` from Night One, never skippable. The player pays
+it roughly ninety times so that one instance can pay off. It is pure foley and v1.0 did not have
+it.
+
+**Dry canvas** (the baseline, all nights):
+```
+Two strokes, at t = 0 and t = 430 ms. Each stroke 260 ms.
+  brown noise → bandpass f sweeping 1250 → 900 Hz across the stroke, Q = 1.1
+  env A 40 / D 220
+  −30 dBFS@1m
+```
+The bandpass falling across each stroke is the palm decelerating. Two strokes, not three, not one.
+
+**Wet canvas** (`rain > 0.25`, or within 40 s of wading):
+```
+Same timing. Same two strokes. Same 260 ms.
+  + a second layer: pink noise → bandpass f = 2400, Q = 1.6, −26 dBFS@1m
+    with grainTrain(rate = 55, jitter 0.7) of 2 ms bandpass-3200 grains at −32 dBFS@1m
+    (water in the weave)
+```
+
+**Night Four onward, if `state.storyFlags.firstBlood` — tacky:**
+```
+Same timing.  Same two strokes.  Same 260 ms.  Same envelope.  Same peak level.
+  + 3–5 discrete micro-releases per stroke:
+    grainTrain(rate = 14, jitter = 0.8, dur = 240 ms) of 3 ms bandpass-1600, Q = 2.4 grains
+    at −24 dBFS@1m
+```
+
+> **The envelope does not change. The count does not change. The duration does not change. The
+> level does not change. The interval between strokes does not change. Do not duck the bed. Do
+> not add music. Do not slow it down. Do not add a swallow, a hesitation, or a breath.**
+>
+> **Three to five very small sounds of something slightly adhesive letting go of canvas are added,
+> and nothing else in the entire mix acknowledges them.**
+
+That is the whole design. Every instinct will be to sell it. Selling it destroys it, because the
+horror is precisely that *he did not treat it as different*.
+
+The wipe emits **nothing**. It is on `body`, it is 0.9 s, it is quiet, and making it a stealth
+liability would turn `STORY.md`'s best moment into a tax.
+
+#### 4.27.5 The tool roll — characterization by absence
+
+`STORY.md` §2: "A leather tool roll on the right hip, rolled and tied — **never loose, never
+rattling.**"
+
+**The direction is that the tool roll has no sound**, and that this is deliberate rather than
+missing. Every game in this genre rattles the protagonist's kit on every sprint, every landing,
+every crouch. Ours does not, because he tied it, because he ties it every night, because that is
+who he is.
+
+Total silence would read as an unfinished feature to anyone auditing the mix. So the roll makes
+exactly one sound, and it is below conscious threshold:
+
+- **Every 4th footstep while sprinting only:** a single 0.7 ms leather compression tick,
+  `modal([{f: 640, Q: 6, g: 1, d: 22}])`, at **−52 dBFS@1m**, on `body`. Present in a
+  spectrogram, absent in the room. No `noise:emit`.
+
+**And it speaks exactly once.** When the handsaw first comes out (§4.13), the roll is *opened*:
+
+```
+0–180 ms:    the tie — a 160 ms waxed-cotton friction pull, frictionOsc slipRate 40, N = 6,
+             f_center 1900 → 1500, Q = 18, −28 dBFS@1m
+180–760 ms:  the unroll — grainTrain(rate = 22, jitter 0.9, dur 580 ms) of 8 ms leather-creak
+             grains (bandpass f = 520·rand(0.8,1.3), Q = 5), −26 dBFS@1m
+760–1100 ms: the flap falling open, and the tools settling into their stitched pockets —
+             four small steel contacts at 790, 860, 940, 1010 ms, modal([{f:2100·r,Q:60,g:1,d:80}]),
+             r = rand(0.9, 1.15), −30 dBFS@1m
+```
+
+Four contacts, because `STORY.md` §7.5 says the tools are "laid in descending size, each in its
+own stitched pocket, a gap where the handsaw goes." **There is no rattle even here.** Four
+separate, deliberate, individually audible placements. The roll is opened once in the game and it
+sounds like a man who knows where everything is.
+
+### 4.28 Remaining world sounds
+
+#### 4.28.1 `hardware_tick` — the missing part, calling
+
+`GAME_DESIGN.md` §2.5, hint layer 2: "t = 90 s after `tool:missing`. `AudioEngine` begins a
+**1.8 s periodic metallic tick** at the item's position, attenuated normally by distance and
+occlusion — audible from ~35 m. **Diegetically it is wind moving metal.**"
+
+```
+Every 1.8 s ± 0.25 s jitter, at the item's world position, on sfxWorld, fully spatialized,
+fully occluded (§3.2), reverb send 0.22:
+  modal(impulse(0.6ms), [{f: 3180·r, Q: 190, g: 1.00, d: 210},
+                         {f: 5420·r, Q: 150, g: 0.42, d: 140}]),  r = rand(0.97, 1.03)
+  gain: −34 dBFS@1m  → audible to ≈ 36 m at rolloff 1.15. Matches the design's "~35 m".
+  gate: amplitude × (0.35 + 0.9·wind) — it is wind moving metal, so in dead calm it nearly stops
+```
+
+The wind gate is the honesty clause. On Night 6 (`wind 0.2`, `GAME_DESIGN.md` §7 — "clearing:
+low masking, high visibility. **The scariest night**") the hint is nearly inaudible, and that is
+correct: the night that takes away your masking also takes away your hint, and it does so through
+a mechanism the player can reason about.
+
+**Not to be confused with `hardware_chime` (§4.25.2)** — see conflict **C6**. Different bus,
+different bank, opposite diegesis, one character apart in the id. Registry flags both rows.
+
+#### 4.28.2 `camper_whistle` — the loudest camper event
+
+`noise:emit { kind:'whistle', radius: 90, intensity: 0.90 }`, peak **−4.0 dBFS@1m**.
+A 1984 pea whistle, not a pealess Fox 40:
+
+```
+two chambers:  sine + a small square component at f = 3150 and f = 4180 Hz, mixed 1.0 : 0.72
+the pea:       a 22–34 Hz random-rate AM on BOTH tones, depth 0.70, rate re-randomized every 80 ms
+               ← this is what makes a whistle a whistle and not a sine
+breath bed:    pink noise → bandpass f = 3600, Q = 1.1 → −16 dB relative
+env:           A 12 ms / S 500–1100 ms / R 90 ms
+rolloff:       0.85 (VO class — it must carry)
+bleed floor:   −24 dB, the §3.2.4 exception
+```
+
+Fired by the head counselor (Night 5+) on Alerted, and by any camper in Panic every 3 s
+(`GAME_DESIGN.md` §4.3). It is the sound of the night ending and it must never be ambiguous.
+
+#### 4.28.3 The `voice` emission
+
+`GAME_DESIGN.md` §4.2 lists `voice` at `radius 26, intensity 0.30`, "used for player awareness,
+campers ignore." v1.0 never emitted it, which meant camper conversation was invisible to
+`directionalAudioIndicator` and to any future system reading the noise bus.
+
+**`VoiceBank` emits `noise:emit { kind:'voice', radius: 26, intensity: 0.30 }` at the speaker's
+position at the start of every line**, including `CHATTER_BED` takes, and including when
+`VoiceBank.available === false` (the non-verbal fallback in §9.7 still emits it). See conflict
+**C5** for the 26 m / 40 m disagreement with the accessibility spec.
+
+#### 4.28.4 The endings
+
+**`ending_a` — "RETURN TO STORE."** `STORY.md` §8: the manual draws a red diagonal across the
+panel. "The only red mark ever aimed at the player. The only judgement the manual has ever
+passed."
+
+This is the only time the clean universe makes a sound that is not a tick or a chime:
+
+```
+One 2400 ms stroke, on sfxUI, dry, mono, centred:
+  grainTrain(rate = 340, jitter = 0.50, dur = 2400 ms) of 0.8 ms noise grains
+  → bandpass f = 4200, Q = 3.0 → decay 5 ms
+  −30 dBFS@1m
+  THE RATE IS STEADY. No accelerando, no decelerando, no pressure curve.
+```
+
+A confident, even, unhurried stroke, drawn by a hand that has already decided. Then **every bus
+hard-mutes for 6.0 s.** Nothing else. `ending_a` is the only ending with no music of any kind.
+
+**`ending_b` — "DO NOT FORCE."** The camera holds on the house from the treeline for ninety
+seconds while the sky greys. Full ambience. No music.
+
+**The `body` bus is muted for the entire ninety seconds** — the first and only time in the game.
+No breath. He has walked away, and the player is no longer inside him. That absence is the whole
+ending and it is achieved with one gain node.
+
+S11's pre-dawn ramp (§8) runs across the full 90 s. One white-throated sparrow. Then silence,
+then the card.
+
+**`ending_c` — "SOME ASSEMBLY REQUIRED."** The ending. Four events, in order:
+
+1. **The mask comes off.** The mask chain (§2.5) crossfades **out** over 2800 ms — its only
+   transition in the entire game. The 620 Hz port peak vanishes; the 3400 Hz lowpass opens; the
+   plate stops ringing. **The world does not get louder. It gets clear.** The player has been
+   listening through a piece of a kitchen sink for seven nights and finds out by having it taken
+   away. Immediately after, one last excitation of the plate modes at −20 dBFS@1m as it is set on
+   the table — heard *unmasked*, the only time the plate is ever heard from the outside.
+2. **The house is silent.** `STORY.md` §8: "The floor does not creak anywhere — the player has
+   spent seven nights learning what a creak means, and **its total absence is more frightening
+   than any sound the game has made.**" Enforced: `lambda = 0` on every join, and `AudioEngine`
+   additionally hard-gates all `creak_*` factories for the remainder of the scene, so that a
+   floating-point accident cannot ruin the ending.
+3. **The bus at 6:15, through the north wall.** Heard through the §3.2 chain at exactly **one
+   sheathed-wall thickness (T = 1.20 → fc 9.3 kHz, direct −3.8 dB, bleed −15.3 dB)** — that is,
+   barely occluded at all, because he built the wall correctly, and `STORY.md` says so in as many
+   words: "You can hear it through the wall, because he built the wall correctly, and a correctly
+   built wall carries sound from a road exactly this way." A diesel idle (`modal` at
+   `[{f:31,Q:6},{f:62,Q:8},{f:124,Q:7},{f:248,Q:5}]`, brown-noise excited, 2.4 Hz AM), an air
+   brake, a door. Then children. A lot of them. Screaming the good way — `CHATTER_BED` takes
+   layered at 8 voices, `rolloffFactor 0.6`, from 190 m, bright and completely happy.
+4. **The last panel.** Over black: **one `stage_chime` in Marit's tuning** — 880.0 and 1173.3 Hz,
+   60 ms gap, zero jitter, exact. It is the first time it has been in tune since Night Three.
+
+Nothing else. Fade. Achievement: **"NO PARTS REMAINING."**
+
+#### 4.28.5 Menus, cards, pages, toasts, and `crate_settle`
+
+**`crate_settle`** — `GAME_DESIGN.md` §11, t = 0:00 of Night 1, over black, the first sound in the
+game before any bed exists: `modal([{f:118,Q:16,g:1,d:340},{f:274,Q:22,g:0.55,d:260},
+{f:610,Q:18,g:0.28,d:180}])` excited by a 3 ms burst lowpassed at 1400, plus a 40 ms needle-material
+grain layer, −18 dBFS@1m, on `sfxWorld`, reverb send 0.30 into `OPEN_FOREST`. A wooden crate
+settling under its own weight in a forest that is not yet audible. Then S1's 2.2 s of silence.
+
+**The page turn.** `GAME_DESIGN.md` §11, t = 3:50: "The manual turns its own page **with a paper
+sound.**" v1.0 specified exactly one UI sound in 1,310 lines, in a document whose thesis is that
+the manual is the comedian.
+
+```
+On sfxUI, dry, mono, centred, −26 dBFS@1m, 420 ms:
+  0–90 ms    the lift: grainTrain(rate = 90, jitter 0.6, dur 90 ms) of 1.5 ms
+             bandpass-2600, Q = 2 grains, rising in rate
+  90–300 ms  the arc: pink noise → bandpass f sweeping 3400 → 1900 Hz, Q = 1.4,
+             env A 20 / D 190 — the sheet passing through air
+  300–420 ms the fall and set: a 2 ms 3800 Hz tick, then a 110 ms brown-noise bed
+             lowpassed at 700 (the page meeting the page below it)
+```
+
+Oilcloth-wallet variant (the manual coming out of his coveralls, `STORY.md` §2): the same recipe
+lowpassed at 2200 with a 90 ms waxed-cloth `frictionOsc` prepended.
+
+**`ui:toast` has no sound. Ever.** `GAME_DESIGN.md` §2.5's reward — "an empty checkbox filling in,
+with no words" — is already accompanied by `hardware_chime` on the same event; adding a toast
+sound would double it. §11's `ui:toast { icon:'hand' }` at t = 0:41 is silent and must stay
+silent, because the whole design of the first five minutes is that nothing tells you anything.
+
+**The rule:** the UI makes sound on exactly three verbs — `tool:found` (§4.25.2),
+`build:stage-complete` (§4.25.3), and menu navigation (§4.25.1). Nothing else on `sfxUI` makes a
+sound, including toasts, subtitles, hints, objective changes, and inventory.
+
+**The night-end card** (`night:complete`, rendered by `Menu.js`): all buses ramp to −34 dB over
+260 ms. **Not silence** — the world is still out there, it is just behind a piece of paper. Then
+each line of the card prints with one `manual_tick` at −28 dBFS@1m, 90 ms apart, in order. The
+`CUSTOMER SATISFACTION` line gets the night's `stage_chime` (§4.25.3, at whatever stage of rot the
+manual has reached).
+
+Three exceptions, all of them jokes told with a straight face:
+
+- At `satisfaction ≤ 20` (`PLEASE RETAIN THIS DOCUMENT FOR YOUR RECORDS.`): **the chime does not
+  play.** The satisfaction line prints with an ordinary tick like every other line and nothing
+  acknowledges it.
+- At `satisfaction ≥ 95` (`PERFECT. WE HAVE NOTHING TO ADD.`): the chime plays, and then a second
+  `manual_tick` 300 ms later, alone. The manual has nothing to add and adds it anyway.
+- At kill count > 0, the final red line — `PLEASE ASSEMBLE ALONE.` — prints **with no tick at
+  all**, in total silence, 1.4 s after the previous line. **It is the only line the clean universe
+  refuses to speak.**
+
+**Title screen and menus.** The context is created `suspended` (§9.7), so the title screen is
+silent and says so by being silent. After `resume()`: one `crate_settle`, then `THE STRING` at D1
+(§6.2) once every 40–90 s and nothing else. No pad, no bed, no wind. Navigation is
+`manual_tick` at −30 dBFS@1m; there is no confirm sound, no back sound, and no hover sound.
+
+---
+
+## 5. Ambience
+
+`AudioEngine` maintains an `AmbienceDirector` that owns the bed. All of it on the `ambience` bus,
+all of it carrying the −4 dB peaking notch at 3.1 kHz (§1.2), all of it obeying §8.
+
+### 5.1 The bed
+
+Three always-on layers:
+
+1. **Wind through pines** (§4.16) — the spine.
+2. **Room tone** — brown noise → lowpass `f = 180, Q = 0.6` → −44 dBFS@1m. Inaudible in isolation;
+   its absence is audible. Present in *every* state except S7 (`night:failed`) and `ending_a`.
+3. **Distance layer** — pink noise → bandpass `f = 620, Q = 0.4` → 0.55 wet into `OPEN_FOREST` →
+   −42 dBFS@1m. The sound of a very large amount of air. This is what makes the forest feel like it
+   extends past the draw distance, and at 640 × 520 m (§3.0) it needs to.
+
+### 5.2 Crickets — four panners, one bed, and the arithmetic that was missing
+
+The most important ambient element in the game, because it is the one we take away.
+
+#### 5.2.1 The chirp — `BAKED` (`cricket.chirp`)
+
+```
+A chirp = 4–5 pulses.
+Pulse: two detuned sines at f0 and f0·1.004, f0 = 4600·rand(0.92, 1.12)
+       + a third partial at 2·f0 at −11 dB   (crickets are not pure)
+       env: A 2 ms / hold (pulseDur − 5) / D 3 ms  — near-square; this is a stridulation
+       pulseDur = 14 ms · rand(0.85, 1.2)
+       gap = 15 ms · rand(0.9, 1.15)
+Whole chirp → bandpass f = f0, Q = 6  (the wing's own resonance)
+Chirp gain: −38 dBFS@1m
+```
+
+#### 5.2.2 The voice budget — v1.0 was arithmetically impossible
+
+v1.0 asked for `settings.tier(8, 18, 34, 48)` **cricket instances**, each on its own panner,
+against a §9.1 budget of **56 3D panners at `ultra`**. Crickets took 48 of 56, leaving **8** for
+every camper, all VO (4 alone), all footsteps (6 alone), every build SFX, the campfire, the loon,
+the owl, the rain, the zipper, the flashlight, and the lantern. Flat contradiction, in the same
+document, two sections apart.
+
+**The new structure:**
+
+| Element | Panners | Detail |
+|---|---|---|
+| Near chorus | **4 total** | one shared `PannerNode` per 90° quadrant, at 18 m on the quadrant bisector, `rolloffFactor 0.40`. Individual chirps are scheduled into whichever quadrant panner matches their notional bearing. |
+| **The distant bed** | **0** (stereo, unpanned) | bandpassed noise at 4.6 kHz, `Q = 1.1`, with a 12 Hz AM at depth 0.35, −40 dBFS@1m, plus a 0.06 Hz random walk on the AM depth |
+| Total | **4** | down from 48 |
+
+Chirp *instances* (scheduling slots, not panners) remain `settings.tier(8, 18, 34, 48)`; they cost
+one pooled `AudioBufferSourceNode` each and share four panners. The perceptual loss from four
+quadrant panners versus forty-eight point sources is close to nil: a cricket chorus is a diffuse
+field, and the ear localizes it by quadrant at best.
+
+#### 5.2.3 Temperature — Dolbear, and the floor
+
+Dolbear's Law: `chirpsPerMinute = 4·(T_F − 50) + 40`.
+`T_F = 68 − 13·timeOfNight` (Night 1) falling to `T_F = 58 − 15·timeOfNight` by Night 7.
+
+So Night 1 opens at ≈ 112 chirps/min and reaches ≈ 60 by dawn; Night 7 opens at 72 and reaches
+**12/min** — one chirp every five seconds.
+
+This single formula does more atmospheric work than any number of extra layers: the forest gets
+slower and lonelier as the week goes on and nobody will consciously notice why. Rain drops `T_F`
+by 4 and cuts the chorus size 40%.
+
+**But at 12/min the chorus cannot function as a sensor** — you cannot perceive the removal of a
+sound that only happens every five seconds. The review proposed flooring Night 7 at 55/min inside
+20 m, which would flatten the cold arc that is doing all this work.
+
+**The actual fix is architectural: the sensor is the distant bed, not the chirps.** The bed
+(§5.2.2) is continuous. Its removal is perceptible at any chirp rate, on any night, in any
+weather. Dolbear is then free to take the discrete chirps all the way down to 12/min without
+touching the mechanic.
+
+A gentler floor is still applied for texture: **40 chirps/min minimum within 20 m**, regardless of
+Dolbear. Night 7 is cold and lonely; it is not a vacuum.
+
+### 5.3 Loon, owl, camp radio
+
+#### 5.3.1 The loon — ambient wail, causal scream
+
+`STORY.md` §4 Night One: "a wrong join groans like a bad chair **and a loon answers it from across
+the water.**" The loon is written into the story as a *responder*. v1.0 fired it "every 40–120 s"
+and noted of its scream variant that "players will jump" — which is the design goal of a haunted
+house, not of this game, and it directly violates §5.4's own doctrine.
+
+**Split by variant, because they are two different objects:**
+
+| Variant | Trigger | Why |
+|---|---|---|
+| **The wail** | ambient, every 40–120 s, from the far shore (380 m, bearing 118°, §3.0) | It never reads as a scream. It is a landmark and a bearing and a beautiful lonely sound, and removing it would cost the lake its identity. |
+| **The tremolo** | **causal only** | It reads as a scream. It must be earned. |
+
+**The wail:**
+- Fundamental glide: sine `460 → 880 → 810 Hz` over 1.6 s (up fast, down slow).
+- Harmonics 2, 3, 4 at −7, −13, −20 dB, all tracking.
+- Formant: bandpass `f = 1250, Q = 2.2` on the sum, +4 dB.
+- Env `A 180 / S 1200 / R 400`, exponential. 0.85 wet into `LAKE_EDGE`.
+
+**The tremolo** — the same glide split into three rising steps, plus AM at **11.5 Hz**, depth
+0.45. Fires **only** on:
+
+1. A `build:creak` of tier ≥ 3 **on Night 1 only** (the scripted `STORY.md` beat: the bad chair
+   and the answer).
+2. A canoe disturbed at the dock.
+3. The player wading into the lake.
+4. **A body entering the water** (§4.26.5), 3.2 ± 0.9 s after entry.
+
+Cap: **twice per night.** Never on a timer. A player who learns the loon learns a fact about the
+world — *something is watching the water* — and by Night 5 they can deliberately cause it. That is
+a mechanic. A slot machine is not.
+
+#### 5.3.2 The owl
+
+A barred owl in the trees behind the build site, every 90–240 s. Four hoots at
+`[0, 340, 900, 1450] ms`, each 220 ms: sine at `f = 340 Hz` with harmonics 2 (−9 dB) and 3
+(−17 dB), 6 Hz vibrato at ±14 ¢, through bandpass `f = 700, Q = 1.4`, env `A 40 / S 120 / R 60`.
+The final hoot glides `340 → 260 Hz`. −30 dBFS@1m, 0.5 wet into `DENSE_TREES`.
+
+**The owl stops when the chorus stops, and it does not return for the rest of the night.** It is a
+second, slower, less reliable confirmation of the same fact, and its non-return is the difference
+between "something walked past" and "something is still here."
+
+#### 5.3.3 The camp radio — the clock
+
+A transistor radio at the mess hall, 1984. `Music.js` generates a short, cheap, cheerful AM-pop
+loop (four chords, I–V–vi–IV in F, a drum machine, a saccharine synth-brass lead), then the
+transmission chain destroys it:
+
+```
+signal → bandpass f=1400, Q=0.9              (a 4-inch paper cone in a plastic box)
+       → highpass f=520                      (no bass exists)
+       → WaveShaper (soft clip, drive 2.4, oversample '4x')   (the amp is always overdriven)
+       → peaking f=2900, Q=2.5, +6 dB         (the honk)
+       → lowpass f=4800
+       → highpass f=18, Q=0.7                 (DC blocker, §9.2 rule 7)
+       → + AM hiss: pink → bandpass 1600, Q 0.7 → −32 dB
+       → + drift: a 0.07 Hz random walk on output gain, ±5 dB
+       → mono → panner at the mess hall (140 m, bearing 042°, §3.0)
+```
+
+Every 30–90 s the drift dips hard (−14 dB for 2 s) and comes back. Once a night it drops out
+entirely for 8 s.
+
+**The radio is a clock.** It goes off at `timeOfNight 0.55` — lights out, and the same moment the
+camp's fires start dying (§4.18) — with a single loud click. The silence after it is one of the
+three best moments in this design.
+
+**It is also tuned wrong on purpose.** The radio is at A = 440; the score (§6.1) is at A = 436.
+When both are audible they beat at roughly 1.6 Hz in the upper register. That is intentional and
+it is horrible, and it is why the mess hall is a place the player does not want to linger.
+
+### 5.4 When the chorus stops
+
+**The rule:** the chorus is a proximity sensor with a radius that the player learns, and it is the
+entire stealth UI, and it is diegetic.
+
+Fade the **distant bed and all four quadrant chorus panners** to silence over **350 ms**
+(`setTargetAtTime`, τ = 0.11) whenever any of these is true:
+
+| # | Condition | Depth | Notes |
+|---|---|---|---|
+| 1 | Any camper within **14 m** of the player, regardless of awareness | full | **hysteresis: returns at 19 m**, never at 14 |
+| 2 | Any camper within 6 m of the player's last noise **and actively searching** | full | |
+| 3 | A `build:creak` of tier ≥ 2 in the last 4 s | 40% for tier 2, full for tiers 3–4 | **subject to suppression, below** |
+| 4 | `state.suspicion > 0.7` | full | |
+| 5 | Lightning flash | full, until 2 s after the thunder | |
+| 6 | `phase === 'chase'` | full | |
+| 7 | **A body has been found this night** (§4.26.6) | full, **permanent** | the one permitted exception to the invariant |
+
+**Return: 6.0 s** after the last condition clears, **staggered** — crickets come back one at a
+time over 4 s, nearest last. A forest does not switch back on. That staggered return is the exhale
+of the whole game and it must never be a single fade-up.
+
+#### 5.4.1 The camp exclusion volume
+
+A permanent cylinder of radius 55 m around the camp centre in which condition 1 does not apply.
+Without it, a player working near the mess hall on a Tier-3 run has the sensor pinned off by
+campers who live there, and the mechanic silently stops existing in exactly the place it is most
+needed. Inside the volume the chorus is simply thinner (chorus size × 0.45) and conditions 2–7
+still apply normally.
+
+#### 5.4.2 The duty-cycle invariant
+
+v1.0 never computed how often the sensor would actually be off. The arithmetic is alarming.
+
+Night 5: five campers plus a head counselor, a storm with six strikes (a flash every 25–60 s,
+each holding the chorus off for its full 2.5–12.2 s thunder delay plus 2 s), `lambda` reaching
+~6 creaks/minute across a badly-built cabin, and a `creakDebt > 1.2` cascade firing 3–5 creaks in
+1.5 s. Creaks alone at 6/min × 4 s = **40% of every minute**. Lightning on Night 6 adds
+20–40% more. **By Night 5 the chorus is off more than on, and §1.4's entire habituation thesis
+collapses.**
+
+**The invariant, enforced in `AmbienceDirector`:**
+
+> **The chorus must be audible for ≥ 70% of any rolling 60-second window.**
+
+`AmbienceDirector` tracks the predicted duty cycle over a 60 s ring buffer. When the projection
+falls below 70%, **condition 3 (creaks) is suppressed** — creak-triggered cuts are skipped
+entirely, in priority order: tier-2 dips first, then tier-3/4 cuts. Conditions 1, 2, 4, 5, 6 and 7
+are **never** suppressed, because those are the ones that carry information the player cannot get
+any other way.
+
+Creaks are the right thing to sacrifice: a creak is already loud, already positioned, already
+captioned (§7.5), and already ducks the mix (§2.3). It does not need the chorus to be legible.
+A camper at 14 m has nothing else.
+
+If the invariant still cannot be met — which should only happen during a Night-6 storm with a
+catastrophic cabin — log once via `Log.debug()` and let it fail loudly in testing rather than
+silently in the mix.
+
+#### 5.4.3 Causal honesty
+
+**Do not cheat this.** The cut must be causally honest. If it ever fires without a real cause,
+players stop trusting it, and the moment they stop trusting it, it stops being scary.
+
+**One false positive is permitted per night**, from a deer (`Props` emits
+`noise:emit { kind:'brush' }`), and the payoff is that the player, having frozen for ten seconds
+for nothing, must now decide whether to trust it the next time. One. Per night. Not two.
+
+This doctrine is why §5.3's loon and §4.16's whistle were rewritten. A document cannot demand
+causal honesty in §5.4 and then fire a scream on a 40-second timer in §5.3.
+
+### 5.5 The per-night palette — **DERIVED, and blocked on conflict C3**
+
+`GAME_DESIGN.md` §7 and `STORY.md` §4 disagree about what is built on which night (§0.7, **C3**).
+The table below is therefore keyed to **observed events and `state.installed`, never to
+`state.night`**, so that it is correct under either resolution.
+
+| Palette element | Activation condition (event-driven) | Source |
+|---|---|---|
+| `TIN_ROOF` comb (§3.3.4), tin rain (§4.15), tin footsteps (§4.1) | `CabinSite.tinRoofArea()` non-null | either doc's roof night |
+| Glass pings in the mix (§4.2, `glass.ping` reuse) | first `build:pickup` of a `window` part | GD N6 / STORY N6 |
+| The handsaw (§4.13) | first `tool:found` of `handsaw`, or `night >= 3` | **C1**, **C2** |
+| Hinge foley, door swing | first `build:place` into a `hinge` slot | GD N6 / STORY N4 |
+| The grab (§4.26) | `night >= 3` | `GAME_DESIGN.md` §8.3 — unambiguous |
+| Rigging, ladder, canoe (§4.23) | first class-E or unsnapped placement | STORY N5 |
+| Rain on water plinks (§4.15) | within 25 m of shoreline | geometric |
+| `CABIN_SHELL` audible (§3.3.3) | `enclosure > 0.15` | continuous |
+| Chorus Dolbear curve (§5.2.3) | `state.night` | safe — both docs agree the week is seven nights and gets colder |
+| Radio (§5.3.3) | `timeOfNight < 0.55` | safe |
+| `FIRESIDE` VO (§7.4) | `night <= 3` | `STORY.md` §6.3 — explicit |
+| `SCARED`/`FEAR_VO` (§7.4) | `state.storyFlags.firstBlood` | `STORY.md` §6.9 content |
+| `LATE` VO (§7.4) | `night >= 6` | `STORY.md` §6.10 — explicit |
+
+**When C3 is resolved, regenerate this table and change nothing else in this document.** That is
+the test of whether the event-keying worked.
+
+---
+## 6. Adaptive Music
+
+`src/audio/Music.js`. **There are no linear tracks and no loops.** Everything is scheduled note by
+note against `AudioContext.currentTime` with a 200 ms lookahead scheduler ticking on a 50 ms
+`setTimeout` — not `requestAnimationFrame`, because the scheduler must survive tab throttling
+gracefully and must not be coupled to the render loop.
+
+### 6.1 Harmonic language
+
+- **Reference pitch A = 436 Hz** (14 ¢ flat). Everything in the score is slightly, unplaceably flat
+  against nothing. The camp radio (§5.3.3) is at A = 440; when both are audible they beat at
+  ≈ 1.6 Hz in the upper register. That is intentional and it is horrible.
+- **Pitch centre: D1 = 36.4 Hz / D2 = 72.8 Hz.** It never modulates. Seven nights, one key.
+- **Mode: D Phrygian** (D E♭ F G A B♭ C) at low dread, drifting to **D Locrian** (A♭ replaces A)
+  above dread 0.75.
+- **The tritone D–A♭ is reserved.** It appears nowhere in the game until a camper has actually seen
+  the player — **and in exactly one other place: `stage_chime` at rot stage 4** (§4.25.3). By Night
+  6 the manual is signing off on your work with the interval the score uses for being seen. Nobody
+  will connect them consciously. They are the same interval and it is not a coincidence.
+- **No triads, ever.** Harmony is stacked fourths (D–G–C), minor seconds (D–E♭) used as beating
+  intervals, and open fifths. When two voices land a minor second, detune one by 11 ¢ so it beats
+  at ≈ 1.5 Hz.
+
+### 6.2 Instrumentation (all synthesized)
+
+**PAD — detuned analog.** Per voice: 3 `OscillatorNode`s (`sawtooth`, `sawtooth`, `triangle`)
+detuned `[−7, +6, +13]` ¢, plus a sub `sine` an octave down at −9 dB. Into a lowpass
+(`f = 240 + 900·dread`, `Q = 3.5`) with a 0.07 Hz sine LFO on cutoff, ±180 Hz. Amp env
+`A 4500 / S 1.0 / R 6000 ms`. Chorus: two `DelayNode`s at 14 and 21 ms, each modulated ±3 ms by
+0.11 / 0.17 Hz LFOs, mixed 0.3. **Voice cap: 4.**
+
+**PREPARED PIANO.** Modal, 7 partials with string inharmonicity: `f_n = n·f0·√(1 + B·n²)`,
+`B = 0.0042`. `Q_n = 900/n`, decay `= 3200/n^0.8` ms. Excited by a 1.5 ms noise burst through a
+lowpass at `4·f0`. **The preparation:** partials 3, 4, 5 are amplitude-modulated by a 64 Hz sine at
+depth 0.55 — a screw resting on the string, buzzing. Damper thunk on note-off:
+`modal([{f:92, Q:9, g:0.3, d:60}])`. **Single notes only, never chords, never more than one note
+every 4 seconds.**
+
+**BOWED METAL.** Continuous pink noise → gain (`bowPressure`) → 5 very high-Q bandpasses at
+`[196, 293, 441, 587, 881] Hz` (a stack of fourths and fifths on D), `Q = 180 + 600·bowPressure` →
+a soft `WaveShaper` (**`oversample: '4x'`**, DC blocker after) → out. `bowPressure` ramps over
+3–8 s. A slow, hollow, unstable drone that swells and dies like a bowed cymbal edge. **This is the
+game's dread meter.**
+
+**THE STRING — one detuned low string.** Karplus-Strong: a `DelayNode` (delay = 1/f) in a feedback
+loop with `[lowpass f = 2600] → [gain 0.994]`, excited by a 12 ms noise burst.
+
+> **Implementation warning.** A `DelayNode` feedback loop in WebAudio has a minimum delay of one
+> render quantum (128 samples ≈ 2.67 ms at 48 kHz), which floors the pitch at ≈ 375 Hz — far too
+> high for our low D at 36.4 Hz.
+
+Therefore: on `settings.tier('modal','modal','worklet','worklet')`, use an
+`AudioWorkletProcessor` (`ks-processor`) for true low KS. On `low`/`medium`, fall back to a modal
+bank of 9 harmonics of 72.8 Hz with `B = 0.0008` and 8 s decays — 90% as good at a tenth the cost.
+Detect once at init; never branch per note. Struck, not plucked, with a felt exciter: 25 ms of
+lowpassed noise.
+
+### 6.3 The Dread scalar and the layers
+
+```js
+dread = clamp01(
+    0.40 * state.suspicion
+  + 0.30 * proximity                          // 1 - clamp01(nearestCamperDist / 30)
+  + 0.15 * lineOfSightTerm                    // 1 if a camper's cone contains the player
+  + 0.10 * clamp01(state.creaks / 6)          // clamped — see below
+  + 0.05 * (1 - buildProgress)
+);
+```
+
+**The creak term must be clamped.** `GAME_DESIGN.md` §3.1 permits `lambda` up to ~7.8 creaks per
+minute on a Wrong-part join; `state.creaks` reaches 6 within a minute of a bad Night-4 placement
+and would then pin that term forever, including across the 45-minute tail of Night 7. `clamp01`
+is not cosmetic.
+
+Smoothed **asymmetrically: rise τ = 0.35 s, fall τ = 4.5 s.** Dread arrives instantly and leaves
+slowly. Never the reverse.
+
+| Layer | Instrument | Enters at | Behaviour |
+|---|---|---|---|
+| **L0 — Ground** | THE STRING, D1, struck once | always | One note every 22–40 s, −30 dBFS@1m. The game's pulse, present even at dread 0 and on the title screen. |
+| **L1 — Air** | PAD, one voice, D2 + A2 open fifth | dread > 0.12 | Filter cutoff tracks dread. |
+| **L2 — Report** | PREPARED PIANO | build progress, **not** dread | On `build:place { correct: true }`: one note from a slowly ascending sequence indexed by stage (D, F, G, B♭, C, D, E♭…). **The only reward music in the game.** Dry, close, −20 dBFS@1m. |
+| **L3 — Attention** | BOWED METAL, `bowPressure 0.3` | dread > 0.35 | Swells over 6 s. |
+| **L4 — Pressure** | PAD second voice a minor second above (E♭), BOWED METAL → 0.7 | dread > 0.60 | The beating starts. |
+| **L5 — Seen** | Adds A♭ (the reserved tritone); THE STRING switches to a 3-note irregular ostinato at ≈ 104 bpm | dread > 0.85 **or** `player:spotted` | Never plays otherwise. |
+
+**Critical-detection cue.** `GAME_DESIGN.md` §4.1 asks for "a single low heartbeat-rate string tone
+from `Music.js`" at detection 0.75–0.99. That is THE STRING at D1, struck once, at a rate of
+64 bpm for three strikes, −26 dBFS@1m. **It is a string tone at heartbeat rate. It is not a
+heartbeat** (§4.27.2), it must never play simultaneously with one, and the two must not be
+conflated by anyone reading either document.
+
+**Transition rules.** Layers enter on the next 2 s grid boundary and leave on the next 4 s
+boundary, always with ≥ 1.5 s ramps. **Never cut a layer.** Above dread 0.85 falling below 0.40
+(the player escaped), the score **collapses**: every layer ramps out over 3.5 s except L0, and L0
+plays one note. Then 20–40 s of no music at all (§8 S5).
+
+### 6.4 The tell — the manual knows what happens next
+
+v1.0 built the game's signature cue as "THE STAPLE," three struck-steel hits and a clang, and then
+spent five numbered bullets explaining, in the document, how it differs from `ki-ki-ki, ma-ma-ma`.
+
+That is the document winking at the camera — the exact failure §1.5 and `GAME_DESIGN.md` §0 forbid
+— and a cue defined by what it is *not* has no identity of its own. Three struck-steel hits and a
+clang could be in any horror game; nothing about it is flat-pack. And it depended on an API nobody
+had declared.
+
+**The tell is the manual, because the manual is the only thing in this world that knows what
+happens next.**
+
+```
+One manual_tick (§4.25.1): sine + triangle at 2100 Hz, 40 ms, −22 dBFS@1m
+on sfxUI: dry, mono, dead centre, no reverb, no distance, no mask
+arriving exactly 1.2 s before a camper turns toward the player
+```
+
+That is the entire cue. **The clean universe intruding on the wet one is the game.** For 40
+milliseconds the flat, bright, Helvetica-alike world of the instruction manual reaches into a
+soaking forest and points at something, and then it is gone, and the player has 1.2 seconds.
+
+**Constraints:**
+
+- At most **twice per night**, so it never becomes wallpaper.
+- Never when the player is already spotted.
+- Never within 8 s of another `sfxUI` sound, so it cannot be confused with `hardware_chime`
+  (1400 ms decay — thirty-five times longer) or `stage_chime` (two tones).
+- It fires whether or not the player can see the camper. It is not a threat indicator; it is the
+  manual noticing.
+
+**The required API, declared** (v1.0 needed this and never said so):
+
+```js
+// TODO(api): Campers.willObserve(dtMs) -> { camper, tMs } | null
+//   Returns the soonest scheduled scan/turn that will bring the player into a camper's cone
+//   within dtMs, or null. Called by Music once per 250 ms with dtMs = 1400.
+//   Graceful null path: the tell never fires; nothing else changes.
+```
+
+**This is not clairvoyance, and that matters for whether the AI agent can implement it.**
+`GAME_DESIGN.md` §4.3 puts Idle campers on a scan timer: "Scans ±40° every 4 s." That timer is
+scheduled state the FSM already keeps. `willObserve` reads a clock, projects the camper's known
+heading and the scan arc forward, and reports. It does not need lookahead in the decision system
+and it does not need the FSM to become predictive.
+
+### 6.5 What the music never does
+
+- **It never stings a kill.** `STORY.md` §4 Night Four: the first kill is "a single hard cut to
+  black with **no music sting and no scream** — only the sound of a hammer set down carefully on
+  wood." That hammer is `join_seat`'s modal bank at 0.5× gain with the tick removed, on
+  `sfxWorld`, at −24 dBFS@1m, and there is nothing else.
+- **It never scores the manual.** S6 is silent (§8). The night-end card has no music.
+- **It never plays during any silence rule** except S9 (pause).
+- **It never resolves.** There is no cadence anywhere in this score. The one moment that sounds
+  like resolution is `stage_chime` at rot stage 0, and it is not in the score, it is in the manual,
+  and by Night 6 it is a tritone.
+
+---
+
+## 7. Voice — Atmosphere Only
+
+**The creator's hard rule: voice is atmosphere in 3D space. Never a narrator, never the star.**
+`STORY.md` §Contract: "**The game must be fully playable, and fully sad, with the VO folder
+deleted. Voice is weather.**"
+
+`VoiceBank.js` loads ElevenLabs MP3s from `public/audio/vo/` generated by
+`tools/generate-voices.mjs`. If the directory is empty, `VoiceBank.available = false`, every
+`audio:vo` becomes a no-op, and the game must still work. **Test that build weekly.** It is the
+default assumption, not the fallback.
+
+### 7.1 The half-heard principle
+
+The frightening thing about a voice in the woods is not what it says. It is that you *almost*
+caught it. Target ratio: **4:1 half-heard to clear.** A fully intelligible line is a scripted
+event and there should be at most three per night.
+
+`STORY.md` §6 supports this directly: "Heard at distance, in 3D, through trees, through rain,
+usually half-caught… Most under twelve words. **Write for the words that survive the filter.**"
+The lines were written for this chain. Do not weaken the chain to make them intelligible.
+
+### 7.2 The distance / intelligibility chain
+
+```
+buffer → [preGain] → [voHP] → [voLP] → [voPresence] → [smearGain] → [rearShelf] → [panner]
+                                                    ├──▶ [verbSend] ──▶ convolver A or B
+```
+
+- **`voLP`** (lowpass, `Q = 0.7`): `fc = 15000 / (1 + d/3.2)^1.35`
+  → 0 m: 15.0 k · 6 m: 4.7 k · 15 m: 1.5 k · 30 m: 730 · 45 m: 450 Hz.
+  **15 kHz, not v1.0's 16 kHz** — see §9.4 on why the assets stay at full rate and why 16 kHz was
+  a no-op under v1.0's own downsampling claim.
+- **`voHP`** (highpass): `fc = 40 + 6.2·d`, clamped to 340 Hz. Removes chest and proximity as
+  distance grows; a far voice is all midrange.
+- **`voPresence`** (peaking, `f = 2600, Q = 1.4`): `gain = +4 − 0.22·d` dB, clamped to −6. Close
+  voices have consonants; far ones do not.
+- **`verbSend`**: `wet = clamp(0.12 + 0.020·d, 0.12, 0.85)`.
+- **`smearGain` — the wind gate.** Active when `d > 18` or `weather.wind > 0.4`. A random-walk gain
+  that punches holes: every `1/(3 + 5·wind)` seconds, `setTargetAtTime(rand(0.35, 1.0), now, 0.05)`.
+  **This is what makes a distant conversation come and go in the wind, and it is the single most
+  important VO processing decision in the game. Words drop out. Sentences arrive in fragments.**
+- **`rearShelf`**: §3.1.3, same as every other 3D source.
+- Occlusion (§3.2) applies on top of all of it.
+
+**The intelligibility scalar:**
+
+```js
+I = clamp01(1 - d/26) * (1 - 0.55*occlusionT) * (1 - 0.45*wind) * facingTerm;
+// facingTerm: 1.0 facing the player, 0.4 facing away (via the panner cone, §3.1)
+```
+
+| `I` | Band | Behaviour |
+|---|---|---|
+| `> 0.62` | **clear** | Emit `ui:subtitle` (§7.5). At most 3 per night. |
+| `0.30 – 0.62` | **half-heard** | **No subtitle.** The player hears cadence, gender, emotion, maybe one word. **This is the target band.** |
+| `≤ 0.30` | **presence** | Do not schedule scripted lines here. Play `CHATTER_BED` takes so we do not burn authored content on inaudibility. |
+
+### 7.3 Scheduling conversations
+
+`VoiceBank` runs a `ConversationDirector`:
+
+- A conversation is 2–4 campers with a topic id from `src/story/Script.js`.
+- **Max 2 active conversations. Max 4 concurrent VO voices. Hard cap** (§9.1).
+- Turn-taking gap: `180 + rand(0, 240)` ms. **12% of turns overlap** — the next speaker begins
+  250 ms before the current ends. Real conversation overlaps; perfectly alternating VO sounds like
+  a radio play.
+- Laughter is scheduled as a reaction, 300–600 ms after a punchline, from 1–2 non-speakers.
+- **Never place two active speakers within 20° of each other in the player's azimuth.** If the
+  geometry demands it, delay the second speaker.
+- **Cooldown: the same line id never plays twice in a night, and never at `I > 0.62` twice in the
+  whole game.** A line the player once heard clearly must, on any repeat, be half-heard. With a
+  90-line bank (`STORY.md` §6: "Total: 90 lines"), this constraint is what makes the bank feel
+  three times its size.
+- `STORY.md` §6 also requires: "`VoiceBank` should aggressively vary distance, occlusion, pitch
+  (±3%) and delay so no line is ever heard 'the same way twice.'" The ±3% is `playbackRate`, not
+  `detune`, and it must be applied *before* the chain so `voPresence` tracks the shifted formants.
+- **`CHATTER_BED`:** for each of the six speakers, 6 takes of 4–9 s of non-lexical conversational
+  murmur — delivered as real sentences, then processed until unrecoverable. These play at
+  `I ≤ 0.30`. **They are the workhorses; scripted lines are the spice.**
+- **VO stops entirely during any silence rule (§8) except S9.**
+- Every line start also emits `noise:emit { kind:'voice', radius: 26, intensity: 0.30 }` (§4.28.3).
+
+**Category → FSM state routing** (this is the mapping `GAME_DESIGN.md` §4.3's `vo_curious_*` and
+`vo_hm_*` globs resolve through — see §7.4.3):
+
+| Camper state | `STORY.md` section drawn from |
+|---|---|
+| Idle, at the fire | §6.1 idle chatter, §6.3 campfire (nights ≤ 3), §6.4 arguments |
+| Idle, working | §6.1, §6.2 calling out |
+| **Curious** | §6.5 "I heard something" — the low-arousal subset |
+| Curious → escalating | §6.5 — the high-arousal subset |
+| Searching | §6.6 searching |
+| Curious → Idle (gave up) | §6.7 false alarms |
+| Found something | §6.8 finding evidence |
+| Alerted / Panic | §6.9 genuine fear |
+| Nights 6–7 | §6.10 very late game |
+
+### 7.4 Generation — **DERIVED from `STORY.md` §5 and §6**
+
+v1.0 defined six voice profiles — DENISE, RANDY, TAMMY, KEVIN "SPUD", MARCIA, BUD DIETZ — none of
+whom exist. `STORY.md` §5 defines the cast as **Robin, Dale, Marg, Coop, Teddy, Bev**, and §6
+gives every line an id and per-line `S / Sim / St` values that are already authored. Following
+v1.0 would have generated roughly 200 MP3s for characters `Script.js` will never reference, with
+filenames that violate `STORY.md`'s path contract, and the entire VO pipeline would have been dead
+on arrival with no error message.
+
+**`STORY.md` is the single source of truth for speaker ids, line ids, line text, categories, and
+per-line generation parameters. This document owns the chain and nothing else.**
+
+Two v1.0 profiles were not merely invented but *duplicative*: Bud Dietz — "the only one who knows
+what a joist is" — is Dale Pruitt's function (`STORY.md` §5: sixth summer, Maintenance, fixes
+everything). Marcia, who "sings to herself constantly," duplicates the Night-1 Dale beat (drunk,
+singing half a song, giving up on it twice).
+
+#### 7.4.1 The cast — **DERIVED**
+
+| Speaker id | Name | Age / role | Voice direction (ElevenLabs description) | `speaker_boost` |
+|---|---|---|---|---|
+| `ROB` | Robin Osei-Hall | 19, Arts & Crafts | Young, warm, quick; restarts her own sentences and never finishes the first attempt. Technically literate — she grew up in a boatyard and knows a mallet from a woodpecker. **She is right and nobody believes her.** | true |
+| `DAL` | Dale Pruitt | 27, Maintenance | Tired, kind, unhurried; trails off with "…anyway." Drinks a little more than he'd like you to know. Calls everyone *chief* or *champ*. | true |
+| `MRG` | Marguerite "Marg" Toth | 21, Waterfront | Competent, warm, slightly bossy; **counts out loud** and narrates her own logistics because it is how she thinks. | true |
+| `COO` | Cooper "Coop" Vance | 20, Sports & Rec | Loud, turns everything into a bit, then apologises for the bit thirty seconds later. **Write him kind — his bits are how he checks whether people are okay.** | true |
+| `TED` | Teddy Nakagawa | 16, CIT | Says *sorry* as punctuation; asks permission for things he has already been told to do. First summer away from home. | true |
+| `BEV` | Beverly "Bev" Ranczak | 58, Camp Director | Fragments with the articles removed — "Get the tarps. Both of 'em. Now." Fifty-eight, chain-smokes Winstons, loves this place and would never say so. | **false** |
+
+Bev is the only `speaker_boost: false`, and it is a chain decision, not a character one: her
+register is the lowest in the cast, she is heard mostly at distance where boost artifacts become
+obvious in the 340–1500 Hz band after `voHP`, and we want her low end intact and un-enhanced.
+
+`STORY.md` §5's casting note is binding: "six distinct ElevenLabs voices, all pitched **young and
+tired** except Bev. No 'horror movie' delivery, ever. **If a line sounds like a line, cut it and
+re-record it flatter.**"
+
+#### 7.4.2 Global direction
+
+They are ordinary people at a summer job who arrived a week early to open a camp, which is a
+genuinely nice thing to volunteer for. **They are not in a horror movie and must never sound like
+they are.** None of them is stupid. None of them is cruel. `STORY.md` §5: "The player should be
+actively annoyed when the game requires them to be hurt."
+
+**The horror is that they are relaxed**, and then, from Night Four, that they are frightened in an
+ordinary, unperformed, embarrassing way.
+
+#### 7.4.3 Per-category chain deltas
+
+`S / Sim / St` come from `STORY.md` §6, **per line**, and are used verbatim. The deltas below are
+*chain* adjustments the generator applies on top, and they are this document's to own:
+
+| Category | `STORY.md` § | Availability | Direction note passed at generation | Δ style | Δ stability |
+|---|---|---|---|---|---|
+| `CHATTER` | 6.1 | all nights | Mid-sentence, no setup, no punchline for the player's benefit. Trail off. | −0.05 | +0.05 |
+| `CALL_NAME` | 6.2 | all nights | Shouted across distance, but casually — calling a friend to dinner, not a search party. Long vowels. | +0.10 | 0 |
+| `FIRESIDE` | 6.3 | **nights ≤ 3** | Slow, warm, overlapping, laughing. Long takes used as a bed near the camp. | 0 | +0.05 |
+| `ARGUMENT` | 6.4 | all nights | Small, domestic, real. Tired, not angry. Nobody raises their voice. | 0 | 0 |
+| `NOTICE_LOW` → `vo_hm_*` | 6.5 subset | all nights | "…huh." Barely a reaction. Half a beat of listening. **Under-play this brutally.** | −0.15 | +0.10 |
+| `NOTICE_HIGH` → `vo_curious_*` | 6.5 subset | all nights | Genuine puzzlement, not fear. | +0.05 | 0 |
+| `SEARCH` | 6.6 | all nights | Talking to themselves at low volume while moving. Breath between words. | 0 | −0.05 |
+| `DISMISS` | 6.7 | all nights | Relieved, slightly embarrassed. **This is the sound the player wants to hear.** | +0.05 | 0 |
+| `EVIDENCE` | 6.8 | `firstBlood` | Analytical before it is frightened. Crouched, close, thinking. | 0 | 0 |
+| `FEAR_VO` | 6.9 | `firstBlood` | Real, ugly, unperformed fear. Short. **No screaming as performance.** | +0.15 | −0.10 |
+| `LATE` | 6.10 | nights ≥ 6 | Quiet, dawning, exhausted. Bev remembering is the closest the game comes to explaining anything. | +0.05 | 0 |
+
+**Glob resolution**, for conflict **C6**'s neighbours: `GAME_DESIGN.md` §4.3 emits
+`audio:vo { id:'vo_curious_*' }` and `{ id:'vo_hm_*' }`. These are **categories, not line ids**.
+`VoiceBank` resolves them against the manifest:
+
+- `vo_hm_*` → `NOTICE_LOW`: `DAL_HEAR_01` ("Huh."), `MRG_HEAR_01`, `COO_HEAR_01`.
+- `vo_curious_*` → `NOTICE_HIGH`: `ROB_HEAR_01`, `ROB_HEAR_03`, `MRG_HEAR_02`, `TED_HEAR_01`,
+  `COO_HEAR_02`, `BEV_HEAR_01`.
+
+Both globs, and any future glob, resolve through one function so the failure is a logged warning
+and not a silent no-op (§10.2).
+
+#### 7.4.4 A construction-reaction gap, and how it is handled
+
+`GAME_DESIGN.md` §11 t=1:12 requires a camper to react to hammering, and §2.5's comedy engine
+depends on campers blaming each other for construction noise. `STORY.md` has partial coverage —
+`ROB_HEAR_02` ("That's a mallet. That's somebody driving a stake."), `ROB_HEAR_03` ("Four hits.
+Even. Nothing hits four times even."), `COO_EVID_01` ("Somebody took the hinges. Who takes
+hinges.") — but no line where a camper attributes the noise to *another camper*, which is the joke.
+
+**This document does not write those lines.** The slots are requested by id, with speaker,
+category, and the direction note, and the generator skips them until they exist:
+
+```
+TODO(story): four CONSTRUCTION lines requested for tools/generate-voices.mjs.
+  DAL_CONS_01  Dale   — being blamed, mildly, for work he is not doing
+  MRG_CONS_01  Marg   — asking whether Dale is working now, at this hour
+  COO_CONS_01  Coop   — a bit about the noise that nobody laughs at
+  TED_CONS_01  Teddy  — apologising for a noise that is not his
+  Direction: completely straight. Nobody ever suggests a monster is building a house.
+  Nobody is frightened. This is the comedy engine and it works because it is mundane.
+  Until these exist, VoiceBank routes construction reactions to NOTICE_LOW.
+```
+
+#### 7.4.5 Generation hygiene
+
+- Model `eleven_multilingual_v2`, output `mp3_44100_128`.
+- **Filenames: `public/audio/vo/<LINE_ID>.mp3`**, exactly — e.g. `public/audio/vo/MRG_IDLE_01.mp3`.
+  This is `STORY.md`'s contract verbatim. v1.0 specified
+  `vo_<speaker>_<category>_<index>.mp3`, under which **every fetch in the game would have 404'd.**
+- Fixed `seed` per line id (`hash2` of the id) wherever the API accepts one, so regeneration is
+  reproducible.
+- **No downsampling on load** — see §9.4. `mp3_44100_128` decodes at the context rate and stays
+  there.
+- `public/audio/vo/manifest.json`:
+
+```json
+{
+  "version": 1,
+  "lines": [
+    { "id": "MRG_IDLE_01", "speaker": "MRG", "category": "CHATTER",
+      "durationMs": 2840, "clearOK": true, "night": null, "flag": null }
+  ]
+}
+```
+
+`clearOK` marks lines permitted to play at `I > 0.62`. `night` and `flag` carry the availability
+gates from §7.4.3. `VoiceBank` treats a missing manifest exactly like a missing directory:
+`available = false`, and the game is unaffected.
+
+- **Rate limiting and idempotence:** the generator skips any line whose MP3 already exists with a
+  matching manifest entry, retries 429s with exponential backoff starting at 2 s, and writes the
+  manifest last so an interrupted run is resumable.
+
+### 7.5 Captioning the non-verbal — **required by `GAME_DESIGN.md` §10.3**
+
+v1.0 §7.2 wrote of clear VO lines: "**This is the only place subtitles come from.**"
+
+`GAME_DESIGN.md` §10.3 requires the opposite: "Non-verbal but mechanically relevant sounds are
+captioned too: `[creak — north, near]`, `[thunder — 3 seconds]` (**the last one is essential for
+deaf players to use thunder masking**)."
+
+`AudioEngine` is the only system that knows creak tier, thunder ETA, emitted intensity, and the
+mask window. **It is therefore the only place those captions can originate, and v1.0 explicitly
+forbade itself from emitting them** — which made the game's skill ceiling (§4.17.4) unusable
+without hearing.
+
+`AudioEngine` emits `ui:subtitle { text, speaker, ms }` for the following. `speaker` is `''` for
+all non-verbal captions; `HUD.js` renders `''` in the bracketed style per `GAME_DESIGN.md` §10.3.
+
+| Event | Caption | Gate |
+|---|---|---|
+| Creak, tier ≥ 2 | `[creak — <dir>, <dist>]` | `settings.subtitles` |
+| Creak cascade | `[the structure settles — <dir>]`, once for the whole cascade | `settings.subtitles` |
+| Own `noise:emit` ≥ 0.3 intensity | `[<kind> — you]` e.g. `[hammer — you]` | `settings.subtitles` |
+| Lightning flash | `[thunder — <n> seconds]`, `n = round(Weather.nextStrikeIn()... )` from the flash | `settings.subtitles` |
+| Thunder arrival | `[thunder — cover]` | `settings.subtitles` |
+| **Thunder close warning** (§4.17.4) | `[thunder — fading]` | `settings.subtitles` — **this is the caption that makes the skill ceiling reachable** |
+| Chorus cut | `[the crickets stop]` | `settings.subtitles` |
+| Chorus staggered return | `[crickets]` | `settings.subtitles` and `audioVerbosity === 'standard'` |
+| Seat vs grind (§4.9) | `[seated]` / `[seated — grinding]` | `settings.subtitles` |
+| Dimple / split (§4.7.3) | `[over-tightened]` / `[the wood splits]` | `settings.subtitles` |
+| Whistle | `[whistle — <dir>, <dist>]` | always, even at `audioVerbosity: 'reduced'` |
+| Night 7 breath catch | `[breath]` | `settings.subtitles` |
+
+`<dir>` is one of eight compass points relative to the player's facing; `<dist>` is `near`
+(< 15 m), `mid` (15–40 m), or `distant` (> 40 m). Both come from the same values that drive the
+panner, so the caption and the sound can never disagree.
+
+**What is deliberately *not* captioned**, because captioning it would give deaf players
+information hearing players do not have and break §1.1's contract:
+
+- **Wrong-slot placement** (§4.9 row 3). It captions as `[seated]`, identically to a correct join.
+- The pry bar's 200 ms silence (§4.11). Silence has no caption.
+- The chorus's *failed* return after a body is found (§4.26.6) — it captions as `[crickets]` and
+  then nothing, exactly as hearing players experience it.
+- Ansel's ordinary breathing, the hand-wipe, and the tool roll.
+
+**`directionalAudioIndicator`.** `GAME_DESIGN.md` §10.3 asks for "a thin arc at the screen edge
+for any `noise:emit` the player produced above intensity 0.3 and any camper `voice` within 40 m."
+There is no `ui:arc` event and this document may not invent one. **`HUD.js` draws the arc by
+listening to `noise:emit` directly** — a public canonical event it is entitled to read — while
+`AudioEngine` owns the caption. Two systems, one event, no new channel. See conflict **C5** for the
+26 m / 40 m radius disagreement.
+
+---
+
+## 8. The Silence Rules
+
+**This is the most important section in this document.** Every rule is implemented as a
+priority-ordered stack in `AudioEngine`; **the highest-priority active rule wins and rules do not
+blend.** Priority is the numeric order below, S1 highest.
+
+**S1 — The first breath of the night.** On `night:begin`: **2.2 seconds of absolute silence.** Not
+room tone. Nothing. Then the bed fades in over 6 s — wind first, then the distance layer, then the
+chorus last (staggered, §5.4). *Why:* it resets the ear, it makes the bed feel like it **arrived**,
+and it establishes on Night 1 that this game is willing to give you nothing.
+
+On Night 1 specifically, `crate_settle` (§4.28.5) plays *before* the 2.2 s, over black, per
+`GAME_DESIGN.md` §11 t=0:00 — one wooden sound in a world that does not exist yet.
+
+**S2 — The chorus cut.** §5.4 in full, including the duty-cycle invariant and the causal-honesty
+doctrine. *Why:* it is the entire stealth UI and it is diegetic.
+
+**S3 — The naked creak.** On **`build:creak` with tier ≥ 3** (§4.12.2): everything except the
+creak ducks −18 dB over 180 ms *before* the creak sounds, then returns over 900 ms. The creak
+arrives into a vacuum, unaccompanied, at full level.
+
+v1.0 fired this on **`build:place` with `correct: false`** — at the moment of placement. That
+converted the game's central trap into an instant fail buzzer and contradicted
+`GAME_DESIGN.md` §11's "it seats, and it creaks 9 seconds later" and §2.3's "no negative feedback
+at all" for Wrong-slot.
+
+*Why the fixed version works:* the 180 ms pre-duck is **the only warning the player gets before a
+creak whose cause is now nine seconds and twelve metres behind them.** It is the audio equivalent
+of a hard cut to a close-up of something that already happened.
+
+Not fired for tiers 1–2. Tier 1 is explicitly ignorable (§4.12.3) and tier 2 must not be
+dignified with the mix stopping.
+
+**S4 — The gap before the thunder.** From the lightning flash until the thunder arrives
+(`2.9 · distance_km` seconds, up to 12.2 s), duck everything but rain by −14 dB over 110 ms and
+hold. The flash whites out the screen, the world goes quiet, and then, seconds later, the sound
+arrives. *Why:* real, free, and it makes the player count — which is exactly the skill
+`GAME_DESIGN.md` §3.3 wants them to develop. Every distant strike buys a silence we did not have
+to justify.
+
+Captioned as `[thunder — <n> seconds]` (§7.5) so deaf players count the same beats.
+
+**S5 — The escape.** When dread falls from > 0.85 to < 0.40, the score collapses (§6.3) and then
+there is **no music at all for 20–40 s.** The bed returns to normal; the score does not. *Why:*
+relief is a musical event, and the only way to score relief is to stop scoring.
+
+**S6 — The clinical pause.** On `build:stage-complete`: **1.4 s of complete silence across every
+bus**, and then, alone and dry on `sfxUI`, `stage_chime` (§4.25.3) — two tones, 140 ms each, at
+whatever stage of rot the manual has reached. Then the world fades back over 1.8 s.
+
+*Why:* this is the funniest moment in the game and it is funny because it is silent. The forest
+stops, the furniture-commercial universe intrudes for roughly 340 ms, and then the wet dark night
+resumes as if nothing happened.
+
+> **Do not add a musical sting. Do not "sell" it. Do not reverb it. The deadpan is the joke.**
+
+The 1.4 s of silence is also what makes §2.1's `sfxUI` level invariant true: the chime is always
+alone, so the limiter never touches it.
+
+**S7 — The end.** On `night:failed`: hard-mute every bus on the frame it fires — including room
+tone, including the mask chain, including everything. **900 ms of true digital silence.** Then one
+note: THE STRING at D1, −24 dBFS@1m, allowed to ring for 11 s into `OPEN_FOREST`. Nothing else,
+ever, until the menu.
+
+*Why:* the only time this game gives you actual nothing is when you have lost, and it should be
+the loudest silence in the medium.
+
+**S8 — Lantern out.** When the player extinguishes the lantern (a deliberate stealth action per
+`GAME_DESIGN.md` §4.4), the gas hiss ramps out over 700 ms with its bandpass sweeping down to
+500 Hz, **and the ambience bed drops −8 dB with a lowpass to 3.2 kHz for as long as the light is
+off.**
+
+*Why:* this is psychoacoustically dishonest and it is the correct choice. It makes darkness feel
+like holding your breath, and it rewards a risky action with an audible change of state. It is the
+one place in this document where physical accuracy is deliberately traded for legibility, and it
+is flagged as such so nobody "corrects" it later.
+
+**S9 — The pause.** On `game:pause`: do **not** silence. Ramp all buses to −20 dB over 400 ms and
+insert a lowpass at 900 Hz. The forest is still there, behind glass, waiting. `sfxUI` is unaffected
+so menu interaction stays crisp; music continues, quietly, because §6's score is generative and
+stopping its scheduler mid-phrase is audible on resume.
+
+*Why:* a hard mute on pause tells the player the world is a program. Keeping it breathing at the
+edge of hearing tells them it is a place.
+
+**S10 — deleted.** v1.0's S10 was the mask-donning event, triggered by `story:beat 'mask-on'`,
+which does not exist. The mask has been on since 1962 (§2.5). There is no donning moment and there
+must not be one.
+
+**S11 — Pre-dawn.** Above `state.timeOfNight > 0.92`, over 40 s: ramp everything below 300 Hz out
+(a `highpass` on `master` sweeping 20 → 300 Hz), reduce the wind to band C and sizzle only, cut the
+chorus to 3 instances, and let one distant bird exist — a white-throated sparrow: five pure sine
+tones at `f = 4200 Hz`, first long then four short, 700 ms total, every 25–60 s. Music silent.
+
+*Why:* dawn is the reward and it must sound thin, cold, and survived. It is also the third
+diegetic clock, alongside the camp's fires dying at 0.55 and the moon's altitude.
+
+**S12 — Never break a silence with a fade-in.** Whatever ends a silence must **arrive** — a
+transient, an event, a footstep. If nothing arrives, the silence continues until something does.
+**Fading the bed back up under a silence is the one unforgivable sin in this document.**
+
+The single exception, and it is not really one: S1's 6 s bed fade-in is not breaking a silence, it
+is *starting a night*, and it is preceded by nothing rather than followed by nothing.
+
+**S13 — The unmasking.** `ending_c` only, once per playthrough (§4.28.4). The mask chain
+crossfades **out** over 2800 ms. It is not a silence; it is the removal of a filter the player did
+not know was there, and it belongs in this section because it is the same kind of move: taking
+away something the player had stopped noticing.
+
+*Why:* §1.4 says the horror is the removal of a sound the player had habituated to. Seven nights
+of habituation to a *timbre* is the largest instance of that idea the game can contain, and it is
+saved for the last ninety seconds.
+
+---
+## 9. Implementation Notes (WebAudio)
+
+### 9.1 Voice pooling and stealing
+
+`AudioEngine` maintains a pool of pre-built voice slots per SFX family, each a persistent subgraph
+(panner + rear shelf + elevation shelf + occlusion filters + gains) whose **source node is the only
+thing recreated per play**. `AudioBufferSourceNode` and `OscillatorNode` are one-shot and must be
+recreated; everything else is reused forever. **Never build a `BiquadFilterNode` inside a `play()`
+call** — and unlike v1.0, every §4 recipe now actually obeys this (§4.0.2).
+
+| Tier | Concurrent voices | 3D panners | Convolvers | Chorus panners | Chirp slots | Rain grains/s | Node churn/s |
+|---|---|---|---|---|---|---|---|
+| `low` | 24 | 12 (equalpower) | 1 | 4 | 8 | 60 | 24 |
+| `medium` | 40 | 24 (equalpower) | 1 | 4 | 18 | 140 | 40 |
+| `high` | 64 | 40 (HRTF) | 4 | 4 | 34 | 300 | 70 |
+| `ultra` | 96 | 56 (HRTF) | 4 | 4 | 48 | 450 | 120 |
+
+**The panner budget now balances.** v1.0 spent 48 of 56 panners at `ultra` on crickets alone,
+leaving 8 for everything else in the game. At 4 chorus panners (§5.2.2) the `ultra` allocation is:
+
+| Consumer | Panners |
+|---|---|
+| Chorus quadrants | 4 |
+| Camper VO | 4 |
+| Camper footsteps + foley (5 campers × 2) | 10 |
+| Player footsteps + brush | 6 |
+| Build SFX (creaks 5, hammer 2, misc 4) | 11 |
+| Lantern | 1 |
+| Campfire, loon, owl, radio | 4 |
+| Rain grain groups (3 surfaces × 2) | 6 |
+| Hardware tick, whistle, zipper, flashlight | 4 |
+| Reserve | 6 |
+| **Total** | **56** |
+
+Use `settings.tier(...)` for all of these. **Never branch on the quality string.**
+
+**Stealing.** Every voice has `priority` (0–3) and
+`score = priority·1000 + 20·log10(gain) − 0.4·distance − 0.001·ageMs`. When the pool is full,
+steal the lowest score and release it with an **8 ms fade, never a `stop()`**.
+
+| Priority | Members |
+|---|---|
+| **3 — never stolen cross-family** | creaks tier ≥ 2, the seating tap ladder, `join_seat`, `join_split`, the grind, the pry bar, `player:footstep`, breath, the two heartbeats, all `sfxUI`, thunder, `camper_whistle`, the grab |
+| **2** | all other build SFX, VO, camper footsteps, zipper, flashlight click, the saw, the drag |
+| **1** | music voices, campfire, loon, owl, radio, `hardware_tick` |
+| **0** | chorus, rain grains, wind bands, glass rattle, `brush` |
+
+**Per-family caps:** 3 simultaneous creaks (**raised to 5 during a CASCADE**, §4.12.5), 2 hammers,
+1 thunder, 4 VO, 6 footsteps across all agents, 12 rain grains in flight, 1 saw, 1 grab.
+
+> **The deadlock v1.0 would have shipped:** priority 3 is "never stolen," and `player:footstep` is
+> priority 3 with a family cap of 6. Six in-flight footsteps would have made a seventh footstep
+> unplayable — it cannot steal (everything is priority 3) and it cannot allocate (the family is
+> capped). The player's own footsteps would silently stop during a sprint.
+>
+> **The rule that fixes it:** *"never stolen" applies to **cross-family** stealing only. Within a
+> family, the oldest voice is always stealable regardless of priority.* A seventh footstep steals
+> the first footstep, which is 400 ms old and inaudible, and nothing is lost.
+
+### 9.2 Avoiding clicks — the non-negotiables
+
+1. **Never assign `param.value` on a live node.** Always `setTargetAtTime` /
+   `linearRampToValueAtTime` / `setValueAtTime` in the future.
+2. **Minimum 4 ms attack, 8 ms release, on every gain, no exceptions.** A "hard" transient is
+   achieved with a 1–2 ms *noise-burst source*, never a 0 ms envelope.
+3. **`exponentialRampToValueAtTime` cannot target 0.** Ramp to `1e-4`, then `setValueAtTime(0)` one
+   render quantum later.
+4. **Cancel correctly.** `cancelAndHoldAtTime(now)` then ramp. A bare `cancelScheduledValues()`
+   jumps the param to its last *set* value and clicks. **Feature-detect it:** `cancelAndHoldAtTime`
+   has historically been missing in some engines; if absent, emulate with
+   `setValueAtTime(param.value, now); cancelScheduledValues(now + 1e-6);`.
+5. **Schedule in the future.** All `start()` calls at `ctx.currentTime + 0.020` minimum — reduced
+   to `+0.008` when `ctx.outputLatency > 0.09` (§9.5). Never `start()` at `currentTime`; you are
+   racing the audio thread.
+6. **Filter frequency jumps click too.** Biquad coefficients are not interpolated per-sample in all
+   engines; ramp `frequency` with `setTargetAtTime(τ ≥ 0.008)`.
+7. **DC.** Anything through a `WaveShaperNode` gets a `highpass f = 18, Q = 0.7` after it.
+8. **Never reassign `ConvolverNode.buffer` on a live node.** It re-partitions the IR synchronously
+   on the main thread and instantly truncates the outgoing tail. §3.3 exists so this never happens.
+
+### 9.3 CPU and node budgets
+
+`AudioEngine.update(dt)` must cost **< 0.35 ms/frame** (inside `ARCHITECTURE.md` §12's
+1.5 ms/system guardrail). The audio *thread* is separate but not free — target **< 25% of one
+core** at `ultra`.
+
+#### 9.3.1 The four costs, in order
+
+1. **`ConvolverNode`.** Four convolvers with 0.55–2.40 s IRs at 48 kHz is the single largest line
+   item, and it is the price of the architecture being coherent (§3.3). Mitigations: generate IRs
+   at **24 kHz** on `low`/`medium`; truncate `LAKE_EDGE` to **1.6 s** below `high`; **one**
+   convolver total on `low`/`medium`.
+2. **HRTF panners** (≈ 4× `equalpower`). Hence the tier table. **Sources beyond 45 m are
+   downgraded to `equalpower` automatically regardless of tier** — HRTF cues are meaningless at
+   that distance and rolloff dominates. The §3.1.3 front/back cue still applies, which is why the
+   downgrade costs nothing perceptually.
+3. **Node construction churn.** §4.0.3. This was completely unbudgeted in v1.0 and was the largest
+   real risk in the document.
+4. **The main-thread `update()`.** Amortized per §9.3.2.
+
+#### 9.3.2 Amortization
+
+- Listener transform: every frame.
+- Per-source distance / occlusion: round-robin at **≤ 8 sources/frame** with a 120 ms cache.
+- Reverb space probe: every **250 ms**; space changes obey the 6 s dwell (§3.3.5).
+- Music scheduler: its own 50 ms timer, 200 ms lookahead.
+- Chorus duty-cycle projection (§5.4.2): every **500 ms**.
+- **No allocations in `update()`.** Scratch `THREE.Vector3`s at module scope per
+  `ARCHITECTURE.md` §12. Object-pool the voice descriptors.
+- **Zero garbage from grain trains.** Pre-allocate the scheduler's event ring buffer at init.
+- **Kill any voice whose computed gain is below −60 dBFS before building it.** At 60 m in the rain,
+  a cricket does not need to exist.
+
+#### 9.3.3 The bake
+
+§4.0.2's baked families are rendered in an `OfflineAudioContext` during `init()`, asynchronously,
+off the first frame. Budget **≤ 400 ms** and **≤ 8 MB**; measured expectation ≈ 60–140 ms and
+≈ 2.7 MB. If the bake has not completed when a family is first requested, that family falls back
+to its LIVE recipe for the first few instances and logs once — the game never waits on audio.
+
+#### 9.3.4 `WaveShaperNode` oversampling — all five, mandatory
+
+v1.0 used a `WaveShaperNode` five times and never set `oversample`. The default is `'none'`, which
+means a 3rd-order transfer function on an 11.2 kHz partial folds its harmonics back below Nyquist
+as inharmonic mud — in the steel bank (§4.5), which has the highest partials in the game and is
+also the sound the player hears most often outside the forest.
+
+| Use | § | `oversample` | Cost note |
+|---|---|---|---|
+| Steel modal bank contact | 4.5 | `'4x'` | mandatory — 11.2 kHz partials |
+| `frictionOsc` nonlinearity | 4.12.1 | `'4x'` | up to 5 concurrent |
+| Thunder leading lump | 4.17.2 | `'4x'` | 1 concurrent |
+| Camp radio drive | 5.3.3 | `'4x'` | 1 concurrent, always on |
+| BOWED METAL | 6.2 | `'4x'` | 1 concurrent |
+
+`'4x'` costs roughly 4× the shaper's own work plus two polyphase filter passes. At 48 kHz across at
+most nine concurrent instances this is well under 0.5% of one core — measured, not assumed — and
+it is not optional.
+
+### 9.4 Memory and the decode policy
+
+v1.0 wrote, of VO: "we downsample to 24 kHz mono on load — nothing survives the distance chain
+above 5 kHz anyway, and it quarters our memory." Three problems:
+
+1. **`decodeAudioData` decodes at the context sample rate.** There is no "downsample on load." It
+   requires an explicit `OfflineAudioContext(1, len·24000/rate, 24000)` re-render **per line**,
+   which is real main-thread-adjacent work with a real cost, and v1.0 stated none of it.
+2. **It would have made `voLP` a no-op at close range.** Nyquist for a 24 kHz asset is 12 kHz, and
+   v1.0's own `voLP` specified 16 kHz at 0 m — above Nyquist, filtering nothing.
+3. **There was no memory budget at all**, and no decode-on-demand policy.
+
+**The decision: no downsampling.** The memory problem is real but is better solved by eviction than
+by re-rendering, and re-rendering costs latency at exactly the moment a line is needed.
+
+**The arithmetic.** `STORY.md` §6: 90 scripted lines, averaging ≈ 3.5 s. Plus `CHATTER_BED`: 6
+speakers × 6 takes × ≈ 6.5 s = 234 s.
+
+```
+scripted:    90 × 3.5 s               = 315 s
+chatter:     36 × 6.5 s               = 234 s
+total:       549 s × 44100 × 4 bytes  ≈ 96.8 MB decoded, mono float32
+```
+
+**Too much to hold.** Per-night working set is far smaller:
+
+```
+a night uses ≈ 28 scripted lines + 12 chatter takes
+  = 98 s + 78 s = 176 s × 44100 × 4  ≈ 31 MB
+```
+
+**The policy:**
+
+| Rule | Value |
+|---|---|
+| Decoded-audio LRU cap | **40 MB** |
+| Prefetch | on `night:begin`, decode the night's line set (gated by §7.4.3's `night` / `flag` columns), sequentially, off the critical path |
+| Evict | on `night:complete` / `night:failed`, drop everything not in the next night's set |
+| Decode failure | that line's id is marked unavailable; `VoiceBank.available` stays `true`; the `ConversationDirector` skips it silently |
+| Compressed source | ≈ 8.6 MB of MP3 for the whole bank at 128 kbps — kept in memory, cheap, never evicted |
+
+**Baked SFX buffers:** ≈ 2.7 MB (§4.0.2), permanent.
+**IR buffers:** four IRs, ≈ 0.55–2.40 s at 48 kHz stereo ≈ 2.3 MB total, permanent.
+**Noise buffers:** three × 4.0 s stereo ≈ 3.9 MB, permanent.
+**Total permanent audio memory: ≈ 8.9 MB.** Peak with a full VO working set: **≈ 49 MB.**
+
+**The `low`-memory path**, offered and costed rather than hand-waved: if a target platform cannot
+hold 40 MB, re-render each line to 24 kHz mono in an `OfflineAudioContext` at prefetch time
+(≈ 4–9 ms per line, 40 lines ≈ 0.2–0.4 s spread across `night:begin`'s briefing phase, which does
+not run the clock per `GAME_DESIGN.md` §1.1). Memory falls to ≈ 17 MB. **In this path `voLP` must
+be capped at 11 kHz**, because 12 kHz is Nyquist and a 15 kHz filter would be a no-op. That cap is
+the reason the default path does not downsample.
+
+### 9.5 The latency budget
+
+§1.1 promises legibility "in under 250 ms." That is a claim about the whole chain, and v1.0 never
+enumerated it.
+
+| Term | Typical | Worst realistic |
+|---|---|---|
+| Game logic → `bus.emit` (same frame) | 0 ms | 2 ms |
+| One frame at 60 fps | 17 ms | 17 ms |
+| Mandated scheduling offset (§9.2 rule 5) | 20 ms | 20 ms |
+| `ctx.baseLatency` | 5 ms | 12 ms |
+| `ctx.outputLatency` | 20 ms | **120 ms** (Bluetooth) |
+| **Total** | **62 ms** | **171 ms** |
+
+Both inside 250 ms, but the Bluetooth case has only 79 ms of margin.
+
+**Mitigations, specified:**
+
+- `new AudioContext({ latencyHint: 'interactive' })` at construction. Never `'playback'`.
+- If `ctx.outputLatency > 0.09`, drop the scheduling offset from 20 ms to **8 ms** and
+  `Log.debug()` once. Worst case falls to 159 ms.
+- `ctx.outputLatency` is not implemented everywhere (§9.6). When absent, estimate as
+  `baseLatency · 2 + 0.030` and do not apply the mitigation — an unknown latency is assumed
+  typical rather than assumed bad.
+- **The tell** (§6.4) is the one cue whose lead time is specified in absolute terms (1.2 s). It
+  must be scheduled against `ctx.currentTime + totalLatency`, not against a frame counter, or its
+  1.2 s becomes 1.03 s on a Bluetooth headset and the player is seen while still reacting.
+
+### 9.6 Browser support and output policy
+
+Feature-detected at init, never version-sniffed. Every row has a specified fallback.
+
+| Feature | If missing |
+|---|---|
+| `AudioContext` at all | every `AudioEngine` method becomes a no-op stub; the game runs; nothing throws; `Log.debug()` once |
+| `AudioWorklet` | THE STRING falls back to the modal bank (§6.2); detect once, never branch per note |
+| `cancelAndHoldAtTime` | emulate per §9.2 rule 4 |
+| `ctx.outputLatency` | estimate `baseLatency·2 + 0.030` (§9.5) |
+| `StereoPannerNode` | the bleed path (§3.2.1) falls back to a `PannerNode` in `equalpower` at a fixed ±0.35 x-offset — worse, but not localized to the source |
+| `PannerNode.panningModel = 'HRTF'` | force `equalpower` on all tiers; §3.1.3's front/back cue is unaffected, which is exactly why it exists |
+| `OfflineAudioContext` | skip the bake; all BAKED families run LIVE; force `settings.quality` no higher than `medium` and log once |
+| `decodeAudioData` promise form | use the callback form |
+
+**Autoplay.** The context is created `suspended`. **The title screen is silent and says so by being
+silent** (§4.28.5). `resume()` on the first `pointerdown` anywhere. If `ctx.state === 'interrupted'`
+(iOS), poll and resume on `visibilitychange`.
+
+**Headphones vs speakers** (`settings.audioOutput`, §0.5):
+
+| Setting | Behaviour |
+|---|---|
+| `'headphones'` (default under `'auto'`) | HRTF on `high`/`ultra`, full §3.1.3 cue, stereo width 1.0 |
+| `'speakers'` | force `equalpower` on **all** tiers; stereo width × 0.72 on `sfxWorld` (crosstalk already widens the perceived image); §3.1.3's rear shelf deepened from −5.5 to **−7.0 dB** to compensate for the loss of any residual HRTF front/back information; the `body` bus unchanged |
+
+Stated plainly so §1.1 is honest: on speakers, azimuth accuracy degrades to roughly ±30° in the
+frontal hemisphere. **Front/back remains unambiguous, because the cue that provides it is a filter,
+not a spatializer.** That is the design's whole insurance policy against playback conditions we do
+not control.
+
+### 9.7 Graceful degradation and failure modes
+
+- **VO missing** (`public/audio/vo/` empty, or fetch fails, or manifest absent):
+  `VoiceBank.available = false`; all `audio:vo` become no-ops; **`ui:subtitle` for speech is never
+  emitted, but every non-verbal caption in §7.5 still is** — a deaf player and a VO-less build must
+  both remain playable, and those are independent axes.
+
+  The `ConversationDirector` instead schedules **non-verbal camper presence**: footsteps, a zipper
+  (§4.19), a flashlight click (§4.20), a cough (a 180 ms filtered-noise burst pair), and a laugh
+  (a 4–7 element `grainTrain` of bandpassed noise bursts at a falling rate). It still emits
+  `noise:emit { kind:'voice' }` (§4.28.3). **The stealth game loses nothing.** Ship this path as
+  the default assumption and play it weekly.
+- **`dispose()`** must `disconnect()` every node, `stop()` every source, clear every scheduled
+  timer and `setTimeout`, null every `AudioBuffer` (baked, IR, noise, and decoded VO), and
+  `close()` the context. Verify with `renderer.info.memory` unchanged and no lingering
+  `AudioContext` in devtools.
+- **Every consumer null-checks:** `ctx.systems.get('Audio')?.play?.(...)`. Audio registers late
+  (after `Weather` and `Forest`, per `ARCHITECTURE.md` §3), so anything running in `init()` must
+  assume it is not there yet.
+- **No `console.log`.** `Log.debug()` only, and each degradation path logs **once per session**,
+  not per occurrence.
+
+### 9.8 Public API
+
+```js
+// src/audio/AudioEngine.js
+audio.play(id, { position?, volume?, rate?, priority?, bus? }) -> handle | null
+audio.stop(handle, fadeMs = 60)
+audio.bus(name)                  // 'master'|'sfxWorld'|'sfxUI'|'ambience'|'music'|'vo'|'body'
+audio.duck(busName, dB, attackMs, holdMs, releaseMs)
+audio.setSpace(spaceId, weight)  // manual reverb override; omit to use the probe grid
+audio.now()                      // AudioContext.currentTime, for schedulers
+audio.stats                      // { nodeChurn, dropped, underruns, voicesActive, decodedMB }
+
+// src/audio/ProceduralSFX.js
+sfx.register(id, factoryFn)      // factoryFn(destNode, params) -> { stop(fadeMs) }
+sfx.has(id) -> bool              // used by the startup assertion, §10.2
+sfx.modal(exciter, modes, dest)
+sfx.noise(type)                  // 'white'|'pink'|'brown' -> pooled AudioBufferSourceNode
+sfx.grainTrain(opts)
+sfx.frictionOsc(params)
+
+// src/audio/Music.js
+music.setDread(x)                // 0..1; asymmetric smoothing is internal
+music.tell({ leadMs = 1200 })    // §6.4 — replaces v1.0's music.stinger('staple', …)
+music.collapse()
+
+// src/audio/VoiceBank.js
+voice.available                  // bool
+voice.say(lineId, { position, speaker }) -> handle | null
+voice.conversation(topicId, speakers[], position)
+voice.resolveGlob(pattern)       // 'vo_hm_*' -> a concrete STORY.md line id, or null
+```
+
+**`audio.setMask()` is removed.** v1.0 exposed it for the `mask-on` beat. The mask is not
+toggleable (§2.5); its single transition is internal to `ending_c`.
+
+Everything else in the game talks to audio through the bus (`audio:sfx`, `audio:vo`, `build:creak`,
+`player:footstep`, `noise:emit`, `weather:change`, `story:beat`, `night:*`, `tool:*`).
+**Do not import `AudioEngine` into gameplay code. Emit an event.**
+
+---
+
+## 10. Appendix A — The SFX id registry
+
+v1.0 used four incompatible namespaces across three documents and enumerated none of them:
+
+- **v1.0's own §4:** `creak.t1..t4`, `wood.split`, `hammer.wood`, `step.<surface>`
+- **`GAME_DESIGN.md`:** `creak_tick`, `creak_groan`, `join_seat`, `join_split`, `hardware_tick`,
+  `hardware_chime`, `crate_settle`, `vo_curious_*`, `vo_hm_*`
+- **`STORY.md`:** `MRG_IDLE_01`, `BEV_LATE_04`, …
+- **v1.0 §9.5:** `audio.play(id, …)` with no enumerated ids anywhere in 1,310 lines.
+
+Every mismatched id is a **silent no-op at runtime** and none of them surfaces in testing. This
+appendix is the complete registry.
+
+### 10.1 The registry
+
+**Ids marked ⚑ come from `GAME_DESIGN.md` and must not be renamed by the audio agent.**
+
+| id | Emitted by | Recipe | LIVE/BAKED | Bus | Prio | Family cap | Accompanying `noise:emit` |
+|---|---|---|---|---|---|---|---|
+| `crate_settle` ⚑ | NightManager (N1 t=0) | §4.28.5 | LIVE | sfxWorld | 3 | 1 | — |
+| `step_needles` | Player | §4.1 | hybrid | sfxWorld | 3 | 6 | `footstep` |
+| `step_mud` | Player | §4.1 | hybrid | sfxWorld | 3 | 6 | `footstep` (×0.60) |
+| `step_grass` | Player | §4.1 | hybrid | sfxWorld | 3 | 6 | `footstep` (×1.10) |
+| `step_gravel` | Player | §4.1 | hybrid | sfxWorld | 3 | 6 | `footstep` (×1.70) |
+| `step_wood` | Player | §4.1 | hybrid | sfxWorld | 3 | 6 | `footstep` (×1.25) |
+| `step_tin` | Player | §4.1 | hybrid | sfxWorld | 3 | 6 | `footstep` (×2.40) |
+| `brush_foliage` | Physics | §4.21.2 | LIVE | sfxWorld | 0 | 3 | `brush` |
+| `twig_snap` | Physics | §4.21.1 | LIVE | sfxWorld | 2 | 3 | `brush` |
+| `lantern_hiss` | Flashlight | §4.2 | LIVE (loop) | sfxWorld | 1 | 1 | — |
+| `lantern_squeak` | Flashlight | §4.2 | LIVE | sfxWorld | 1 | 2 | — (rides the footstep) |
+| `lantern_rattle` | Flashlight | §4.2 | BAKED | sfxWorld | 0 | 5 | — |
+| `lantern_click` | Flashlight | §4.20 | LIVE | sfxWorld | 2 | 1 | `brush` r=5 (C4) |
+| `lumber_hoist` | BuildSystem | §4.3 | LIVE | sfxWorld | 2 | 1 | — |
+| `drag_lumber` | BuildSystem | §4.3 | LIVE (loop) | sfxWorld | 2 | 1 | `drag` |
+| `drop_lumber` | BuildSystem | §4.3 | LIVE | sfxWorld | 2 | 2 | `drop` B/C/D |
+| `drop_hardware` | BuildSystem | §4.6 | LIVE+BAKED | sfxWorld | 2 | 3 | `drop` B |
+| `beam_knock` | Physics | §4.3 | LIVE | sfxWorld | 2 | 2 | — |
+| `carry_bump` | Physics | §4.3 | LIVE | sfxWorld | 2 | 2 | `impact` |
+| `hammer_tap` | BuildSystem | §4.4, §4.7 | LIVE | sfxWorld | 3 | 2 | `hammer` |
+| `hammer_steel` | BuildSystem | §4.5 | LIVE | sfxWorld | 3 | 2 | `hammer` |
+| `join_seat` ⚑ | BuildSystem | §4.9 | LIVE | sfxWorld | 3 | 2 | — |
+| `join_grind` | AudioEngine | §4.9.1 | LIVE | sfxWorld | 3 | 2 | — |
+| `join_dimple` | BuildSystem | §4.7.3 | LIVE | sfxWorld | 3 | 1 | — |
+| `join_split` ⚑ | BuildSystem | §4.8 | LIVE | sfxWorld | 3 | 1 | `impact` |
+| `join_remove` | BuildSystem | §4.10 | LIVE | sfxWorld | 2 | 1 | `wrench` |
+| `pry_force` | BuildSystem | §4.11 | LIVE | sfxWorld | 3 | 1 | `impact` (at 1400 ms) |
+| `creak_tick` ⚑ | BuildSystem | §4.12.3 (tiers 1–2) | LIVE | sfxWorld | 3 | 3 / **5 cascade** | `creak` |
+| `creak_groan` ⚑ | BuildSystem | §4.12.3 (tiers 3–4) | LIVE | sfxWorld | 3 | 3 / **5 cascade** | `creak` |
+| `creak_dead_knock` | AudioEngine | §4.12.4 | LIVE | sfxWorld | 3 | 1 | — |
+| `saw_stroke` | BuildSystem | §4.13 | LIVE+BAKED | sfxWorld | 2 | 1 | `hammer` (interim, **C1**) |
+| `shim_set` | BuildSystem | §4.24 | LIVE | sfxWorld | 2 | 1 | — |
+| `tallow_apply` | BuildSystem | §4.24 | LIVE | sfxWorld | 2 | 1 | — |
+| `felt_press` | BuildSystem | §4.24 | LIVE | sfxWorld | 2 | 1 | — |
+| `dig_stroke` | BuildSystem | §4.24 | LIVE+BAKED | sfxWorld | 2 | 1 | `brush` |
+| `throw_release` | Player | §4.22 | LIVE | **body** | 2 | 1 | — |
+| `throw_impact` | Player | §4.22 | LIVE+BAKED | sfxWorld | 2 | 2 | `throw` (at impact pt) |
+| `ladder_rung` | Player | §4.23 | LIVE | sfxWorld | 2 | 3 | `footstep` |
+| `rope_haul` | BuildSystem | §4.23 | LIVE | sfxWorld | 2 | 1 | — |
+| `rope_creak` | BuildSystem | §4.23 | LIVE | sfxWorld | 1 | 1 | — |
+| `canoe_groan` | BuildSystem | §4.23 | LIVE | sfxWorld | 1 | 1 | — |
+| `hardware_tick` ⚑ | AudioEngine (t+90 s) | §4.28.1 | LIVE | sfxWorld | 1 | 1 | — |
+| `hardware_chime` ⚑ | BuildSystem (`tool:found`) | §4.25.2 | LIVE | **sfxUI** | 3 | 1 | — |
+| `stage_chime` | AudioEngine (S6) | §4.25.3 | LIVE | **sfxUI** | 3 | 1 | — |
+| `manual_tick` | Music / Menu / AudioEngine | §4.25.1 | LIVE | **sfxUI** | 3 | 1 | — |
+| `manual_page` | BlueprintUI | §4.28.5 | LIVE | **sfxUI** | 3 | 1 | — |
+| `manual_stroke` | NightManager (`ending_a`) | §4.28.4 | LIVE | **sfxUI** | 3 | 1 | — |
+| `grab_sequence` | Campers | §4.26.1–3 | LIVE | sfxWorld | 3 | 1 | `brush` ×n, `drop` C |
+| `drag_body` | Player | §4.26.4 | LIVE (loop) | sfxWorld | 2 | 1 | `drag` |
+| `body_water` | Player | §4.26.5 | LIVE+BAKED | sfxWorld | 2 | 1 | `drop` C |
+| `camper_whistle` | Campers | §4.28.2 | LIVE | sfxWorld | 3 | 2 | `whistle` |
+| `camper_zipper` | Campers | §4.19 | BAKED | sfxWorld | 2 | 2 | `brush` |
+| `camper_torch_click` | Campers | §4.20 | LIVE | sfxWorld | 2 | 3 | — |
+| `thunder_mid` | Weather | §4.17.2 | LIVE | ambience | 3 | 1 | `thunder` |
+| `thunder_far` | Weather | §4.17.2 | LIVE | ambience | 3 | 1 | `thunder` |
+| `tent_flap` | Weather | §4.14 | LIVE | ambience | 1 | 3 | — |
+| `bed_wind` | AmbienceDirector | §4.16 | LIVE (persistent) | ambience | 0 | 1 | — |
+| `bed_room_tone` | AmbienceDirector | §5.1 | LIVE (persistent) | ambience | 0 | 1 | — |
+| `bed_distance` | AmbienceDirector | §5.1 | LIVE (persistent) | ambience | 0 | 1 | — |
+| `pine_whistle` | AmbienceDirector | §4.16.1 | LIVE | ambience | 1 | 1 | — |
+| `rain_leaves` / `_tin` / `_water` | Weather | §4.15 | LIVE bed + BAKED grains | ambience | 0 | 1 each | — |
+| `cricket_chorus` | AmbienceDirector | §5.2 | BAKED | ambience | 0 | 4 panners | — |
+| `cricket_bed` | AmbienceDirector | §5.2.2 | LIVE (persistent) | ambience | 0 | 1 | — |
+| `loon_wail` / `loon_tremolo` | AmbienceDirector | §5.3.1 | LIVE | ambience | 1 | 1 | — |
+| `owl_hoots` | AmbienceDirector | §5.3.2 | LIVE | ambience | 1 | 1 | — |
+| `campfire` | AmbienceDirector | §4.18 | LIVE bed + BAKED grains | ambience | 1 | 1 | — |
+| `camp_radio` | Music | §5.3.3 | LIVE | ambience | 1 | 1 | — |
+| `dawn_sparrow` | AmbienceDirector | §8 S11 | LIVE | ambience | 1 | 1 | — |
+| `mask_plate` | AudioEngine | §2.5.2 | LIVE | **body** | 2 | 2 | — |
+| `breath` | AudioEngine | §4.27.1 | LIVE (persistent) | **body** | 3 | 1 | `brush` when HEAVY (**C4**) |
+| `breath_catch` | AudioEngine (`n7_final`) | §4.27.3 | LIVE | **body** | 3 | 1 | — |
+| `heartbeat` | AudioEngine | §4.27.2 | LIVE | **body** | 3 | 1 | — |
+| `hand_wipe` | BlueprintUI | §4.27.4 | LIVE | **body** | 3 | 1 | — |
+| `tool_roll_tick` | Player | §4.27.5 | LIVE | **body** | 0 | 1 | — |
+| `tool_roll_open` | BuildSystem | §4.27.5 | LIVE | **body** | 3 | 1 | — |
+| `ending_bus` | NightManager (`ending_c`) | §4.28.4 | LIVE | sfxWorld | 3 | 1 | — |
+
+**Two annotations that are part of the contract, not commentary:**
+
+- `join_grind` — `PAIRS_WITH: join_seat`. It never plays alone.
+- **Wrong-slot placement plays `join_seat` and nothing else.** `MUST_BE_IDENTICAL_TO: join_seat` —
+  same recipe, same level, same send, no variant, no seed change. See §4.9. Any engineer who adds
+  a differentiating detail here removes grammars G4 and G5 from the game.
+
+### 10.2 The startup assertion
+
+```js
+// AudioEngine.init(), after all factories are registered:
+const emitted = REGISTRY_IDS;                 // this appendix, as a frozen array
+const missing = emitted.filter(id => !sfx.has(id));
+if (missing.length) Log.debug(`[audio] unregistered ids: ${missing.join(', ')}`);
+
+// And at runtime, on the bus, once per unknown id per session:
+bus.on('audio:sfx', ({ id }) => {
+  if (!sfx.has(id) && !warned.has(id)) { warned.add(id); Log.debug(`[audio] unknown sfx id: ${id}`); }
+});
+```
+
+Same pattern for `audio:vo`: any id that is neither a `STORY.md` line id nor a resolvable glob
+(§7.4.3) logs once. **The failure mode this replaces is total silence with no error**, which is
+undetectable in playtest and is exactly what v1.0 would have shipped.
+
+---
+
+## 11. Appendix B — The verification harness
+
+Three tools in `tools/`, all run in CI, all failing the build rather than warning.
+
+### 11.1 `tools/loudness-check.mjs` — BS.1770-4
+
+**What it does.** Renders a scripted 10-minute night headlessly through `AudioEngine` into an
+`OfflineAudioContext`, then measures.
+
+**The K-weighting pre-filter**, two cascaded biquads. **These coefficients are for 48 kHz only**
+and must be re-derived from the standard's analogue prototypes at any other rate — a rate-specific
+constant in a document that is otherwise rate-independent, flagged here because getting it wrong
+produces a plausible-looking number that is quietly wrong:
+
+```js
+// Stage 1 — high-shelf, +4 dB @ ~1681 Hz, fs = 48000
+{ b: [ 1.53512485958697, -2.69169618940638,  1.19839281085285],
+  a: [ 1.0,              -1.69065929318241,  0.73248077421585] }
+// Stage 2 — RLB high-pass, fs = 48000
+{ b: [ 1.0,              -2.0,               1.0             ],
+  a: [ 1.0,              -1.99004745483398,  0.99007225036621] }
+```
+
+**The measurement.** 400 ms blocks, 75% overlap (100 ms hop). Per block,
+`z_i = mean(y²)` per channel; `L = -0.691 + 10·log10(Σ G_i·z_i)` with `G_L = G_R = 1.0` for stereo.
+Absolute gate at **−70 LUFS**; relative gate at **−10 LU** below the absolute-gated mean; integrated
+loudness is the mean of the surviving blocks.
+
+**True peak** via 4× oversampling (a 4-phase polyphase FIR) and taking the maximum absolute sample.
+
+| Assertion | Threshold |
+|---|---|
+| Integrated loudness | **−22 LUFS ± 1.5 LU** |
+| True peak | **≤ −1.5 dBTP** |
+| Momentary max, non-thunder | ≤ −9 LUFS(M) |
+| §4.17.3 masking invariant | thunder's 500 Hz–4 kHz band loudness ≥ that of a `hammer` tap at 12 m, for the whole interval where `maskLevel() > 0.5` |
+| Silence rules | S1 = 2.2 s ± 30 ms below −70 dBFS; S6 = 1.4 s ± 30 ms; S7 = 900 ms of **true digital zero** |
+
+**Scenes** (all seeded, all deterministic per `ARCHITECTURE.md` §6):
+`quiet_build`, `storm_night5`, `cascade`, `chase`, `night1_script` (the `GAME_DESIGN.md` §11
+minute-by-minute, which doubles as a regression test for the tutorial's audio beats),
+`ending_c`.
+
+### 11.2 `tools/audio-registry-check.mjs`
+
+1. Greps `src/` for every `audio:sfx` id literal and every `audio.play(...)` call site; asserts each
+   resolves to a §10.1 row. **Fails on any unknown id.**
+2. Greps for every `audio:vo` id; asserts each is a `STORY.md` §6 line id or a registered glob.
+3. **Re-derives §1.3 and §4.12.2 from `GAME_DESIGN.md`** by parsing its §4.2 and §3.1 tables, and
+   fails on any drift in `kind`, `radius`, or `intensity`. This is the mechanism that makes §0.1's
+   precedence ladder real rather than aspirational, and it is the single check that would have
+   caught the largest class of v1.0's defects.
+4. Asserts every §10.1 row's `noise:emit` column names only canonical kinds — **except** rows
+   annotated with an open conflict id (`C1`, `C4`), which are allowed and reported as a reminder.
+
+### 11.3 `tools/node-churn-check.mjs`
+
+Headless 60 s worst-case scene: `quality: 'ultra'`, storm with six strikes, a five-creak cascade,
+five campers with active VO, the player sprinting on gravel while carrying class D. Asserts:
+
+| Metric | Budget |
+|---|---|
+| `stats.nodeChurn` peak (1 s window) | ≤ 120 |
+| `stats.dropped` | 0 for any voice of priority ≥ 2 |
+| `stats.underruns` | 0 |
+| Peak concurrent voices | ≤ 96 |
+| Peak 3D panners | ≤ 56 |
+| `AudioEngine.update()` mean / p99 | ≤ 0.35 ms / ≤ 0.9 ms |
+| Chorus duty cycle (§5.4.2) | ≥ 70% of any rolling 60 s window |
+
+### 11.4 What is verified by ear, and by whom
+
+Not everything is a number. These belong to playtest and are listed so they are not assumed:
+
+- **Habituation** (§1.4): at 3:20 of the Night-1 script, do most players crouch without being told?
+- **The flinch** (`GAME_DESIGN.md` §11 t=4:39): at the first creak, does the player physically
+  react and immediately understand that a badly-built cabin tells on them? The design document
+  says the sequence must be retuned until they do.
+- **The band tap** (§4.7.2): can a player who has never seen the bar find the clean tap by ear, at
+  25 m, in rain, on laptop speakers?
+- **On vs off** (§4.20): is the 6% flashlight-click difference legible at 25 m through rain?
+- **The wipe** (§4.27.4): on Night Four, does anyone notice? Does anyone say *why*?
+- **The chime** (§4.25.3): by Night Six, does a playtester say "the chime sounds off tonight"?
+  Can they say why? The second answer should be no.
+
+---
+
+## 12. The One-Paragraph Version
+
+The forest is warm, dense, and endlessly detailed, and it is built entirely so that we can switch
+it off. The player is a very large man breathing inside a cracked porcelain plate he cut from his
+mother's kitchen twenty-two years ago, and the rain drums on it, and he never says a word. He
+carries a hissing lantern that squeaks when he hurries and rattles when he steps hard, and a tool
+roll that has been tied so carefully it makes no sound at all. Wood tells him whether he did it
+right — a seated join thumps, a rotated one grinds for four-tenths of a second under the thump and
+most players will miss it, a wrong-slot join sounds exactly like a perfect one and will not be
+discovered for another twenty minutes, and a badly wrong one takes two and a half seconds to die in
+front of him. He hammers six times per join and the fourth strike is the only one that does not
+buzz. Somewhere across the lake a loon screams, but only when something has disturbed the water,
+and a radio plays something cheerful four cents sharp of everything else in the game. The crickets
+are a proximity sensor and everybody learns it within ten minutes without being told, and once a
+body is found they try to come back, once, and fail. Three times a night the world stops
+completely: when the night begins, when he finishes a stage and a clean little furniture-commercial
+chime plays in a room that does not exist — and by Night Six that chime is a tritone, forty cents
+flat, drawn by a man who is not as good at it as his mother was — and when someone sees him. He
+wipes his hands on his thighs before he touches the paper, two strokes, unhurried, and on Night
+Four the timing does not change. Nothing in this game ever winks. The manual is the comedian; the
+woods are dead serious; and the silence does most of the work.
+
+
+
 
 

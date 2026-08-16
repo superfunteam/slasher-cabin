@@ -75,7 +75,11 @@ export const TERRAIN_TUNING = {
     { span: 64, skirt: 2.0 },
     { span: 32, skirt: 1.0 },
   ],
-  lodRadii: [112, 54],     // draw-coarse threshold for the 128 m and 64 m levels
+  // Draw-coarse threshold for the 128 m and 64 m levels. Measured, not guessed: a 3000-pose
+  // sweep (tools note — see the headless cull harness) peaks at 37 draw calls at 16:9/72 deg
+  // and 39 at 90 deg / 21:9, against the < 40 terrain budget. Raising these to 112/54 peaks at
+  // 45 and blows it. 1 m triangles still reach 40 m, which is past the fog wall at night.
+  lodRadii: [80, 40],
 
   // Landmarks (world XZ). North is -Z. -Z is forward per ARCHITECTURE.md §2.
   camp: { x: 124, z: -18, rx: 46, rz: 38, grade: 0.012 },

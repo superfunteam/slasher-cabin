@@ -55,6 +55,20 @@
  *
  * Per-instance sway phase and the ±9% per-instance albedo variation are derived from
  * `instanceMatrix` automatically — you get them for free on any InstancedMesh.
+ *
+ * ---------------------------------------------------------------------------------------
+ * THINGS THAT WILL BITE YOU IF YOU DO NOT READ THEM
+ * ---------------------------------------------------------------------------------------
+ *  - AUTHOR GEOMETRY UVS IN METRES. Textures.js bakes every set for a physical tile size and
+ *    we set the uv scale to repeats-per-metre from it. A 2.4 m stud wants uv.y running 0..2.4,
+ *    not 0..1. (Foliage cards are the exception — those map once across their quad.)
+ *  - Tiling is applied IN THE SHADER, never via `texture.repeat`. Textures.js hands out
+ *    shared, render-target-backed textures; nothing here mutates them.
+ *  - Foliage ships with a low `alphaTest` AND `alphaToCoverage` on high/ultra. If
+ *    Postprocessing renders into a multisampled target, call `setAlphaToCoverage(true)` and
+ *    the hard cutout drops away (ART_DIRECTION trap 10).
+ *  - `heightFog` is read when each material is patched, i.e. during init(). Set it before then.
+ *  - Materials are shared. Never call dispose() on one you got from get().
  */
 
 import * as THREE from 'three';

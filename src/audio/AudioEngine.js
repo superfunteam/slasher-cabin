@@ -104,6 +104,9 @@ class Voice {
     this.index = index;
     this.free = true;
     this.gen = 0;
+    this.serial = 0;
+    this.occT = 0;
+    this.pg = null;
     this.id = null;
     this.family = null;
     this.priority = 1;
@@ -173,7 +176,9 @@ class Voice {
 export class AudioEngine {
   constructor(ctx) {
     this.ctx = ctx;
-    this.bus = ctx?.bus ?? null;
+    // The EventBus lives on `events`; `bus(name)` is the audio-bus accessor from
+    // AUDIO_DIRECTION.md §9.5.
+    this.events = ctx?.bus ?? null;
     this.settings = ctx?.settings ?? null;
     this.state = ctx?.state ?? null;
     this.rand = new Rand('audio');
@@ -258,12 +263,18 @@ export class AudioEngine {
       await this.sfx.renderPhase(0, { budgetMs: 6 });
       // Everything else renders in the background across frames — boot never stalls.
       this.sfx.renderPhase(1, { budgetMs: 5 }).then(() => {
-        this._startAmbience();
         Log.debug(`Audio: SFX bank complete (${this.sfx.stats.buffers} buffers, ` +
           `${this.sfx.stats.ms.toFixed(0)} ms).`);
-      }).catch((e) => Log.warn('Audio: background SFX render failed:', e?.message ?? e));
+      }).catch((e) => {
+        Log.warn('Audio: background SFX render failed:', e?.message ?? e);
+      }).finally(() => {
+        // The bed comes up with whatever rendered. A missing layer is a missing layer,
+        // never a missing forest.
+        try { this._startAmbience(); } catch (e) { Log.warn('Audio: ambience failed:', e?.message ?? e); }
+      });
 
-      this._loadImpulseResponses();
+      this._loadImpulseResponses()
+        .catch((e) => Log.warn('Audio: impulse responses failed:', e?.message ?? e));
       this._buildBody();
       this.enabled = true;
       Log.debug(`Audio: context @${this.context.sampleRate} Hz, ${this._maxVoices} voices.`);
@@ -469,11 +480,9 @@ export class AudioEngine {
   }
 
   _buildVoices() {
-    const c = this.context;
     const n = this._maxVoices;
     for (let i = 0; i < n; i++) this._voices.push(new Voice(this, i));
     Log.debug(`Audio: ${n} voice slots, ${this._maxHrtf} HRTF.`);
-    void c;
   }
 
   async _loadImpulseResponses() {
@@ -502,15 +511,18 @@ export class AudioEngine {
   /** The AudioContext's listener, driven from ctx.camera every frame. */
   get listener() { return this.context?.listener ?? null; }
 
-  /** @returns {GainNode|null} the input node of a bus. */
-  busNode(name) {
+  /**
+   * §9.5 — `audio.bus('sfxWorld')`. Returns the input node of a bus so another audio
+   * module (Music, VoiceBank) can connect its own graph into the mix.
+   * @returns {GainNode|null}
+   */
+  bus(name) {
     const key = BUS_ALIAS[name] ?? name;
     const b = this.buses?.[key];
     return b ? b.input ?? b.gain : null;
   }
 
-  /** Doc-facing alias (§9.5): `audio.bus('sfxWorld')`. */
-  bus_(name) { return this.busNode(name); }
+  busNode(name) { return this.bus(name); }
 
   now() { return this.context?.currentTime ?? 0; }
 
@@ -556,19 +568,12 @@ export class AudioEngine {
     const busName = opts.bus ?? (info?.family === 'ui' ? 'sfxUI' : 'sfxWorld');
     const spatial = !!opts.position && busName !== 'sfxUI' && busName !== 'body';
 
-    let gainValue = (opts.volume ?? 1);
+    const gainValue = opts.volume ?? 1;
+    const occT = opts.occlusion ?? 0;
     let distance = 0;
-    let occT = opts.occlusion ?? 0;
-
     if (spatial) {
       this._listenerPosition(_lis);
-      _tmp.copy(opts.position);
-      distance = _tmp.distanceTo(_lis);
-      if (opts.rolloff !== 0) {
-        // The panner applies its own inverse-distance law; only pre-scale when we have
-        // taken that job over (the noise:emit path).
-        gainValue *= 1;
-      }
+      distance = _tmp.copy(opts.position).distanceTo(_lis);
     }
 
     return this._playBuffer(buf, {
@@ -623,15 +628,23 @@ export class AudioEngine {
     p.setTargetAtTime(1, back, Math.max(0.02, releaseMs / 3000));
   }
 
-  /** Manual reverb override. Omit to let the probe grid decide again. */
+  /**
+   * Crossfade to a named reverb space and pin it there. Call with no argument to hand
+   * control back to the probe.
+   */
   reverbZone(name, fadeMs = null) {
     if (!this.context) return;
     if (name == null) { this._spaceLocked = false; return; }
     if (!SPACES.includes(name)) return;
-    this._spaceLocked = fadeMs !== -1;
+    this._spaceLocked = true;
+    this._setSpace(name, fadeMs);
+  }
+
+  _setSpace(name, fadeMs = null) {
     if (name === this._spaceTarget) return;
     const ir = this._irs.get(name);
-    if (!ir) { this._spaceTarget = name; return; }   // not rendered yet; take it next probe
+    // Not rendered yet — leave the target alone so the probe retries in 250 ms.
+    if (!ir) return;
 
     // Architectural transitions are abrupt, environmental ones are gradual (§3.3).
     const arch = name === 'CABIN_SHELL' || name === 'TIN_ROOF'
@@ -870,7 +883,6 @@ export class AudioEngine {
     try { v.panner.disconnect(); } catch { /* not connected */ }
     try { v.out.disconnect(); } catch { /* not connected */ }
     try { v.send.disconnect(); } catch { /* not connected */ }
-    v.panner.connect(v.out);
   }
 
   // --------------------------------------------------------------- param helpers
@@ -958,7 +970,1235 @@ export class AudioEngine {
     }
     return false;
   }
+
+  // =============================================================== events
+
+  _bindEvents() {
+    const b = this.events;
+    if (!b) return;
+    const on = (name, fn) => this._unsubs.push(b.on(name, Log.guard(`audio:${name}`, fn)));
+
+    on('audio:sfx', (e) => this._onSfx(e));
+    on('noise:emit', (e) => this._onNoise(e));
+    on('player:footstep', (e) => this._onFootstep(e));
+    on('player:move', (e) => {
+      this._speed = Number(e?.speed) || 0;
+      this._crouched = !!e?.crouched;
+      this._lanternSqueak(e);
+    });
+    on('player:spotted', (e) => this._onSpotted(e));
+    on('player:hidden', () => this._onHidden());
+
+    on('build:creak', (e) => this._onCreak(e));
+    on('build:place', (e) => this._onPlace(e));
+    on('build:pickup', () => { this._playNear('lumber.hoist', 1.0); this._setBreath('heavy', 4); });
+    on('build:drop', (e) => this._onDrop(e));
+    on('build:remove', () => {
+      // Undoing a mistake should feel like *relief*: dry, close, no reverb send.
+      this._playNear('nail.pull', 1.0, { reverb: 0 });
+    });
+    on('build:stage-complete', () => this._clinicalPause());
+    on('tool:missing', () => this.play('ui.deny', { bus: 'sfxUI' }));
+    on('tool:found', () => this.play('ui.stamp', { bus: 'sfxUI' }));
+
+    on('night:begin', () => this._firstBreathOfTheNight());
+    on('night:complete', () => { this._restoreMix(2200); this._setBreath('calm'); });
+    on('night:failed', () => this._theEnd());
+    on('game:pause', () => this._pauseMix(true));
+    on('game:resume', () => this._pauseMix(false));
+
+    on('weather:change', (e) => this._onWeather(e));
+    on('story:beat', (e) => { if (e?.id === 'mask-on') this._maskOnBeat(); });
+    on('ui:blueprint-open', () => {
+      this.duck('ambience', 9, 180, 100000, 400);
+      this.duck('music', 14, 180, 100000, 400);
+      this.duck('sfxWorld', 6, 180, 100000, 400);
+      this.play('ui.page', { bus: 'sfxUI' });
+    });
+    on('ui:blueprint-close', () => {
+      for (const n of ['ambience', 'music', 'sfxWorld']) this.duck(n, 0, 10, 0, 400);
+      this.play('ui.page', { bus: 'sfxUI', rate: 1.08 });
+    });
+    on('ui:toast', () => this.play('ui.click', { bus: 'sfxUI' }));
+    on('settings:changed', ({ key } = {}) => this._applyVolumes(key));
+
+    // Lightning is not a canonical event; Weather/Sky may or may not emit one. We listen
+    // defensively and never emit it ourselves.
+    const onLightning = (e) => this._onLightning(e);
+    for (const name of ['weather:lightning', 'sky:lightning', 'weather:flash']) on(name, onLightning);
+  }
+
+  _applyVolumes(key) {
+    const s = this.settings;
+    if (!s || !this.buses) return;
+    if (!key || key === '*' || key === 'masterVolume') this.setBusVolume('master', s.get('masterVolume'));
+    if (!key || key === '*' || key === 'sfxVolume') {
+      const v = s.get('sfxVolume');
+      this.setBusVolume('sfxWorld', v);
+      this.setBusVolume('sfxUI', v);
+      this.setBusVolume('body', v);
+      this.setBusVolume('ambience', v * 0.9);
+    }
+    if (!key || key === '*' || key === 'musicVolume') this.setBusVolume('music', s.get('musicVolume'));
+    if (!key || key === '*' || key === 'voiceVolume') this.setBusVolume('vo', s.get('voiceVolume'));
+  }
+
+  // --------------------------------------------------------------- sfx / noise
+
+  _onSfx(e) {
+    if (!e?.id) return;
+    this.play(e.id, {
+      position: e.position ?? null,
+      volume: e.volume ?? 1,
+      rate: e.rate ?? 1,
+      occlusion: e.position ? this._occlusionThickness(e.position) : 0,
+    });
+  }
+
+  /**
+   * §1.3 — the contract. A noise:emit is a gameplay event AND a sound, and the two must
+   * agree. We ask NoiseSystem for the exact audibility it gave the AI and mix to it,
+   * deriving the occlusion filter from the same number so a sound behind a ridge is
+   * muffled, not merely quieter.
+   */
+  _onNoise(e) {
+    if (!this.enabled || !e || !e.position) return;
+    const kind = e.kind ?? 'generic';
+    if (kind === 'creak') return;                    // arrives via build:creak with its tier
+
+    let id = NOISE_SFX[kind];
+    if (id === null) return;                         // deliberately silent gameplay noise
+    if (id === undefined) id = kind;                 // caller used an sfx id as the kind
+    if (id === 'step') id = this._stepId(e.surface);
+    const resolved = resolveId(id);
+    if (!resolved) return;
+
+    this._listenerPosition(_lis);
+    _tmp.copy(e.position);
+    const dist = _tmp.distanceTo(_lis);
+
+    // The player's own footfall already sounded through player:footstep.
+    if (this._playedRecently(resolved, e.position, 0.14, 2.5)) return;
+    if (dist < 1.6 && resolved.startsWith('step.')) return;
+
+    const mix = this._noiseMix(e, dist);
+    if (mix.rel < 1e-3) return;
+
+    const info = recipeInfo(resolved);
+    // Correct the asset's calibrated level to this event's exact intensity, so perceived
+    // loudness is monotonic in `intensity` for every kind.
+    const raw = Number(e.intensity);
+    const intensity = Number.isFinite(raw) ? raw : 0.4;
+    const adj = info?.peakDb != null
+      ? dbToGain(clamp(noiseDbFor(intensity) - info.peakDb, -18, 12))
+      : 1;
+
+    this._playBuffer(this._pick(resolved), {
+      id: resolved,
+      family: info?.family ?? 'sfx',
+      priority: info?.priority ?? 2,
+      bus: 'sfxWorld',
+      position: e.position,
+      gain: mix.rel * adj,
+      rate: kind === 'footstep-crouch' ? 0.85 : kind === 'footstep-run' ? 1.12 : 1,
+      detune: this.rand.range(-140, 140),
+      occlusion: mix.T,
+      distance: dist,
+      // We have taken over the distance law; the panner is direction only.
+      rolloff: ROLLOFF.flat,
+      reverb: 0.22,
+    });
+  }
+
+  _pick(id) {
+    return this.sfx ? this.sfx.get(id, this.rand) : null;
+  }
+
+  /** Distance + occlusion, expressed as attenuation relative to 1 m unoccluded. */
+  _noiseMix(e, dist) {
+    const distGain = REF_DISTANCE / (REF_DISTANCE + ROLLOFF.world * Math.max(0, dist - REF_DISTANCE));
+    let rel = null;
+
+    const ns = this.ctx?.systems?.get?.('NoiseSystem');
+    if (ns && typeof ns.audibilityAt === 'function') {
+      let a = null;
+      try { a = ns.audibilityAt(_lis, e); } catch { a = null; }
+      if (a && typeof a === 'object') a = a.audibility ?? a.gain ?? a.value ?? a.level ?? null;
+      if (Number.isFinite(a) && a >= 0) {
+        const peak = clamp(Number(e.intensity) || 1, 1e-3, 1);
+        // NoiseSystem may or may not fold `intensity` into its answer; normalize either way.
+        rel = a <= peak * 1.02 ? a / peak : Math.min(1, a);
+      }
+    }
+
+    let T;
+    if (rel === null) {
+      T = this._occlusionThickness(e.position, dist);
+      rel = distGain * dbToGain(clamp(-3.2 * T, -34, 0));
+    } else {
+      const ratio = clamp(rel / Math.max(distGain, 1e-5), 1e-4, 1);
+      T = clamp(-20 * Math.log10(ratio) / 3.2, 0, 12);
+    }
+    _mix.rel = clamp01(rel);
+    _mix.T = T;
+    return _mix;
+  }
+
+  /**
+   * Effective occluder thickness in metres along listener→source. Prefers NoiseSystem's own
+   * number (so the AI and the mix cannot disagree), then a cheap analytic estimate from the
+   * forest density grid. We never spend more than the 3 raycasts §3.2 allows.
+   */
+  _occlusionThickness(position, dist = -1) {
+    if (!position) return 0;
+    this._listenerPosition(_lis);
+    const d = dist >= 0 ? dist : _tmp.copy(position).distanceTo(_lis);
+    const ns = this.ctx?.systems?.get?.('NoiseSystem');
+    for (const name of ['occlusionThickness', 'occlusionBetween', 'occlusion']) {
+      const fn = ns?.[name];
+      if (typeof fn === 'function') {
+        let t = null;
+        try { t = fn.call(ns, _lis, position); } catch { t = null; }
+        if (t && typeof t === 'object') t = t.thickness ?? t.T ?? t.value ?? null;
+        if (Number.isFinite(t)) return clamp(t, 0, 14);
+      }
+    }
+    // Analytic: canopy contributes 0.10 per metre of path inside the volume (§3.2).
+    const forest = this.ctx?.systems?.get?.('Forest');
+    const dens = forest && typeof forest.densityAt === 'function'
+      ? Number(forest.densityAt(position.x, position.z)) : NaN;
+    if (Number.isFinite(dens)) return clamp(dens * Math.min(d, 60) * 0.02, 0, 6);
+    return clamp(Math.min(d, 60) * 0.006, 0, 1.2);
+  }
+
+  _stepId(surface) {
+    const key = String(surface ?? 'pine').toLowerCase();
+    return SURFACE_SFX[key] ?? 'step.pine';
+  }
+
+  _onFootstep(e) {
+    if (!this.enabled) return;
+    const id = this._stepId(e?.surface);
+    const raw = Number(e?.loud);
+    const loud = clamp01(Number.isFinite(raw) ? raw : 0.5);
+    // −10 dB crouching through +8 dB running, around the walk-calibrated asset.
+    const gainDb = -10 + 18 * loud;
+    this._foot = 1 - (this._foot ?? 0);
+    const v = this.play(id, {
+      volume: dbToGain(gainDb),
+      rate: 0.85 + 0.3 * loud,
+      // Left/right alternate ±1.5 semitones so the gait is organic without limping.
+      detune: (this._foot ? 150 : -150) + this.rand.range(-70, 70),
+      position: e?.position ?? null,
+      rolloff: ROLLOFF.flat,
+      refDistance: 1.0,
+      reverb: 0.16,
+      priority: 3,
+    });
+    this._remember(resolveId(id), e?.position);
+
+    // The lantern is the player's light and their liability.
+    if (loud > 0.22 && this.sfx?.has('glass.ping')) {
+      const n = Math.round(2 + 3 * loud) + (id === 'step.tin' || id === 'step.gravel' ? 1 : 0);
+      const base = this.now() + 0.02;
+      for (let i = 0; i < n; i++) {
+        this.play('glass.ping', {
+          volume: dbToGain(-30 + 10 * loud + (id === 'step.tin' ? 4 : 0)),
+          when: base + this.rand.range(0, 0.035),
+          rate: this.rand.range(0.94, 1.07),
+          bus: 'body',
+          priority: 0,
+          family: 'lantern',
+        });
+      }
+    }
+    return v;
+  }
+
+  /**
+   * §4.2 — the lantern's bail. The faster you move, the more you squeak; crouch-walking
+   * never does. This is the game's stamina-vs-stealth dial and it is entirely audible.
+   */
+  _lanternSqueak(e) {
+    if (!this.enabled || this._crouched || !this._lanternOn) return;
+    const speed = this._speed;
+    if (speed < 1.9) return;
+    const now = this.now();
+    if (now < (this._nextSqueak ?? 0)) return;
+    this._nextSqueak = now + clamp(1.25 - 0.2 * speed, 0.3, 1.2) * this.rand.range(0.8, 1.3);
+    this.play('lantern.squeak', {
+      volume: dbToGain(clamp(-4 + 2 * speed, -6, 2)),
+      rate: 1 + 0.14 * speed,
+      priority: 1,
+      family: 'lantern',
+      reverb: 0.14,
+    });
+    void e;
+  }
+
+  _playNear(id, volume = 1, opts = {}) {
+    this._listenerPosition(_lis);
+    _v.copy(_lis);
+    const cam = this.ctx?.camera;
+    if (cam) { cam.getWorldDirection(_fwd); _v.addScaledVector(_fwd, 1.1).setY(_lis.y - 0.3); }
+    return this.play(id, { position: _v, rolloff: ROLLOFF.flat, refDistance: 1.0, volume, ...opts });
+  }
+
+  // --------------------------------------------------------------- build
+
+  _onCreak(e) {
+    if (!this.enabled || !this.sfx) return;
+    const severity = clamp01(Number(e?.severity) || 0);
+    const tier = creakTier(severity);
+    const size = Number(e?.size) || (2.4 + (tier - 1) * 0.6);
+    const buf = this.sfx.creak(severity, size, this.rand);
+    if (!buf) return;
+
+    const pos = e?.position ?? null;
+    let dist = 0;
+    let T = 0;
+    if (pos) {
+      this._listenerPosition(_lis);
+      dist = _tmp.copy(pos).distanceTo(_lis);
+      T = this._occlusionThickness(pos, dist);
+    }
+
+    // §2.3 — a serious creak takes the room with it.
+    if (tier >= 3) {
+      this.duck('music', 12, 40, 300, 1200);
+      this.duck('ambience', 8, 40, 300, 1200);
+      this._cutCrickets(4 + tier);
+    } else if (tier === 2) {
+      this._dipCrickets(0.4, 2.5);
+    }
+
+    this._playBuffer(buf, {
+      id: `creak.t${tier}`,
+      family: 'creak',
+      priority: tier >= 2 ? 3 : 2,
+      bus: 'sfxWorld',
+      position: pos,
+      gain: 1,
+      rate: 1,
+      detune: this.rand.range(-60, 60),
+      occlusion: T,
+      distance: dist,
+      reverb: tier >= 3 ? 0.34 : 0.22,
+    });
+
+    if (tier === 4) this._setBreath('fear', 8);
+  }
+
+  /** S3 — the naked creak. The mistake must be the only thing in the world for 180 ms. */
+  _onPlace(e) {
+    if (!this.enabled) return;
+    if (e?.correct === false) {
+      for (const n of ['ambience', 'music', 'sfxWorld', 'vo', 'body']) this.duck(n, 18, 20, 180, 900);
+      return;
+    }
+    // The seat. The most satisfying sound in the game, mixed a couple of dB louder than it
+    // strictly needs to be. (Music's reward note is Music's own business — it listens to
+    // build:place itself; audio never reaches into another module's scheduler.)
+    this._playNear('screw.seat', 1.0, { reverb: 0.08, priority: 3 });
+  }
+
+  _onDrop(e) {
+    const pos = e?.part?.position ?? e?.position ?? null;
+    if (pos) {
+      this.play('lumber.drop', {
+        position: pos,
+        occlusion: this._occlusionThickness(pos),
+        priority: 2,
+      });
+    } else {
+      this._playNear('lumber.drop', 1.0);
+    }
+    this._setBreath('walk');
+  }
+
+  // --------------------------------------------------------------- silence rules (§8)
+
+  /** S1 — the first breath of the night: 2.2 s of absolute silence, then the bed arrives. */
+  _firstBreathOfTheNight() {
+    if (!this.context) return;
+    const now = this.now();
+    this._hardMute(true, 0.05);
+    this._ambTargets(0, 0, 0, 0.05);
+    this._cricketCut = 1;
+    this._cricketClearAt = now + 6.4;
+    this._after(2.2, () => {
+      this._hardMute(false, 0.35);
+      // Wind first, then the distance layer, then the crickets last (staggered, §5.4).
+      this._ambTargets(1, 0, 0, 2.4);
+      this._after(2.0, () => this._ambTargets(1, 1, 0, 2.4));
+    });
+    this._setBreath('calm');
+  }
+
+  /**
+   * S6 — the clinical pause. 1.4 s of complete silence, then the manual's chime alone and
+   * dry in a room that does not exist, then the wet dark night resumes as if nothing
+   * happened. Do not add a sting. Do not sell it. The deadpan is the joke.
+   */
+  _clinicalPause() {
+    if (!this.context) return;
+    this._hardMute(true, 0.05, false);
+    this._after(1.4, () => {
+      this.play('ui.chime', { bus: 'sfxUI', priority: 3, volume: 1 });
+      this._after(0.34, () => this._restoreMix(1800));
+    });
+  }
+
+  /** S7 — the end. 900 ms of true digital silence, and then nothing until the menu. */
+  _theEnd() {
+    if (!this.context) return;
+    this.stopAll(30);
+    this._hardMute(true, 0.03, true);
+    this._ambTargets(0, 0, 0, 0.03);
+    this._silenceRule = 'S7';
+    this._cricketClearAt = this.now() + 3600;
+    this._setBreath('calm');
+    this._after(0.9, () => {
+      // Then one note, from Music, ringing into OPEN_FOREST for eleven seconds. We only
+      // unmute the bus so it can be heard; we never fill the hole ourselves.
+      this._hardMute(false, 0.2, true);
+      this._ambTargets(0, 0, 0, 0.1);
+    });
+  }
+
+  /** S9 — the pause. Do not silence: the forest is still there, behind glass, waiting. */
+  _pauseMix(paused) {
+    if (!this.context) return;
+    const now = this.now();
+    this._set(this._pauseLP.frequency, paused ? 900 : 20000, now, paused ? 0.13 : 0.2);
+    const p = this._mixDuck.gain;
+    this._hold(p, now);
+    p.setTargetAtTime(paused ? dbToGain(-20) : 1, now, 0.13);
+  }
+
+  /** S10 — the mask. The world goes away, you hear yourself, the world comes back wrong. */
+  _maskOnBeat() {
+    if (this._maskOn || !this.context) return;
+    this._hardMute(true, 0.12, false);
+    this.duck('body', -6, 200, 1600, 900);
+    this._after(0.4, () => {
+      this._restoreMix(1400);
+      this.setMask(true, 1400);
+    });
+  }
+
+  /** §2.4 — The Held Breath. The signature mix move of the game. */
+  _onSpotted(e) {
+    const level = Number(e?.level);
+    if (Number.isFinite(level) && level <= 0.35) return;
+    if (this._held) { this._heldUntil = this.now() + 6; return; }
+    this._held = true;
+    this._heldUntil = this.now() + 6;
+    const now = this.now();
+
+    this.duck('ambience', 14, 200, 100000, 2600);
+    this._set(this._ambLP.frequency, 2200, now, 0.23);
+    this._set(this._limiter.threshold, -12, now, 0.2);
+    this._set(this._sfxComp.threshold, -26, now, 0.2);
+    this._setBreath('held');
+    this._heart.open = true;
+    this._cutCrickets(8);
+
+    const music = this.ctx?.systems?.get?.('Music');
+    if (typeof music?.setDread === 'function') { try { music.setDread(1); } catch { /* optional */ } }
+  }
+
+  _onHidden() {
+    if (!this._held) return;
+    this._held = false;
+    const now = this.now();
+    // The player's body recovers before the world does.
+    this.duck('ambience', 0, 10, 0, 2600);
+    this._set(this._ambLP.frequency, 20000, now, 0.9);
+    this._set(this._limiter.threshold, -6, now, 0.6);
+    this._set(this._sfxComp.threshold, -18, now, 0.6);
+    this._heart.open = false;
+    this._setBreath(this._speed > 2.4 ? 'heavy' : 'walk');
+  }
+
+  // --------------------------------------------------------------- weather
+
+  _onWeather(e) {
+    this._rain = clamp01(Number(e?.rain) || 0);
+    const w = Number(e?.wind);
+    if (Number.isFinite(w)) this._wind = clamp01(w);
+  }
+
+  /** S4 — the gap before the thunder. The flash whites out the screen and the world stops. */
+  _onLightning(e) {
+    if (!this.enabled) return;
+    const distance = clamp(Number(e?.distance) || this.rand.range(600, 3400), 60, 9000);
+    const delay = distance / 343;
+    for (const n of ['ambience', 'music', 'sfxWorld', 'vo']) {
+      this.duck(n, 14, 110, delay * 1000, 260);
+    }
+    this._cutCrickets(delay + 2);
+    const id = distance < 400 ? 'thunder.near' : distance < 2000 ? 'thunder.mid' : 'thunder.far';
+    const when = this.now() + delay;
+    this._after(Math.max(0, delay - 0.1), () => {
+      // Thunder is not panned by distance — a 4 km source has no parallax (§3.1).
+      this.play(id, {
+        bus: 'sfxWorld',
+        volume: 1,
+        when,
+        priority: 3,
+        family: 'thunder',
+        reverb: distance > 2000 ? 0.7 : 0.3,
+      });
+      this.duck('ambience', 5, 5, 200, 1400);
+      // Every thunder also modulates the wind: a gust arriving 1.5 s later.
+      this._after(1.5, () => { this._gust = Math.min(1, this._gust + 0.4); });
+    });
+  }
+
+  // --------------------------------------------------------------- mix helpers
+
+  _hardMute(on, fadeSec = 0.05, includeUI = false) {
+    if (!this.context) return;
+    const now = this.now();
+    const p = this._mixDuck.gain;
+    this._hold(p, now);
+    p.setTargetAtTime(on ? MIN_G : 1, now, Math.max(0.008, fadeSec / 3));
+    if (includeUI && this.buses?.sfxUI) {
+      const u = this.buses.sfxUI.duck.gain;
+      this._hold(u, now);
+      u.setTargetAtTime(on ? MIN_G : 1, now, Math.max(0.008, fadeSec / 3));
+    }
+  }
+
+  _restoreMix(ms = 1800) {
+    if (!this.context) return;
+    const now = this.now();
+    for (const name of BUS_NAMES) {
+      const p = this.buses[name]?.duck.gain;
+      if (!p) continue;
+      this._hold(p, now);
+      p.setTargetAtTime(1, now, Math.max(0.02, ms / 3000));
+    }
+    const p = this._mixDuck.gain;
+    this._hold(p, now);
+    p.setTargetAtTime(1, now, Math.max(0.02, ms / 3000));
+    this._silenceRule = null;
+  }
+
+  /** A cancellable one-shot timer that dispose() will clear. */
+  _after(sec, fn) {
+    const t = setTimeout(() => {
+      this._timers.delete(t);
+      try { fn(); } catch (e) { Log.once('audio:timer', 'audio timer threw:', e); }
+    }, Math.max(0, sec * 1000));
+    this._timers.add(t);
+    return t;
+  }
+
+  // =============================================================== §5 the bed
+  //
+  // We build the bed in order to be able to take it away.
+
+  _startAmbience() {
+    if (this._amb || !this.enabled || !this.context) return;
+    const c = this.context;
+    const dest = this.buses.ambience.input;
+    const pink = this.sfx.noise('pink', 4);
+    const brown = this.sfx.noise('brown', 4);
+    if (!pink || !brown) return;
+
+    const loopSrc = (buf, rate = 1) => {
+      const s = c.createBufferSource();
+      s.buffer = buf;
+      s.loop = true;
+      s.playbackRate.value = rate;
+      try { s.start(c.currentTime + 0.05, this.rand.range(0, Math.max(0.1, buf.duration - 0.5))); }
+      catch { /* already started */ }
+      return s;
+    };
+
+    const amb = {
+      srcs: [], nodes: [], bands: [], rain: {}, walkT: 0,
+    };
+
+    // ---- wind through pines (§4.13): three bands plus a sizzle, each with an INDEPENDENT
+    // random walk. The independence is the whole trick — one correlated envelope is a fan.
+    const gustLP = c.createBiquadFilter();
+    gustLP.type = 'lowpass';
+    gustLP.frequency.value = 3000;
+    gustLP.Q.value = 0.6;
+    const windGain = c.createGain();
+    windGain.gain.value = 0;
+    gustLP.connect(windGain);
+    windGain.connect(dest);
+    amb.gustLP = gustLP;
+    amb.windGain = windGain;
+
+    const bandSpec = [
+      { f: 380, Q: 0.75, base: 1.00, rate: 1.000 },
+      { f: 1150, Q: 1.10, base: 0.62, rate: 1.017 },
+      { f: 2700, Q: 1.40, base: 0.40, rate: 0.987 },
+    ];
+    for (let i = 0; i < bandSpec.length; i++) {
+      const sp = bandSpec[i];
+      const src = loopSrc(pink, sp.rate);
+      const bp = c.createBiquadFilter();
+      bp.type = 'bandpass';
+      bp.frequency.value = sp.f;
+      bp.Q.value = sp.Q;
+      const g = c.createGain();
+      g.gain.value = sp.base * 0.5;
+      src.connect(bp); bp.connect(g);
+      // The high band is the most directional in reality; drifting it moves the wind
+      // across the map.
+      if (i === 2 && c.createStereoPanner) {
+        const pan = c.createStereoPanner();
+        g.connect(pan); pan.connect(gustLP);
+        amb.windPan = pan;
+      } else {
+        g.connect(gustLP);
+      }
+      amb.srcs.push(src);
+      amb.bands.push({ gain: g, base: sp.base, filter: bp, f: sp.f });
+    }
+    {
+      const src = loopSrc(pink, 1.031);
+      const hp = c.createBiquadFilter(); hp.type = 'highpass'; hp.frequency.value = 5200;
+      const bp = c.createBiquadFilter(); bp.type = 'bandpass'; bp.frequency.value = 7400; bp.Q.value = 0.6;
+      const g = c.createGain(); g.gain.value = 0.16 * 0.5;
+      src.connect(hp); hp.connect(bp); bp.connect(g); g.connect(gustLP);
+      amb.srcs.push(src);
+      amb.bands.push({ gain: g, base: 0.16, filter: bp, f: 7400, sizzle: true });
+    }
+
+    // ---- room tone. Inaudible in isolation; its absence is audible.
+    {
+      const src = loopSrc(brown, 0.997);
+      const lp = c.createBiquadFilter(); lp.type = 'lowpass'; lp.frequency.value = 180; lp.Q.value = 0.6;
+      const g = c.createGain(); g.gain.value = dbToGain(-44);
+      src.connect(lp); lp.connect(g); g.connect(dest);
+      amb.srcs.push(src);
+      amb.roomTone = g;
+    }
+
+    // ---- the distance layer: the sound of a very large amount of air. This is what makes
+    // the forest feel like it extends past the draw distance.
+    {
+      const src = loopSrc(pink, 0.941);
+      const bp = c.createBiquadFilter(); bp.type = 'bandpass'; bp.frequency.value = 620; bp.Q.value = 0.4;
+      const g = c.createGain(); g.gain.value = 0;
+      src.connect(bp); bp.connect(g); g.connect(dest);
+      if (this._verbIn) {
+        const send = c.createGain();
+        send.gain.value = 0.55;
+        g.connect(send); send.connect(this._verbIn);
+        amb.distanceSend = send;
+      }
+      amb.srcs.push(src);
+      amb.distance = g;
+    }
+
+    // ---- rain (§4.12): three surface models, blended by what is overhead.
+    for (const [key, id] of [['leaves', 'rain.leaves'], ['tin', 'rain.tin'], ['water', 'rain.water']]) {
+      const buf = this.sfx.get(id, this.rand);
+      if (!buf) continue;
+      const g = c.createGain();
+      g.gain.value = 0;
+      g.connect(dest);
+      const a = loopSrc(buf, 1.0);
+      const b = loopSrc(buf, 1.041);          // two decorrelated passes: no audible loop
+      a.connect(g); b.connect(g);
+      amb.srcs.push(a, b);
+      amb.rain[key] = g;
+      if (key === 'tin' && this._verbIn) {
+        const send = c.createGain(); send.gain.value = 0.45;
+        g.connect(send); send.connect(this._verbIn);
+        amb.tinSend = send;
+      }
+    }
+
+    // ---- the lantern's gas hiss. Always on, and the player will stop hearing it in 90
+    // seconds. When it goes out, its absence is deafening (S8).
+    {
+      const buf = this.sfx.get('lantern.hiss', this.rand);
+      if (buf) {
+        const src = loopSrc(buf, 1);
+        const bp = c.createBiquadFilter(); bp.type = 'bandpass'; bp.frequency.value = 2350; bp.Q.value = 0.85;
+        const g = c.createGain(); g.gain.value = dbToGain(-38);
+        src.connect(bp); bp.connect(g); g.connect(dest);
+        amb.srcs.push(src);
+        amb.lantern = g;
+        amb.lanternBP = bp;
+      }
+    }
+
+    // ---- crickets: the proximity sensor, and the thing we take away.
+    const cricketGain = c.createGain();
+    cricketGain.gain.value = 1;
+    cricketGain.connect(dest);
+    this.buses.cricket = { name: 'cricket', gain: cricketGain, duck: cricketGain, input: cricketGain };
+    const n = this.settings ? this.settings.tier(3, 5, 8, 10) : 8;
+    const instances = [];
+    for (let i = 0; i < n; i++) {
+      instances.push({
+        angle: this.rand.range(0, Math.PI * 2),
+        radius: this.rand.range(6, 24),
+        drift: this.rand.range(-0.05, 0.05),
+        next: 0,
+        returnAt: 0,
+        pos: new THREE.Vector3(),
+      });
+    }
+    // Instances beyond 25 m share a single distant wash, to save voices.
+    let wash = null;
+    const washBuf = this.sfx.get('cricket.wash', this.rand);
+    if (washBuf) {
+      const g = c.createGain();
+      g.gain.value = dbToGain(-46);
+      g.connect(cricketGain);
+      const src = loopSrc(washBuf, 1);
+      src.connect(g);
+      amb.srcs.push(src);
+      wash = g;
+    }
+    this._crickets = { gain: cricketGain, instances, wash, cut: 0 };
+
+    this._amb = amb;
+    this._ambTargets(1, 1, 1, 3.0);
+    Log.debug('Audio: ambience bed online.');
+  }
+
+  /** Stage the bed's three always-on layers. Used by S1 and S7. */
+  _ambTargets(wind, distance, crickets, tau = 1.0) {
+    const a = this._amb;
+    if (!a || !this.context) return;
+    const now = this.now();
+    this._ambWindTarget = wind;
+    this._set(a.windGain.gain, wind * dbToGain(-40 + 26 * this._wind), now, tau / 3);
+    this._set(a.distance.gain, distance * dbToGain(-42), now, tau / 3);
+    if (a.roomTone) this._set(a.roomTone.gain, Math.max(wind, distance) > 0 ? dbToGain(-44) : MIN_G, now, tau / 3);
+    if (this._crickets) {
+      this._cricketCut = 1 - clamp01(crickets);
+      this._set(this._crickets.gain.gain, clamp01(crickets), now, tau / 3);
+    }
+  }
+
+  /** §5.4 — full stop. They do not come back for 6 s after the last condition clears. */
+  _cutCrickets(seconds = 4) {
+    this._cricketClearAt = Math.max(this._cricketClearAt, this.now() + seconds);
+    if (!this._crickets) return;
+    this._cricketCut = 1;
+    this._set(this._crickets.gain.gain, MIN_G, this.now(), 0.11);
+  }
+
+  _dipCrickets(depth = 0.4, seconds = 2.5) {
+    if (!this._crickets) return;
+    this._cricketClearAt = Math.max(this._cricketClearAt, this.now() + seconds);
+    this._cricketCut = clamp01(depth);
+    this._set(this._crickets.gain.gain, 1 - clamp01(depth), this.now(), 0.11);
+  }
+
+  _updateAmbience(dt, now) {
+    const a = this._amb;
+    if (!a) return;
+    // S7: after `night:failed` nothing ever comes back. Not the rain, not the room tone.
+    const dead = this._silenceRule === 'S7';
+
+    // Independent random walks on the wind bands (every 400–900 ms per band).
+    a.walkT -= dt;
+    if (a.walkT <= 0) {
+      a.walkT = this.rand.range(0.4, 0.9);
+      const windLevel = this._ambWindTarget ?? 1;
+      for (let i = 0; i < a.bands.length; i++) {
+        const b = a.bands[i];
+        // A hard wind is a hiss; a soft wind is a sigh — the top bands rise faster.
+        const tilt = b.sizzle || b.f > 2000 ? Math.pow(clamp01(this._wind), 0.7) / Math.max(0.05, this._wind) : 1;
+        const target = b.base * (0.55 + 0.9 * this.rand.next()) * 0.5 * tilt * windLevel;
+        this._set(b.gain.gain, target, now, 0.35);
+        if (!b.sizzle) this._set(b.filter.frequency, b.f * this.rand.range(0.9, 1.12), now, 0.5);
+      }
+      if (a.windPan) this._set(a.windPan.pan, this.rand.range(-0.35, 0.35), now, 1.2);
+      // Above wind 0.75 a trunk resonates. The first time a player hears it they will think
+      // it is a voice.
+      if (!dead && this._wind > 0.75 && this.rand.chance(0.10)) {
+        this._listenerPosition(_lis);
+        _v.set(_lis.x + this.rand.range(-14, 14), _lis.y + 6, _lis.z + this.rand.range(-14, 14));
+        this.play('wind.whistle', { position: _v, volume: dbToGain(-10), bus: 'ambience', priority: 1, reverb: 0.4 });
+      }
+    }
+
+    this._gust = clamp01(this._gust * 0.985 + (this.rand.next() < 0.02 ? this.rand.range(0, 0.5) : 0));
+    // Gusts open the top end — that is what makes a gust *arrive*.
+    this._set(a.gustLP.frequency, 900 + 6500 * this._gust * clamp01(this._wind + 0.2), now, 0.3);
+    this._set(a.windGain.gain, (this._ambWindTarget ?? 1) * dbToGain(-40 + 26 * this._wind), now, 0.5);
+
+    // Rain, blended by what is overhead.
+    const r = dead ? 0 : this._rain;
+    const underRoof = this._space === 'TIN_ROOF';
+    const nearWater = this._space === 'LAKE_EDGE';
+    if (a.rain.leaves) this._set(a.rain.leaves.gain, r > 0.01 ? dbToGain(-34 + 22 * r) * (underRoof ? 0.35 : 1) : MIN_G, now, 0.6);
+    if (a.rain.tin) this._set(a.rain.tin.gain, r > 0.01 && underRoof ? dbToGain(-30 + 24 * r) : MIN_G, now, 0.5);
+    if (a.rain.water) this._set(a.rain.water.gain, r > 0.01 && nearWater ? dbToGain(-36 + 18 * r) : MIN_G, now, 0.8);
+
+    // S8 — the world gets quieter when you cannot see it.
+    if (a.lantern) {
+      this._set(a.lantern.gain, this._lanternOn ? dbToGain(-38) : MIN_G, now, this._lanternOn ? 0.1 : 0.23);
+      this._set(a.lanternBP.frequency, this._lanternOn ? 2350 : 500, now, 0.23);
+    }
+    this._set(this._ambLP.frequency, this._held ? 2200 : (this._lanternOn ? 20000 : 3200), now, 0.3);
+  }
+
+  _updateCrickets(now) {
+    const cr = this._crickets;
+    if (!cr || this._silenceRule === 'S7') return;
+    const state = this.ctx?.state;
+
+    // Causally honest: only real proximity, real suspicion, or a real event cuts them.
+    const near = this._nearestCamper < 14;
+    const suspicious = (state?.suspicion ?? 0) > 0.7;
+    const chasing = state?.phase === 'chase';
+    const active = near || suspicious || chasing || now < this._cricketClearAt;
+
+    if (active) {
+      if (this._cricketCut < 1) {
+        this._cricketCut = 1;
+        this._set(cr.gain.gain, MIN_G, now, 0.11);
+        // A forest does not switch back on: schedule the staggered return, nearest last.
+        const n = cr.instances.length;
+        for (let i = 0; i < n; i++) cr.instances[i].returnAt = 0;
+      }
+      this._cricketReturnT = now + 6.0;
+      return;
+    }
+    if (this._cricketCut > 0 && now >= this._cricketReturnT) {
+      this._cricketCut = 0;
+      this._set(cr.gain.gain, 1, now, 0.4);
+      const n = cr.instances.length;
+      for (let i = 0; i < n; i++) {
+        // Staggered over 4 s, nearest last — the exhale of the whole game.
+        const inst = cr.instances[i];
+        const order = 1 - clamp01(inst.radius / 40);
+        inst.returnAt = now + order * 4.0;
+      }
+    }
+    if (this._cricketCut > 0) return;
+
+    // Dolbear's Law. The night cools, so the forest gets slower and lonelier as the week
+    // goes on, and nobody will consciously notice why.
+    const night = clamp(state?.night ?? 1, 1, 7);
+    const t = clamp01(state?.timeOfNight ?? 0);
+    const warm = 68 - (night - 1) * (10 / 6);
+    const fall = 13 + (night - 1) * (2 / 6);
+    const tempF = warm - fall * t - (this._rain > 0.3 ? 4 : 0);
+    const perMin = clamp(4 * (tempF - 50) + 40, 24, 160);
+    const period = 60 / perMin;
+
+    this._listenerPosition(_lis);
+    for (let i = 0; i < cr.instances.length; i++) {
+      const inst = cr.instances[i];
+      if (now < inst.returnAt) continue;
+      if (inst.next === 0) { inst.next = now + this.rand.range(0, period); continue; }
+      if (now < inst.next) continue;
+      inst.next = now + period * this.rand.range(0.75, 1.35);
+      inst.angle += inst.drift;
+      inst.pos.set(
+        _lis.x + Math.cos(inst.angle) * inst.radius,
+        _lis.y - 1.2,
+        _lis.z + Math.sin(inst.angle) * inst.radius,
+      );
+      this.play('cricket.chirp', {
+        position: inst.pos,
+        bus: 'cricket',
+        volume: dbToGain(-38 + 12),
+        rate: this.rand.range(0.94, 1.07),
+        priority: 0,
+        family: 'cricket',
+        rolloff: 0.9,
+        refDistance: 4,
+        reverb: 0.12,
+      });
+    }
+
+    // Wildlife punctuation. Rationed hard: the loon reads as a scream.
+    if (this.rand.next() < 0.0015) {
+      _v.set(_lis.x + this.rand.range(-90, 90), _lis.y + 1, _lis.z - 110);
+      this.play(this.rand.chance(0.2) ? 'loon.tremolo' : 'loon.wail', {
+        position: _v, bus: 'ambience', volume: dbToGain(-16), priority: 1, reverb: 0.85,
+        rolloff: ROLLOFF.landmark, family: 'wildlife',
+      });
+    } else if (this.rand.next() < 0.0009) {
+      _v.set(_lis.x + this.rand.range(-20, 20), _lis.y + 9, _lis.z + this.rand.range(-20, 20));
+      this.play('owl.hoot', {
+        position: _v, bus: 'ambience', volume: dbToGain(-18), priority: 1, reverb: 0.5,
+        family: 'wildlife',
+      });
+    }
+  }
+
+  // =============================================================== §4.19–4.20 the body
+
+  _buildBody() {
+    const c = this.context;
+    if (!c || !this.buses) return;
+    const dest = this.buses.body.input;
+
+    // Breath chain. Under the mask this is the thing that most obviously changes: wearing
+    // it should make the player sound, to himself, like he is inside a bucket.
+    const bGain = c.createGain();
+    const bPeak = c.createBiquadFilter();
+    bPeak.type = 'peaking'; bPeak.frequency.value = 680; bPeak.Q.value = 1.2; bPeak.gain.value = 0;
+    const bShelf = c.createBiquadFilter();
+    bShelf.type = 'highshelf'; bShelf.frequency.value = 4000; bShelf.gain.value = 0;
+    bGain.connect(bPeak); bPeak.connect(bShelf); bShelf.connect(dest);
+    this._breath.gainNode = bGain;
+    this._breath.peak = bPeak;
+    this._breath.shelf = bShelf;
+    this.buses.breath = { name: 'breath', gain: bGain, duck: bGain, input: bGain };
+
+    // Heart. The cutoff is the fear dial: you feel it long before you hear it.
+    const hGain = c.createGain();
+    const hLP = c.createBiquadFilter();
+    hLP.type = 'lowpass'; hLP.frequency.value = 200; hLP.Q.value = 1.0;
+    hGain.connect(hLP); hLP.connect(dest);
+    this._heart.gainNode = hGain;
+    this._heart.lp = hLP;
+    this.buses.heart = { name: 'heart', gain: hGain, duck: hGain, input: hGain };
+  }
+
+  _setBreath(state, holdSec = 0) {
+    if (!this._breath) return;
+    if (state === this._breath.state) {
+      if (holdSec) this._breath.hold = this.now() + holdSec;
+      return;
+    }
+    this._breath.state = state;
+    this._breath.hold = holdSec ? this.now() + holdSec : 0;
+    if (state === 'held') {
+      // No breath sound at all for 2.5 + rand(0,3.5) seconds.
+      this._breath.next = this.now() + 2.5 + this.rand.range(0, 3.5);
+      this._breath.phase = 2;     // the controlled exhale that ends the hold
+    }
+  }
+
+  _updateBody(now, dt) {
+    const st = this.ctx?.state;
+    const susp = clamp01(st?.suspicion ?? 0);
+    const prox = clamp01(1 - this._nearestCamper / 30);
+    const fearTarget = clamp01(0.55 * susp + 0.55 * prox + (st?.spotted ? 0.35 : 0) + (this._held ? 0.4 : 0));
+    // The heart lags the situation, which is exactly right emotionally: it keeps hammering
+    // for several seconds after you are safe.
+    const k = 1 - Math.exp(-dt / 1.2);
+    this.fear += (fearTarget - this.fear) * k;
+    this.exertion += (clamp01(this._speed / 5) - this.exertion) * (1 - Math.exp(-dt / 0.6));
+
+    // ---- breath
+    const br = this._breath;
+    if (br.gainNode) {
+      if (br.state !== 'held' && (!br.hold || now > br.hold)) {
+        const s = this.fear > 0.45 ? 'fear'
+          : this.exertion > 0.5 ? 'heavy'
+            : this._speed > 0.6 ? 'walk' : 'calm';
+        if (s !== br.state) { br.state = s; }
+      }
+      if (now >= br.next) {
+        const s = br.state;
+        if (s === 'held') {
+          // One controlled, tight, high-passed exhale, then back to fear breathing.
+          this.play('breath.fear.out', {
+            bus: 'breath', volume: dbToGain(-18), rate: 1.15, priority: 3, family: 'breath',
+          });
+          br.state = 'fear';
+          br.next = now + 1.2;
+        } else {
+          const spec = BREATH_TIMING[s] ?? BREATH_TIMING.calm;
+          const jitter = s === 'fear' ? this.rand.range(0.7, 1.3) : this.rand.range(0.94, 1.06);
+          const vol = dbToGain(spec.db + 12);
+          if (br.phase === 0) {
+            this.play(`breath.${s}.in`, { bus: 'breath', volume: vol, priority: 3, family: 'breath' });
+            // 1 in 5 fear cycles the inhale is doubled — a short catch, then the rest.
+            if (s === 'fear' && this.rand.chance(0.2)) {
+              this.play(`breath.${s}.in`, {
+                bus: 'breath', volume: vol * 0.8, when: now + spec.inhale * 0.5 + 0.12,
+                rate: 1.1, priority: 3, family: 'breath',
+              });
+            }
+            br.phase = 1;
+            br.next = now + spec.inhale * jitter;
+          } else {
+            this.play(`breath.${s}.out`, { bus: 'breath', volume: vol * 0.8, priority: 3, family: 'breath' });
+            br.phase = 0;
+            br.next = now + (spec.period - spec.inhale) * jitter;
+          }
+        }
+      }
+    }
+
+    // ---- heartbeat
+    const h = this._heart;
+    if (h.gainNode) {
+      const audible = this.fear >= 0.12;
+      const db = -40 + 22 * this.fear;
+      this._set(h.gainNode.gain, audible ? dbToGain(db + 6) : MIN_G, now, 0.4);
+      const cutoff = this.ctx?.state?.phase === 'chase' ? 620 : (this._held || h.open) ? 420 : 200;
+      this._set(h.lp.frequency, cutoff, now, 0.3);
+      if (audible) {
+        h.bpm = clamp(52 + 46 * this.fear + 22 * this.exertion, 52, 148);
+        const period = 60 / h.bpm;
+        if (now >= h.next) {
+          this.play('heart.thump', { bus: 'heart', volume: 1, priority: 3, family: 'body' });
+          this.play('heart.thump', {
+            bus: 'heart', volume: dbToGain(-5), when: now + period * 0.30,
+            rate: 0.96, priority: 3, family: 'body',
+          });
+          h.next = now + period;
+        }
+      } else {
+        h.next = now + 0.4;
+      }
+    }
+  }
+
+  // =============================================================== frame
+
+  update(dt, elapsed) {
+    if (!this.enabled || !this.context) return;
+    const now = this.context.currentTime;
+    this._updateListener(now);
+    this._updateVoices(now);
+
+    this._acc += dt;
+    if (this._acc >= 0.05) {
+      const slow = this._acc;
+      this._acc = 0;
+      this._updateAmbience(slow, now);
+      this._updateCrickets(now);
+      this._updateBody(now, slow);
+      this._updateWorldQueries(now, slow);
+    }
+    void elapsed;
+  }
+
+  _updateListener(now) {
+    const l = this.context.listener;
+    const cam = this.ctx?.camera;
+    if (!l || !cam) return;
+    _lis.setFromMatrixPosition(cam.matrixWorld);
+    cam.getWorldDirection(_fwd);
+    _up.set(0, 1, 0).applyQuaternion(cam.quaternion);
+    // Never setPosition(), never instantaneous jumps — both zipper the HRTF convolution.
+    if (l.positionX) {
+      const tau = 0.02;
+      l.positionX.setTargetAtTime(_lis.x, now, tau);
+      l.positionY.setTargetAtTime(_lis.y, now, tau);
+      l.positionZ.setTargetAtTime(_lis.z, now, tau);
+      l.forwardX.setTargetAtTime(_fwd.x, now, tau);
+      l.forwardY.setTargetAtTime(_fwd.y, now, tau);
+      l.forwardZ.setTargetAtTime(_fwd.z, now, tau);
+      l.upX.setTargetAtTime(_up.x, now, tau);
+      l.upY.setTargetAtTime(_up.y, now, tau);
+      l.upZ.setTargetAtTime(_up.z, now, tau);
+    } else {
+      l.setPosition?.(_lis.x, _lis.y, _lis.z);
+      l.setOrientation?.(_fwd.x, _fwd.y, _fwd.z, _up.x, _up.y, _up.z);
+    }
+  }
+
+  _updateVoices(now) {
+    const list = this._voices;
+    // Safety net: onended is not guaranteed to fire on every engine.
+    for (let i = 0; i < list.length; i++) {
+      const v = list[i];
+      if (!v.free && !v.loop && now > v.endsAt + 0.25) this._releaseVoice(v, true);
+    }
+    // Sustained sources refresh their distance/occlusion round-robin, ≤ 8 per frame with
+    // a 120 ms cache (§3.2, §9.3).
+    let budget = 8;
+    for (let n = 0; n < list.length && budget > 0; n++) {
+      this._rr = (this._rr + 1) % list.length;
+      const v = list[this._rr];
+      if (v.free || !v.sustained || !v.hasPosition) continue;
+      budget--;
+      if (now - (v.occT ?? 0) < 0.12) continue;
+      v.occT = now;
+      const T = this._occlusionThickness(v.position);
+      const fc = clamp(18000 * Math.exp(-0.55 * T), 180, 18000);
+      this._set(v.directLP.frequency, fc, now, 0.08);
+      this._set(v.directGain.gain, dbToGain(clamp(-3.2 * T, -34, 0)), now, 0.08);
+      this._set(v.bleedGain.gain, T > 0.02 ? dbToGain(clamp(-14 - 1.1 * T, -40, -14)) : 0, now, 0.08);
+      this._setPannerPosition(v.panner, v.position, now, 0.05);
+    }
+  }
+
+  /** Everything that asks another system a question. Rate-limited, all null-checked. */
+  _updateWorldQueries(now, dt) {
+    const sys = this.ctx?.systems;
+    const state = this.ctx?.state;
+
+    // nearest camper, 4 Hz
+    if (now - this._camperT > 0.25) {
+      this._camperT = now;
+      this._nearestCamper = this._queryNearestCamper();
+      // The lantern is a stealth dial, so we track it rather than guess.
+      const fl = sys?.get?.('Flashlight');
+      const on = fl?.on ?? fl?.enabled ?? fl?.isOn;
+      if (typeof on === 'boolean') this._lanternOn = on;
+    }
+
+    // reverb probe, 4 Hz
+    if (!this._spaceLocked && now - this._probeT > 0.25) {
+      this._probeT = now;
+      const space = this._probeSpace();
+      if (space) this._setSpace(space);
+    }
+
+    // S11 — pre-dawn: over 40 s, ramp everything below 300 Hz out of the world.
+    const t = clamp01(state?.timeOfNight ?? 0);
+    this._set(this._dawnHP.frequency, t > 0.92 ? 20 + 280 * clamp01((t - 0.92) / 0.06) : 20, now, 4.0);
+
+    // Music's dread scalar is ours to compute (§6.3); Music smooths it internally.
+    const music = sys?.get?.('Music');
+    if (typeof music?.setDread === 'function') {
+      const buildProgress = clamp01(this._buildProgress());
+      const target = clamp01(
+        0.40 * clamp01(state?.suspicion ?? 0)
+        + 0.30 * clamp01(1 - this._nearestCamper / 30)
+        + 0.15 * (state?.spotted ? 1 : 0)
+        + 0.10 * clamp01((state?.creaks ?? 0) / 6)
+        + 0.05 * (1 - buildProgress),
+      );
+      // Dread arrives instantly and leaves slowly. Never the reverse.
+      const tau = target > this.dread ? 0.35 : 4.5;
+      this.dread += (target - this.dread) * (1 - Math.exp(-dt / tau));
+      try { music.setDread(this.dread); } catch { /* optional system */ }
+    }
+  }
+
+  _queryNearestCamper() {
+    const campers = this.ctx?.systems?.get?.('Campers');
+    if (!campers) return 999;
+    this._listenerPosition(_lis);
+    try {
+      if (typeof campers.nearestDistance === 'function') {
+        const d = campers.nearestDistance(_lis);
+        if (Number.isFinite(d)) return d;
+      }
+      if (typeof campers.nearest === 'function') {
+        const c = campers.nearest(_lis);
+        const p = c?.position ?? c?.mesh?.position;
+        if (p) return _tmp.copy(p).distanceTo(_lis);
+      }
+      const list = campers.agents ?? campers.list ?? campers.campers;
+      if (Array.isArray(list)) {
+        let best = 999;
+        for (let i = 0; i < list.length; i++) {
+          const p = list[i]?.position ?? list[i]?.mesh?.position;
+          if (!p) continue;
+          const d = _tmp.copy(p).distanceTo(_lis);
+          if (d < best) best = d;
+        }
+        return best;
+      }
+    } catch { /* AI system still being authored */ }
+    return 999;
+  }
+
+  _buildProgress() {
+    const bs = this.ctx?.systems?.get?.('BuildSystem');
+    const p = bs?.progress ?? (typeof bs?.getProgress === 'function' ? bs.getProgress() : null);
+    return Number.isFinite(p) ? clamp01(p) : 0.5;
+  }
+
+  /** The reverb probe. Architecture wins over environment; water wins over trees. */
+  _probeSpace() {
+    const sys = this.ctx?.systems;
+    if (!sys) return 'OPEN_FOREST';
+    this._listenerPosition(_lis);
+    try {
+      const cabin = sys.get?.('CabinSite');
+      const inside = cabin?.containsPoint?.(_lis) ?? cabin?.isInside?.(_lis);
+      if (inside) {
+        const roofed = cabin?.hasRoof ?? cabin?.roofBuilt ?? false;
+        return roofed ? 'TIN_ROOF' : 'CABIN_SHELL';
+      }
+      const terrain = sys.get?.('Terrain');
+      const water = terrain?.waterLevel ?? terrain?.seaLevel;
+      if (Number.isFinite(water)) {
+        const h = typeof terrain?.heightAt === 'function' ? terrain.heightAt(_lis.x, _lis.z) : null;
+        if (Number.isFinite(h) && h - water < 1.2) return 'LAKE_EDGE';
+      }
+      const forest = sys.get?.('Forest');
+      const dens = typeof forest?.densityAt === 'function' ? forest.densityAt(_lis.x, _lis.z) : NaN;
+      if (Number.isFinite(dens) && dens > 0.55) return 'DENSE_TREES';
+    } catch { /* systems still being authored */ }
+    return 'OPEN_FOREST';
+  }
+
+  resize(_w, _h) { /* nothing resolution-dependent in the audio graph */ }
+
+  // =============================================================== teardown
+
+  dispose() {
+    for (const off of this._unsubs) { try { off(); } catch { /* already gone */ } }
+    this._unsubs.length = 0;
+    for (const t of this._timers) clearTimeout(t);
+    this._timers.clear();
+
+    for (const ev of ['pointerdown', 'keydown', 'touchstart']) {
+      try { globalThis.removeEventListener?.(ev, this._resumeHandler); } catch { /* n/a */ }
+    }
+    try { globalThis.document?.removeEventListener?.('visibilitychange', this._onVisible); } catch { /* n/a */ }
+
+    this.enabled = false;
+
+    for (const v of this._voices) { try { v.dispose(); } catch { /* already torn down */ } }
+    this._voices.length = 0;
+
+    const a = this._amb;
+    if (a) {
+      for (const s of a.srcs) { try { s.stop(); } catch { /* already stopped */ } try { s.disconnect(); } catch { /* n/a */ } }
+      a.srcs.length = 0;
+    }
+    this._amb = null;
+    this._crickets = null;
+
+    for (const n of [this._verbIn, this._convA, this._convB, this._retA, this._retB,
+      this._sfxComp, this._limiter, this._mixBus, this._mixDuck, this._pauseLP, this._dawnHP,
+      this._ambNotch, this._ambLP, this._combGain,
+      this._mask?.in, this._mask?.dry, this._mask?.wet, this._mask?.lp, this._mask?.peak,
+      this._mask?.notch, this._mask?.shelf, this._mask?.comb,
+      this._breath?.gainNode, this._breath?.peak, this._breath?.shelf,
+      this._heart?.gainNode, this._heart?.lp]) {
+      try { n?.disconnect(); } catch { /* not connected */ }
+    }
+    if (this.buses) {
+      for (const key of Object.keys(this.buses)) {
+        const b = this.buses[key];
+        try { b?.gain?.disconnect(); b?.duck?.disconnect(); b?.send?.disconnect(); } catch { /* n/a */ }
+      }
+    }
+    this.buses = null;
+    this._irs.clear();
+    this.sfx?.dispose();
+    this.sfx = null;
+
+    const c = this.context;
+    this.context = null;
+    if (c && typeof c.close === 'function' && c.state !== 'closed') {
+      c.close().catch(() => { /* already closing */ });
+    }
+  }
 }
+
+const _mix = { rel: 0, T: 0 };
+
+/** §4.19 — the breathing cycle table. */
+const BREATH_TIMING = {
+  calm: { period: 4.4, inhale: 1.1, db: -34 },
+  walk: { period: 3.2, inhale: 0.9, db: -29 },
+  heavy: { period: 1.9, inhale: 0.6, db: -22 },
+  fear: { period: 2.4, inhale: 0.5, db: -24 },
+};
 
 // Equal-power crossfade curves for the two reverb returns (§3.3).
 const XF_UP = new Float32Array(33);

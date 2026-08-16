@@ -188,7 +188,7 @@ This is delivered three ways, all diegetic, none of them narration:
 | Channel | Where | First playthrough? |
 |---|---|---|
 | **Mechanical** | Night One, first player action: the chalked slot for pier P-01 has a county stake standing in it. The player must `build:remove` the stake before the slot becomes snappable. It takes 1.1 s and it is silent. Then they set a pier where it stood. | **Unmissable — it is the tutorial's first input.** |
-| **Environmental** | Prop 6: two sets of stakes, visibly different ages, on the same ground. Ten steel-and-ribbon (1984, county). Fifty-one wooden, carpenter's pencil, numbered from 1953 (his). | Passive |
+| **Environmental** | Props 5 and 10: two sets of stakes, visibly different ages, on the same ground. Ten steel-and-ribbon (1984, the county's). Fifty-one wooden, carpenter's pencil, numbered from 1953 (his). | Passive |
 | **Verbal** | `BEV_IDLE_08` and `BEV_LATE_02` (§8). Bev is annoyed about the survey because it means paperwork. | Passive |
 
 The player pulls a government stake out of the ground and builds on the hole. That is the whole
@@ -251,7 +251,7 @@ gesture being asserted:**
 | Therefore | **He sights one-eyed, down the long side of the mask** | He tilts his head and looks along the object the way a carpenter sights down a board to check it for wind |
 
 **That gesture is a craftsman's and a bird's at the same time, and it is now caused.** It is how
-the player recognises him in a 1971 photograph on Night Six (§9, prop 16). It is how Robin
+the player recognises him in a 1971 photograph on Night Six (§9, prop 18). It is how Robin
 describes him, and it is why nobody believes her: "he looks at you sideways" is not a description
 of a man.
 
@@ -642,7 +642,7 @@ Everything below was an arbitrary number in v1.0 and is now a consequence.
 | The sink | "60 m from the site" | **60.0 m** | Landmark 10 |
 | The 1961 plate shim | "30 m east" | **31.6 m NW**, at the fallen log — the same log as pier 6 and the mallet in `GAME_DESIGN.md` §11 | Landmark 6. One trip, three finds, the joke lands three times |
 | The grave | "forty metres uphill" | **117.0 m WSW**, on the ridge shoulder, +14 m | Landmark 14. Far enough that finding it is an expedition |
-| Dale's torch, moved on Night Seven | "eleven metres" | **8.5 m**, from the stump at `(+46, −4)` to `(+38, −7)` — *toward the house* | §9, prop 12 |
+| Dale's torch, moved on Night Seven | "eleven metres" | **8.5 m**, from the stump at `(+46, −4)` to `(+38, −7)` — *toward the house* | §9, prop 20 |
 | Bev's chair faces | "the point where the house used to be" | bearing **293°** from `(+146, +60)`, which is the datum | Landmarks 1, 20 |
 
 ### 4.5 The name of the lake
@@ -2015,3 +2015,536 @@ The one thing in the room rendered at full fidelity is the surface the player's 
 lantern is 400 mm from it.
 
 ---
+
+## 11. THE ENDING
+
+**Preconditions.** The house is finished at `timeOfNight 0.8` — **03:40**. `builtBothChairs` is
+set. Rain 0.00, wind 0.03, **zero masking** (§5). `hud:mode 'none'`. The manual opens to a blank
+spread; the wipe takes 1.40 s and it does not work; flag `manualBlank`.
+
+On the last page: a **dotted outline** of a small figure, seated, at a table. Child-sized. Marit's
+hand, 1962. The parts bracket beside it, and inside the bracket, an empty space where an article
+number goes.
+
+Elsewhere on the fold-out, in his own hand: the telephone icon, and the payphone drawn in situ at
+160.6 m, and a dotted path from the front door to it (§3.5, Panel 7.1).
+
+**The game adds no verbs in its last five minutes.** Every input below has been taught, used, and
+paid for across seven nights. This is the whole design of the ending and v1.0 broke it twice — once
+with an untutored escort sequence, and once by making the terminal action a no-prompt interaction
+the game had never rewarded.
+
+| Ending | Verbs used | Taught |
+|---|---|---|
+| **A** | grab · drag (class E) · place | N3, N3, N1 |
+| **B** | walk | N1 |
+| **C** | sit | **N1** (§13.2) |
+
+### 11.1 Who is at the treeline
+
+If `robinSaw` is set — and it is set on almost every playthrough, because `n6_robin_inside` is
+gated on two required slots — **Robin is at the treeline, at 92 m SSE, and has been coming back
+every night since.** `ROB_LATE_05`: "There's two chairs."
+
+Fallback order if she is not available: Marg → Coop → Teddy → Bev. The scene does not change. It is
+worse with Robin and the game does not require it.
+
+### 11.2 Ending A — "RETURN TO STORE" · the monstrous ending
+
+The manual has told him to contact customer service. There is a person at the treeline. The
+manual's parts bracket says `1`.
+
+**There is no escort sequence. There is no struggle. There is no chase.** v1.0 had one and it was a
+cutscene mechanic wearing a verb's clothes, and it was also the only on-camera killing in a game
+that had spent six nights pointedly refusing one.
+
+What actually happens is the ugliest, slowest, loudest thing the game owns:
+
+| Step | Mechanic | Source | Cost |
+|---|---|---|---|
+| 1 | **Grab.** 4.5 s of contact from behind an unaware camper, silent | `GAME_DESIGN.md` §8.3, taught N3 | 4.5 s |
+| 2 | **Drag.** The result is a body: **class E** — 0.34× speed, 2.6× footstep noise, and a continuous `noise:emit { kind:'drag', radius: 22, intensity: 0.38 }` every 0.5 s | `GAME_DESIGN.md` §2.1, §4.2 | **92 m at 0.54 m/s = 2 min 50 s** |
+| 3 | **Place.** `CH-A` — the adult chair — has `acceptsType: 'occupant'`. The ghost appears at 0.65 m. `build:place { correct: true }` | `GAME_DESIGN.md` §2.2, taught N1 | 2.2 s |
+
+**Two minutes and fifty seconds of scrape, in a dead-calm world with zero masking, across ninety-two
+metres of his own site.** The game makes you do this with the mechanic it has spent the whole game
+teaching you to fear, and it does not cut away, and it does not score you, and nothing is masking
+it because it stopped raining.
+
+**It is `CH-A`.** The adult chair. His mother's.
+
+Then the snap. `correct: true`. The game's own build grammar accepts a person, because the game's
+own build grammar has never once cared what a part is for.
+
+**Then the manual.**
+
+The panel redraws — a 0.9 s crossfade and a 0.6 s `clip-path` reveal along the stroke path
+(§3.4; it is two baked bitmaps and a CSS animation, not a live generator) — in Ansel's scratched,
+doubled hand.
+
+And then, over the top of it, in **Marit's** hand — single stroke, closed corners, `wobbleAmp 0.22`
+— a **red diagonal.**
+
+`ART_DIRECTION.md` §8.5's ✗ is two strokes crossing at 90°. This is not that. This is one stroke,
+4.0 px, `#d92b2b`, corner to corner: **DO NOT DO THIS.**
+
+It is the only red mark ever aimed at the player. It is the only judgement the manual has ever
+passed. BJØRN is drawn `arms-at-sides` — the pose that exists in this game for exactly two moments
+— and he has a mouth, for the second and last time, and it is one flat line.
+
+**She never told him to do this. He has been extrapolating for twenty-two years and the page
+finally says so — and the page that says so is in her handwriting, which means she is still the
+only person who ever corrected him, and she has been dead since October.**
+
+Then the pages go blank. All of them. Including the ones he drew.
+
+`ending_a`. Achievement, in the flat-pack voice: **"OBTAINED LOCALLY."**
+
+### 11.3 Ending B — "DO NOT FORCE" · the refusal
+
+The player walks out. South, past the fire road, past the county stakes, over the boundary at the
+road.
+
+v1.0 held the camera on the house from the treeline for ninety seconds while the sky greyed, and
+then said *"Nothing happens. Nothing has ever happened here"* — and then demoted its own ending in
+its own text, which means the game had three endings and one of them was real.
+
+**Ending B gets the one thing a refusal ending requires: a consequence.**
+
+He walks out. The house stands. The sky greys over 40 seconds — no held camera, the player keeps
+control and keeps walking, and the treeline is where the player stops because the player stops.
+
+**06:15.** Dawn. **09:00.** Three yellow buses turn off the county road.
+
+And the last image of the game is **children carrying bunk beds into his mother's kitchen.**
+
+Two at a time, one at each end, the way the icon on Panel 5.1 says you are supposed to. Through the
+door he framed. Past the four pencil marks. Under the window over the sink.
+
+A bunk bed is the exact object he drew over her wall elevation on Panel 6.8 and then erased,
+because it did not fit, because it was never her house with a bunk bed in it — and the ghost of it
+is still under the line at `ghostAlpha 0.14`, and it is happening anyway, and he is at the
+treeline, and he is not going to do anything about it, and neither are you.
+
+Camp Wanaka Pines opens on schedule. `ending_b`. Achievement: **"NO ACTION REQUIRED."**
+
+Bleak, honest, complete. **It is not demoted.** It is the ending where the man who could not stop
+stops, and the price is that the world takes the house anyway and does not notice it was ever his,
+and if a player earns that reading the game does not tell them they picked the wrong one.
+
+### 11.4 Ending C — "SOME ASSEMBLY REQUIRED" · the ending
+
+There is one part in the world that fits a child-sized dotted outline.
+
+**The player sits down.**
+
+`CH-B` — the small chair — is a seat-class surface. Sitting is a verb the player learned in the
+first ten minutes of Night One on a stump 11.4 m from where they are now, and has used every night
+since to get their stamina back, and has used on that stump beside a folded blanket and a tin cup
+that were never for them (§9, prop 8; §13.2).
+
+**It is available from the moment `builtBothChairs` fires.** There is no prompt, because there is
+no HUD, because `hud:mode` is `'none'` — but there is a **seat ghost**, the same 0.65 m white ghost
+the game has used for every placement in seven nights, and it is drawn at a seat the player has
+approached a hundred times.
+
+He is 6'6". The chair was built for a boy of eleven.
+
+When he sits, the mask comes off. **The camera does not show his face** — the mask simply enters
+frame and is set down on the table, glazed, hairline-crazed, curved, one nipped oval and one
+factory overflow slot 31 mm too low. His hands come to rest on the table and they are ruined.
+
+The breath filter opens: `f = 900 → 6000` over 180 ms, level `−32 → −14 dBFS`, mask colouration
+bypassed (§2.3). **One breath. It is the only unfiltered airway in the game.** Nothing else is on
+the bus. Do not add music.
+
+The manual is open beside the mask and it is blank, and it stays blank, because she died in
+October 1962 and she never drew what comes after the house is finished.
+
+Outside, at **06:15**, the first bus turns off the county road, 186 m south.
+
+**You can hear it through the wall** — because he built the wall correctly, and a correctly built
+wall carries a road exactly this way, and the game established that acoustic fact on Night Six when
+Robin walked out over his floor and he heard her through it (§6, N6 closing image).
+
+Kids. A lot of them. Screaming the good way.
+
+He does not get up.
+
+**The last panel.** Over black, the game draws one final diagram in Marit's confident single-stroke
+hand — the finished house, three-quarter elevation, **exactly as the player built it**, out of
+plumb where the player was out of plumb, with a tick beside it.
+
+And in the corner, where the maker's mark goes on every page in the game:
+
+**VIK & SØN**
+
+That is the first and only time the player is given the name.
+
+Fade. `ending_c`. Achievement: **"NO PARTS REMAINING."**
+
+### 11.5 Terminal-input rules, so none of this fires by accident
+
+| Rule | Value |
+|---|---|
+| All three endings require | `builtBothChairs` |
+| `CH-B` seat ghost appears | Only after `builtBothChairs`, only inside the house |
+| Sitting is cancellable | Yes — standing up before **4.0 s** returns control with nothing spent. After 4.0 s, the mask animation begins and the ending is committed |
+| `CH-A` accepts `occupant` | Only after `builtBothChairs`. Before that it is an ordinary chair slot and a body cannot be placed in it |
+| A body dropped anywhere else | Behaves exactly as `GAME_DESIGN.md` §8.3 says. No ending fires |
+| Leaving the map south | Prompts nothing. Crossing `Z > 186` with `builtBothChairs` set and no body carried commits `ending_b` after a **6 s** unbroken walk south |
+| If the player does none of these | Dawn at `timeOfNight 1.0` → `night:failed { reason: 'incomplete' }` → `GAME_DESIGN.md` §8.2's fourth ending: the campers arrive to a finished, empty house and the credits are quiet and sad and correct |
+
+---
+
+## 12. TITLE CARDS AND NIGHT-END CARDS
+
+### 12.1 The seven assembly names (resolves collision C3)
+
+`ART_DIRECTION.md` §8.6 asks for fake-Swedish product names. The family is Norwegian. **These are
+real Norwegian building terms, and the joke is better for being true:** a flat-pack manual's
+product names are invented brand words, and these are simply the correct words for the things,
+because a mother naming parts for a boy who cannot read does not invent brands.
+
+| Night | Name | Means | The player learns |
+|---|---|---|---|
+| 1 | **GRUNNMUR** | foundation wall | nothing — it reads as a product |
+| 2 | **BJELKELAG** | floor joists | nothing |
+| 3 | **REISVERK** | framing, studwork | nothing |
+| 4 | **KLEDNING** | cladding | nothing |
+| 5 | **TAKSTOL** | roof truss | nothing |
+| 6 | **VINDU & DØR** | window and door | **`&` is a word-shape. Two things, joined. First flicker** |
+| 7 | **HJEM** | **home** | The cover has said this since Night One |
+
+The names are rendered as **stroke data**, not type (§3.5), so a font failure cannot touch them.
+
+### 12.2 Title cards
+
+Rendered by `Menu.js` at `night:begin` per `ART_DIRECTION.md` §8: `#f2efe6` stock, `#14181a` ink,
+one `#d92b2b` accent rule, **no music.** The tonal knife-twist against the wet dark is the entire
+point — `ART_DIRECTION.md` §5 already has the frame going from EV −3 to EV +2 across the cut.
+
+| # | Assembly | Title card | Sub-line | Hold |
+|---|---|---|---|---|
+| **NIGHT ONE** | GRUNNMUR | **FOUNDATION (A)** | *Check contents before beginning.* | 2.4 s |
+| **NIGHT TWO** | BJELKELAG | **UPRIGHTS (B ×4) — SUPPORT WHILE FIXING** | *Two persons recommended.* | 2.4 s |
+| **NIGHT THREE** | REISVERK | **DO NOT OVERTIGHTEN** | *Damage caused this way is not covered.* | 2.4 s |
+| **NIGHT FOUR** | KLEDNING | **IF PARTS ARE MISSING, DO NOT RETURN TO STORE** | *Obtain locally.* | 2.4 s |
+| **NIGHT FIVE** | TAKSTOL | **THIS STEP REQUIRES TWO PERSONS** | *(none)* | **3.1 s** |
+| **NIGHT SIX** | VINDU & DØR | **SOLD SEPARATELY** | *Illustration may differ from product.* | 2.4 s |
+| **NIGHT SEVEN** | HJEM | **SOME ASSEMBLY REQUIRED** | *(none)* | **3.1 s** |
+
+**How absence is made legible — because "the player will notice" is not a design.** v1.0 rested
+this beat on the assertion that a player tracks the presence of a joke across seven 2.4-second
+cards over three hours of play. They do not. Two mechanisms, and they cost nothing:
+
+1. **The sub-line has a rule under it, and the rule is always drawn.** A 0.75 px hairline,
+   `#14181a`, 18U long, 1.5U below the sub-line baseline, from Night One. On Nights Five and Seven
+   **the rule is still there and the line above it is empty.** An empty ruled line reads as absence.
+   A missing line reads as nothing.
+2. **The hold is 3.1 s instead of 2.4 s** on those two cards. The card stays up 29% longer with
+   less on it. The player does not have to notice consciously; they have to sit in it, and they do.
+
+Nights One through Four have a joke at the bottom of the card. Then, twice, there just isn't one,
+and the silence where the joke goes does more work than the joke ever did.
+
+### 12.3 The night-end card — the game's best comedy real estate
+
+`night:complete { night, score }` fires seven times and v1.0 did not mention the card exists.
+`GAME_DESIGN.md` §9 owns the `Score` shape, the `satisfaction` formula and the standing copy. This
+section owns **what changes per night** and **the grade**, which is the part that curdles.
+
+**The grade is BJØRN's posture.** No number is ever the headline. The posture uses only the fixed
+pose vocabulary in `ART_DIRECTION.md` §8.4 (plus `arms-at-sides`, §3.3):
+
+| `satisfaction` | Posture |
+|---|---|
+| ≥ 95 | `thumbs-up` |
+| 60–94 | `standing-neutral` |
+| 30–59 | `shrugging-at-missing-hardware` |
+| < 30 | `wagging-finger-no` |
+
+**Four metrics per card, chosen per night**, drawn from `Score` (`GAME_DESIGN.md` §9) — never more
+than four, because a receipt with fourteen lines on it is a spreadsheet and a receipt with four is
+a joke.
+
+| Night | Headline | The four | The extra line |
+|---|---|---|---|
+| 1 | `ASSEMBLY REPORT — GRUNNMUR — STEP 1 OF 7` | `PARTS INSTALLED` · `JOINS, CORRECT` · `HARDWARE SUPPLIED: LARGELY` · `CUSTOMER SATISFACTION` | `THANK YOU FOR CHOOSING SELF-ASSEMBLY.` |
+| 2 | `BJELKELAG — STEP 2 OF 7` | `JOINS, CORRECT` · `JOINS, ORIENTED CREATIVELY` · `AUDIBLE COMPLAINTS FROM THE STRUCTURE` · `SATISFACTION` | `HARDWARE ACTUALLY REQUIRED: MORE.` |
+| 3 | `REISVERK — STEP 3 OF 7` | `JOINS, CORRECT` · **`CUTS MADE ON SITE`** · `COMPLAINTS` · `SATISFACTION` | **`WE WOULD PREFER YOU DID NOT.`** |
+| 4 | `KLEDNING — STEP 4 OF 7` | `PARTS INSTALLED` · `DISTANCE CARRIED` · **`PERSONS WHO EXPRESSED CONCERN`** · `SATISFACTION` | **`PLEASE ASSEMBLE ALONE.`** — last, in `#d92b2b`, first appearance |
+| 5 | `TAKSTOL — STEP 5 OF 7` | `JOINS, CORRECT` · `TIME REMAINING BEFORE SUNRISE` · **`IMPROVISATION — NOTED`** · `SATISFACTION` | `PLEASE ASSEMBLE ALONE.` |
+| 6 | `VINDU & DØR — STEP 6 OF 7` | **`PARTS SUPPLIED: 19 OF 20`** · `JOINS, CORRECT` · `COMPLAINTS` · `SATISFACTION` | **`PLEASE CONTACT CUSTOMER SERVICE.`** Posture: `head-tilt-confused` |
+| **7** | — | **none** | see below |
+
+`PERSONS WHO EXPRESSED CONCERN` counts campers who entered `Curious` or above. `PERSONS WHO
+EXPRESSED CONCERN TO OTHERS` counts delivered reports and appears only when it is non-zero, which
+is the funniest possible condition for it to appear under.
+
+**The Night Seven card has no metrics on it at all.** `Menu.js` receives `night:complete
+{ score }`, ignores every field, and renders one page:
+
+```
+                              HJEM
+
+
+                          VIK & SØN
+```
+
+Stroke data. No red. No posture. No figure. `manualBlank` is set. That is the card.
+
+---
+
+## 13. THE VERBS THE STORY DEPENDS ON
+
+`GAME_DESIGN.md` §4.4 and §5 own movement, stealth actions and carry classes. This table is the
+complete input vocabulary **as the story uses it**, with the two additions this document requires
+(**sit** and **mark**) and the one rule v1.0 assigned to its emotional centrepiece without ever
+specifying: long-object carry.
+
+### 13.1 Verb table
+
+| Verb | Input | Hold | Hands | Taught | Failure mode | Feedback | Story load |
+|---|---|---|---|---|---|---|---|
+| Walk / crouch / freeze | move keys | — | 0 | N1 (`GAME_DESIGN.md` §11) | — | footstep noise | weight |
+| **Sit** | interact, at a seat surface | 0.4 s | 0 | **N1, 0:10 area, the rest stump** | none | stamina 19.0/s (`GAME_DESIGN.md` §5.2 gives 11.0 standing, 15.0 crouched) | **Ending C** |
+| Carry A (pocket) | interact | — | 0 | N1 | — | — | the shim, the pencil |
+| Carry B (one hand) | interact | — | 1 | N1 | — | — | brackets, hinges |
+| Carry C (two hands) | interact | — | 2 | N1 (2:40, the pier) | — | 0.82× speed | the sink, the glazing |
+| Carry D (shoulder) | interact | — | 4 | N1 (4:05, the beam) | — | 0.63×, 28° of screen occluded | beams, trusses |
+| **Carry E (drag)** | interact | — | 4 | **N3** (`GAME_DESIGN.md` §8.3) | — | 0.34×, continuous scrape | the hearth stone; **Ending A** |
+| Set down | interact, hold 2.1 s | 2.1 s | — | N1 | interrupted → drop | silent | — |
+| Drop | drop key | — | — | N1 | — | loud (`GAME_DESIGN.md` §4.2) | **under pressure everyone drops** |
+| Place | place, in a slot ghost | — | 2 | N1 (1:02) | `build:place-failed` (§14.1) | the knock (§13.3) | everything |
+| **Committed hold** (glazing) | place, hold | **9.0 s** | **2, committed** | N6 | release → 18 kg of glass falls | — | **the Robin scene** (§6, N6) |
+| Torque-hold | interact, hold | 2.2 s | 2 | N1 (1:02, slowed to 0.6× once) | over-torque splits wood | 3–6 hammer taps | the whole build |
+| Remove | interact, hold 8.0 s | 8.0 s | 2 | N2 | — | `wrench` noise 0.45 | **undoing is loud** |
+| **Saw** | hold | 31 s / cut | 2 | **N3** | push harder → blade binds, rate −40%, pitch +300 Hz | `kind:'saw'`, r 90 (§14.1) | Night Three |
+| **Mark** (pencil) | place, at a jamb slot | 1.6 s | 1 | **N6** | — | silent | **§10.3** |
+| Throw | hold + release | — | 1 | N2 | — | `throw` r 18 | you throw away hardware you are short of |
+| Douse lantern | tap | 0.25 s | 0 | N1 | 0.6 s relight | `lum −0.55` | you cannot read the manual in the dark |
+| Open manual | manual key | **0.18 s** (§2.4.1) | 2 | N1 (0:04) | — | the wipe | the whole game |
+| **Grab** | contact from behind | 4.5 s | 2 | **N3** | seen → Panic | silent | **Ending A** |
+
+### 13.2 Sit — the verb that makes the ending legal
+
+**Sit is not an ending mechanic. It is a stamina mechanic that has been in the game since minute
+ten, and it is used every night, and on Night Seven it is used once more.**
+
+| Property | Value |
+|---|---|
+| Surfaces | Seat-class: the rest stump (11.4 m SE), the boathouse bench, the dock edge, two logs on the fire road, **`CH-A` and `CH-B` on Night Seven** |
+| Affordance | The same 0.65 m white ghost the game uses for every placement in the game |
+| Regen | **19.0/s**, against 11.0 standing and 15.0 crouched (`GAME_DESIGN.md` §5.2) |
+| Cost | You are stationary and `motionF` is 0.30. Sitting is the safest and slowest thing in the game |
+| Exit | Any movement input, 0.5 s |
+| Why the player learns it | Because Night One is 540 seconds of hauling and the rest stump is the only comfortable-looking object in a wet forest. Playtests will show > 90% of players sit on it inside the first night without a prompt |
+
+**And the second stump.** Beside the rest stump: a smaller one, with a **folded blanket and a tin
+cup**, brushed off and refreshed every night. It looks identical in every way that matters. **It
+has no seat ghost. It cannot be sat in.** The game refuses, silently, with no toast and no sound,
+every time, for six nights.
+
+Nobody ever sits there.
+
+### 13.3 The knock — the positive-correctness channel
+
+v1.0's only correctness signal was the creak, which is negative, delayed 2–9 seconds, and gated on
+wind. `AUDIO_DIRECTION.md` §1.1 requires that a player can tell a good join from a bad one **by ear
+alone, eyes closed, in under 250 ms.** So there is an immediate positive channel and it is real
+carpentry:
+
+| Join | Sound on every hammer tap | Synthesis (`AUDIO_DIRECTION.md` §4.1 sawn-wood modal bank) |
+|---|---|---|
+| **Seated, torque ≥ 0.72** | **Knocks dead and dry.** 40 ms, no tail | modal bank, `Q × 0.6`, decays `× 0.35`, `−8 dB` |
+| Rotated / under-seated | **Rings.** A decaying overtone at ~780 Hz for 340 ms | same bank, `Q × 2.4`, decays `× 3.1`, `+2 dB` |
+| Wrong-slot | Knocks dead (it *is* seated — it is just seated in the wrong place) | as Seated. **There is no audio tell for a wrong-slot join and there must not be**, because `GAME_DESIGN.md` §2.3 makes that error a delayed diagnostic puzzle on purpose |
+| Wrong-part (forced) | Splits | `join_split`, `GAME_DESIGN.md` §2.3 |
+
+Dead = right. Ringing = wrong. Immediately, on the first tap, before any creak, for the whole game.
+A carpenter really does hear this, and by Night Three the player does too, and on Night Seven the
+whole house is silent when they walk it, and that is only legible because of this.
+
+### 13.4 Long-object carry — the rule v1.0 never wrote
+
+First-person long-object carry is a known nightmare: a 4 m truss clips trees, occludes the camera,
+cannot go through a doorway, and turns every corner into a physics tantrum. v1.0 assigned exactly
+that object to the emotional centrepiece night and specified nothing.
+
+**Rule, for any part with a longest dimension > 2.0 m** (beams, posts, joists, trusses, sheathing):
+
+| Rule | Value |
+|---|---|
+| Carry pose | Shoulder. The part lies **across** the shoulder at a **forced +40° yaw offset** from view direction — it does not point where you look, it points where a carried board points |
+| Collision | A **swept capsule**, radius 0.28 m, along the part's axis. Not the mesh |
+| On impact > 1.2 m/s relative | The part **rotates in his hands** — a torque impulse costing **0.4 s** of yaw control, plus `noise:emit { kind:'impact' }` per `GAME_DESIGN.md` §5.3. **It does not clip and it does not stop you dead.** You get shoved by your own lumber |
+| Doorways and gaps | A part of length `L` cannot pass an opening narrower than `L · sin(28°)`. **The game does not solve this for you: you set down (2.1 s, silent), walk through, and re-lift (2.1 s).** 4.2 s and no noise, or drop it and make 0.80-intensity noise. That is an honest cost and it is the same choice the game asks everywhere else |
+| Camera | Class D already occludes the lower 28° of screen (`GAME_DESIGN.md` §5.3). Nothing further |
+
+---
+
+## 14. REQUESTED ADDITIONS — the honest list
+
+v1.0 ended with "Nothing in this document requires a system that does not exist in
+`ARCHITECTURE.md`," which was false. Here is everything, written as diffs.
+
+### 14.1 `ARCHITECTURE.md` §5 — four new events, one new payload note, two new read-only properties
+
+| Event | Payload | Emitted by | Consumed by | Why |
+|---|---|---|---|---|
+| `build:place-failed` | `{ part, slot, reason: 'dependency'\|'geometry'\|'occupied'\|'type' }` | BuildSystem | HUD, Audio | `build:place` currently has no reject path. Night Five's truss (`'geometry'`), the county stake (`'dependency'`) and `CH-A` before `builtBothChairs` (`'type'`) all need one |
+| `ui:blueprint-ready` | `{}` | **BlueprintUI** | anyone | Closes the handshake: `HUD` emits `ui:blueprint-open`, `BlueprintUI` plays the wipe (§2.4.1), `BlueprintUI` says when the page is legible. Nothing else may gate on `ui:blueprint-open` |
+| `hud:mode` | `{ mode: 'full'\|'minimal'\|'none' }` | NightManager | HUD | Night Seven strips the HUD and there was no channel for it |
+| `noise:emit` new `kind` | `'saw'` — radius **90**, intensity **0.55**, re-emitted every **0.5 s** while cutting | BuildSystem | NoiseSystem | Night Three's entire mechanic. Add the row to `GAME_DESIGN.md` §4.2's `kind` table |
+| `night:complete` payload note | `score: Score` — **`Score` is defined in `GAME_DESIGN.md` §9.** Add the pointer | — | — | The shape exists; the cross-reference does not, and one reviewer already concluded it was undefined |
+
+| Property | On | Type | Read by |
+|---|---|---|---|
+| `Player.handState` | `Player.js` | `'dry'\|'wet'\|'muddy'\|'bloodied'\|'split'` | `BlueprintUI` (§2.4.1), `Materials` (the hands) |
+| `Player.seated` | `Player.js` | `bool` | `Campers` (`motionF` 0.30), `NightManager` (§11.5) |
+
+### 14.2 `ARCHITECTURE.md` §9 — file ownership
+
+| Path | Owner | Change |
+|---|---|---|
+| `src/story/Panels.js` | **Story** | **New file.** Hand-authored hero-panel stroke data (§3.5). Legal under the zero-binary-assets rule: it is source |
+| `src/world/CabinSite.js` | Build | Amend purpose to *"the build plot, foundation, slot layout, **and the finished interior**"* (§10.4, collision C6) |
+
+### 14.3 `GAME_DESIGN.md` — amendments
+
+1. **§2.1, part taxonomy** — add one row: `Occupant | type:'occupant' | mass 57 kg | carry class E | slots 4`. Bodies are already class E in §8.3; this makes them a *part type* so `CH-A` can accept one (§11.2). No new API — `Slot.acceptsType` already exists in §2.2.
+2. **§2.2, `Slot`** — no schema change. Named story slots reserved **inside** the existing per-night budgets, not added to them:
+   - N6 (20 slots): `GL-01…11`, `DF-01`, `DR-01`, `HG-01`, **`SK-01`**, `FL-01`, **`PM-01…04`**
+   - N7 (28 slots): hearth 1, chimney 6, porch 8, roof cap 9, table + **`CH-A`** 2, **`CH-B`** 1, G7 deferred 1
+3. **§2.3** — add the **knock/ring** row set from §13.3. It is the positive-correctness channel §1.1 of `AUDIO_DIRECTION.md` requires and it is currently missing.
+4. **§4.2** — add `kind: 'saw'`.
+5. **§4.4** — add **sit** (§13.2) and **mark** (§13.1).
+6. **§5.3** — add the long-object rule (§13.4).
+7. **§7, Night 6 weather** — annotate `wind 0.2` as **gust amplitude 0.04, period 90 s** (§5). Without the annotation `Weather.js` will generate ordinary gust structure and destroy the best night in the game.
+8. **§9** — the per-night card variation and the posture grade (§12.3).
+
+### 14.4 `AUDIO_DIRECTION.md` — the projection field (collision C5)
+
+`VoiceBank` gains a per-line `projection`. §7.2's chain is unchanged except for two constants:
+
+```js
+// AUDIO_DIRECTION.md §7.2, voLP and preGain
+const PROJ = {
+  spoken:  { k: 1.0, preGain:  0 },   // 'S' — the existing behaviour
+  called:  { k: 2.6, preGain: +7 },   // 'C'
+  sung:    { k: 3.1, preGain: +8 },   // 'G'
+  shouted: { k: 4.0, preGain: +11 },  // 'H'
+};
+voLP.frequency = (16000 * PROJ[p].k) / Math.pow(1 + d / 3.2, 1.35);
+```
+
+Also: §7.4's six voice profiles are re-keyed per §7.1 of this document; slots 5 and 6 change
+materially and must be regenerated.
+
+### 14.5 `ART_DIRECTION.md` — two blocking corrections and one addition
+
+1. **§8.4, the mascot's face** — two filled `1.5 px` dots at 1.42× anatomical spacing. **No hockey
+   mask, no breather holes, no eye slots** (collision C2, §3.3). Blocking.
+2. **§8.6, the product names** — real Norwegian, per §12.1 (collision C3).
+3. **§8.4, poses** — add `arms-at-sides`.
+4. **§1, references** — add a single-source Wyeth interior for §10.4.
+
+---
+
+## 15. ACCESSIBILITY & DIFFICULTY — the story doc's positions
+
+`GAME_DESIGN.md` §10 owns this and does it well: difficulty scales `diffMul`, night duration,
+creak `lambda`, torque band width and shortfall count — **never enemy count**; `settings.colorblind`
+remaps `#d92b2b`; every red mark is redundantly encoded with a dashed stroke and a corner tick;
+`puzzleHints` and `creakAssist` remove the *detective* game without touching the *stealth* game.
+Four positions this document is responsible for, because they are narrative decisions:
+
+| Question | Position |
+|---|---|
+| **Does the world pause when the manual is open?** | **No. It must not, and it must be said in every doc.** You are reading a piece of paper with your back to a forest. `GAME_DESIGN.md` §2.4 states it; `ART_DIRECTION.md` §8.7 shows the world blurred but *live* behind the page |
+| **Is the wipe skippable?** | **No, and it does not need to be.** At 0.18 s baseline it is the page-unfold animation `ART_DIRECTION.md` §8.7 already specifies, and it costs ≈ 82 s across a three-hour playthrough (§2.4.1). v1.0's 0.9 s version would have cost 6–12 minutes and *should* have been skippable, which is why it was wrong |
+| **Does the red survive protanopia?** | Yes, and the story-critical marks are the ones to check: the ✗ on Panel 2.3, the red outline on every manifest shortfall, and **Ending A's diagonal**. All three are **form-encoded as well as colour-encoded** — the ✗ is two crossed strokes, the manifest outline is dashed `(4,3)`, and the diagonal is a single corner-to-corner stroke at 4.0 px that is legible with all colour removed. `GAME_DESIGN.md` §10.2 remaps the hue; the *form* is this document's job and it is done |
+| **A manual-pinning option?** | `GAME_DESIGN.md` §10.1 already answers it: the manual stays open while walking at `story` and `standard`; only `gristle` requires you to stop. That is the right shape — the memory load is the puzzle at the top difficulty and an option everywhere else |
+| **Difficulty must never change the fiction** | No difficulty setting changes a beat, a line, a panel, a prop, or an ending. `story` mode is not a shorter story. It is the same story at 0.62× detection accrual |
+
+---
+
+## APPENDIX — STORY FLAGS, BEATS, AND WHO TOUCHES THEM
+
+### A.1 Story flags — with set/read columns
+
+v1.0 declared five flags (`foundShim`, `stoleHinges`, `riggedCounterweight`, `foundRuinAnchors`,
+`manualBlank`) that nothing set and nothing read. Every flag below has at least one writer and at
+least one reader, or it is not here.
+
+| Flag | Set by | When | Read by | Effect |
+|---|---|---|---|---|
+| `pulledCountyStake` | BuildSystem | `build:remove` of `county_stake_01`, N1 | NightManager, Props | Gates `n1_thumbs_up`; the stake stays out for the game |
+| `foundPlateShim` | BuildSystem | pickup of `shim_plate_1961`, N1 | Blueprint, Menu | Fix panel redraws black + tick; N1 card line |
+| `sawIntroPanel` | NightManager | first `ui:blueprint-ready`, N1 | Blueprint | N2 card posture |
+| `robinSuspicious` | NightManager | `n2_robin_hears` | Campers, VoiceBank | Robin's N3 patrol includes the plot; unlocks §8.9 |
+| `robinDismissed` | NightManager | `n3_not_believed` | Campers, VoiceBank | Robin patrols alone from N4; unlocks §8.8 |
+| `cutTheGroundSill` | BuildSystem | saw completes on `C-NE`, N3 | Menu | N3 card line `CUTS MADE ON SITE` |
+| `tookBoathouseDoor` | BuildSystem | pickup of `boathouse_door_leaf`, N4 | Props, Campers, VoiceBank | Leaf gone permanently; boathouse becomes a search node; unlocks `MRG_EVID_01` |
+| `firstBlood` | NightManager | `n4_dale` | Blueprint, Player, Menu | Adds the §8.3 safety figure to every later page; `handState = 'bloodied'`; unlocks the red card line |
+| `riggedTruss` | BuildSystem | the un-manualled join, N5 | Menu, Blueprint | N5 card line `IMPROVISATION — NOTED`; Panel 6.2 redraws the rig in Ansel's hand |
+| `sawSecondFigure` | NightManager | first `ui:blueprint-ready` on Panel 5.4 | Menu | `n5_two_persons` |
+| `foundErrata` | BuildSystem | pickup from the box, N6 | Blueprint, Menu | Stamps the correction over Panel 6.2 |
+| `tookBoathouseHinges` | BuildSystem | pickup of `hinge_set`, N6 | Props, VoiceBank | Unlocks `MRG_EVID_02` |
+| `installedSink` | BuildSystem | `SK-01` seats, N6 | NightManager, Render | **Gates the reflection** (§10.1); gates `n6_robin_inside` |
+| `markedDoorframe` | BuildSystem | `PM-04` placed, N6 | NightManager, Props | Gates `n6_robin_inside`; sets Robin's hand-height target |
+| `usedRuinAnchors` | BuildSystem | first anchor-validated placement, N6 | Menu | N6 card line |
+| `robinSaw` | NightManager | `n6_robin_inside` | NightManager, VoiceBank | Robin is at the treeline on N7 (§11.1) |
+| `bevRemembered` | NightManager | `n6_bev_remembers` | VoiceBank, Menu | Unlocks §8.14 Bev lines |
+| `reportedNight_<n>` | NightManager | `night:failed { reason:'reported' }` | Props, CabinSite | Tape + county notice; slot lockout (§6.10) |
+| `builtBothChairs` | BuildSystem | `CH-B` seats, N7 | NightManager | **Gates all three endings** (§11.5) |
+| `manualBlank` | Blueprint | `night:begin`, N7 | BlueprintUI, Menu | Blank spread; the terminal card |
+| `ending_a` \| `ending_b` \| `ending_c` | NightManager | §11 | Menu | Credits |
+
+### A.2 `story:beat` ids, in order
+
+```
+n1_stake_pulled, n1_thumbs_up,
+n2_robin_hears,
+n3_not_believed,
+n4_dale,
+n5_two_persons,
+n6_robin_inside, n6_bev_remembers,
+n7_final
+```
+
+`report_delivered` is also emitted by `GAME_DESIGN.md` §4.3 and is not a story beat; it is a
+mechanical one and may fire on any night from Two onward.
+
+### A.3 Per-night manifest at a glance
+
+| N | Assembly | Slots | Shortfalls | Location | Grammar | Hero panel | Card headline |
+|---|---|---|---|---|---|---|---|
+| 1 | GRUNNMUR | 6 | mallet (+ pier 6, + the plate) | fallen log, 31.6 m | G1 | 1.9 | `STEP 1 OF 7` |
+| 2 | BJELKELAG | 9 | 4th L-bracket | woodpile, 58.4 m | G2 | — (2.7 procedural) | `HARDWARE ACTUALLY REQUIRED: MORE.` |
+| 3 | REISVERK | 14 | 2 gussets (+ the saw) | boathouse eave, 100.5 m | G3 | — (3.6 procedural) | `WE WOULD PREFER YOU DID NOT.` |
+| 4 | KLEDNING | 18 | hand brace; 1 board | mess hall 151.3 m; **the boathouse door** | G4 | 4.9 | `PLEASE ASSEMBLE ALONE.` |
+| 5 | TAKSTOL | 22 | 3 truss pins + tallow (+ **a second person**) | counselor's truck, 141.6 m | G5 | 5.4, 5.7 | `IMPROVISATION — NOTED.` |
+| 6 | VINDU & DØR | 20 | errata slip; hinge set; short bag (+ **`0000-000`**) | **the box**, 100.5 m | G6 | 6.5, 6.8, 6.9 | `PLEASE CONTACT CUSTOMER SERVICE.` |
+| 7 | HJEM | 28 | Tier-3 item; errata slip; bag short by 3 (+ **a person**) | payphone, 160.6 m | **all seven** | 7.1 | *(no card)* |
+
+### A.4 Non-negotiables for every other agent
+
+1. **No narrator.** Ever.
+2. **No lore collectibles.** No readable documents, no journals, no notes.
+3. **No text in the world.** Printed lexical text renders as grey blur; numerals, dates and article
+   numbers render sharp; one word — `HJEM` — is legible, on the cover, all game (§0.6).
+4. **The slasher never speaks.** Not a grunt, not a roar. One breath, once, on Night Seven (§2.3).
+5. **The campers are never stupid and never cruel.** If a line makes one of them a horror-movie
+   idiot, it is wrong and it is cut.
+6. **The manual is the only comedian — for all seven nights.** It does not stop being funny. The
+   world curdles underneath it while it goes on doing bits, and Night Seven's bit is the funniest
+   in the game (§0.4.4, §6.9).
+7. **BJØRN is never in danger and never reacts to anything frightening** (`ART_DIRECTION.md` §8.4).
+8. **The theme is stated once, in §1.1 of this document, and nowhere in the game.** Six lines were
+   cut for breaking this rule (§8.2). Do not write a seventh.
+
+---
+
+*The game must be fully playable, and fully sad, with the VO folder deleted. Voice is weather.*

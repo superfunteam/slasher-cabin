@@ -294,7 +294,7 @@ export class VoiceBank {
     // Decoded-buffer LRU + in-flight dedupe. We NEVER preload the bank.
     this._buffers = new Map();
     this._loading = new Map();
-    this._failed = new Set();
+    this._failed = new Map();   // id -> consecutive failure count; >= 2 is written off
     this._cacheMax = 12;
 
     // Voice slots: persistent subgraphs; only the source node is recreated per play (§9.1).
@@ -612,13 +612,17 @@ export class VoiceBank {
   async _fetchManifest() {
     let res;
     try {
-      res = await fetch(voUrl('manifest.json'), { cache: 'force-cache' });
+      // `no-cache` (revalidate), NOT `force-cache`. A dev server answers a not-yet-existing
+      // path with the SPA index.html, and `force-cache` will happily keep serving that stale
+      // text/html forever — so the VO bank would stay invisible for the rest of the session
+      // even after the files land. It is one small request at boot; revalidate it.
+      res = await fetch(voUrl('manifest.json'), { cache: 'no-cache' });
     } catch {
       return null;                     // offline, file://, CSP — silent and expected
     }
     if (!res || !res.ok) return null;
 
-    // Vite's dev server answers unknown paths with index.html. Refuse to parse HTML as JSON.
+    // Belt and braces: the SPA fallback returns 200 text/html. Refuse to parse HTML as JSON.
     const type = res.headers?.get?.('content-type') ?? '';
     if (type && type.indexOf('json') < 0) return null;
 
@@ -704,6 +708,9 @@ export class VoiceBank {
     this._cacheMax = this.ctx?.settings?.tier?.(6, 10, 14, 18) ?? 12;
   }
 
+  /** A line is "written off" only after a retry has also failed. */
+  _isDead(id) { return (this._failed.get(id) ?? 0) >= 2; }
+
   /** Lazy fetch + decode behind a small LRU. */
   _ensureBuffer(id) {
     const hit = this._buffers.get(id);
@@ -712,14 +719,18 @@ export class VoiceBank {
       this._buffers.set(id, hit);
       return Promise.resolve(hit);
     }
-    if (this._failed.has(id)) return Promise.resolve(null);
+    if (this._isDead(id)) return Promise.resolve(null);
     const inFlight = this._loading.get(id);
     if (inFlight) return inFlight;
 
     const p = (async () => {
       try {
-        const res = await fetch(voUrl(`${id}.mp3`), { cache: 'force-cache' });
+        // `default`, not `force-cache`: normal HTTP caching still keeps every line resident
+        // for the session, without the risk of pinning a stale error or SPA-fallback body.
+        const res = await fetch(voUrl(`${id}.mp3`), { cache: 'default' });
         if (!res.ok) throw new Error(String(res.status));
+        const ctype = res.headers?.get?.('content-type') ?? '';
+        if (ctype.indexOf('html') >= 0) throw new Error('got html, not audio');
         const raw = await res.arrayBuffer();
         if (this._disposed || !this.actx) return null;
         const decoded = await this.actx.decodeAudioData(raw);
@@ -736,9 +747,12 @@ export class VoiceBank {
         if (entry) entry.dur = buf.duration;
         return buf;
       } catch (e) {
-        // One failure is enough. Never retry in a loop; a missing file is a valid state.
-        this._failed.add(id);
-        Log.debug(`VoiceBank: line '${id}' unavailable (${e?.message ?? e})`);
+        // One retry, then the line is written off for the session. A missing file is a valid
+        // state, not an error — but a single transient hiccup should not silently delete a
+        // line from the bank for the rest of the night.
+        const n = (this._failed.get(id) ?? 0) + 1;
+        this._failed.set(id, n);
+        Log.debug(`VoiceBank: line '${id}' unavailable (${e?.message ?? e})${n >= 2 ? ' — giving up' : ''}`);
         return null;
       } finally {
         this._loading.delete(id);
@@ -1306,7 +1320,7 @@ export class VoiceBank {
     let bestScore = -1;
     for (let i = 0; i < pool.length; i++) {
       const id = pool[i];
-      if (this._usedThisNight.has(id) || this._failed.has(id)) continue;
+      if (this._usedThisNight.has(id) || this._isDead(id)) continue;
       const e = this._lines.get(id);
       if (!e) continue;
       const score = (0.25 + e.weight) * (0.35 + this._rand.next());
@@ -1338,7 +1352,7 @@ export class VoiceBank {
     if (!id) return null;
     const e = this._lines.get(id);
     if (!e) return null;
-    if (this._usedThisNight.has(id) || this._failed.has(id)) return null;
+    if (this._usedThisNight.has(id) || this._isDead(id)) return null;
     return e;
   }
 
@@ -1824,7 +1838,7 @@ export class VoiceBank {
     const off = Math.floor(this._rand.next() * pool.length);
     for (let i = 0; i < pool.length; i++) {
       const id = pool[(i + off) % pool.length];
-      if (this._buffers.has(id) || this._failed.has(id) || this._usedThisNight.has(id)) continue;
+      if (this._buffers.has(id) || this._isDead(id) || this._usedThisNight.has(id)) continue;
       this._ensureBuffer(id);
       return;
     }

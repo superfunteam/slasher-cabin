@@ -1881,6 +1881,14 @@ export const RECIPES = creakRecipes(breathRecipes({
   'click.flashlight.off': { dur: 0.3, v: 3, family: 'camper', priority: 2, peakDb: -16, phase: 1, build: (R, d) => buildClick(R, d, { off: true }) },
   'click.shutter': { dur: 0.25, v: 3, family: 'camper', priority: 2, peakDb: -14, phase: 1, build: buildShutterClick },
   'glass.ping': { dur: 0.32, v: 4, family: 'lantern', priority: 0, peakDb: -24, phase: 1, build: buildGlassPing },
+  'lantern.squeak': {
+    dur: 0.28, v: 4, family: 'lantern', priority: 1, peakDb: -26, phase: 1,
+    build: (R, d) => frictionOsc(R, d, {
+      t0: T0, dur: R.rand.range(0.09, 0.18), slipRate: 30, fStart: 1750 * R.rand.range(0.9, 1.15),
+      pitchDropCents: 140, qStart: 90, level: 0.5, partnerDb: -14, bedDb: -60,
+      bodyF: 0, irregular: 0.5, drive: 1.2,
+    }),
+  },
   'lantern.hiss': { dur: 4.2, v: 1, family: 'lantern', priority: 1, peakDb: -6, phase: 1, loop: true, build: buildLanternHiss },
   'cricket.chirp': { dur: 0.22, v: 6, family: 'cricket', priority: 0, peakDb: -12, phase: 1, build: buildCricketChirp },
   'cricket.wash': { dur: 4.2, ch: 2, half: true, v: 1, family: 'cricket', priority: 0, peakDb: -14, phase: 1, loop: true, build: buildCricketWash },

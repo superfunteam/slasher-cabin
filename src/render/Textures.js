@@ -85,8 +85,16 @@ uniform float uHeightOnly;      // 1.0 during the half-res displacement pass
 
 #define TAU 6.28318530717958648
 #define PI  3.14159265358979324
-// Author albedo straight from the ART_DIRECTION hex table, in 0..255 sRGB display units.
-#define C3(r, g, b) (vec3(r, g, b) * 0.00392156862745098)
+
+// The albedo attachment's colorSpace is SRGBColorSpace, which makes Three allocate it as
+// SRGB8_ALPHA8 -- the GPU encodes linear->sRGB on write and decodes on read, for free.
+// So the shader must emit LINEAR values.  C3() takes the ART_DIRECTION hex table straight
+// (0..255 sRGB display units) and converts, which means the byte finally stored in the
+// texture is exactly the authored hex, and all our blending happens in linear light.
+vec3 srgbToLinear(vec3 c) {
+  return mix(c * 0.0773993808, pow((c + 0.055) * 0.947867299, vec3(2.4)), step(vec3(0.04045), c));
+}
+#define C3(r, g, b) srgbToLinear(vec3(r, g, b) * 0.00392156862745098)
 `;
 
 // ---------------------------------------------------------------------------------------------
@@ -1479,6 +1487,7 @@ export class Textures {
     this._waterStep = 1 / 30;
 
     this._maxAniso = 1;
+    this._mrt = true;          // re-detected in init(); assumed until a context says otherwise
     this._baseRes = 512;
     this._bytes = 0;
     this._debugInstalled = false;
@@ -1500,6 +1509,12 @@ export class Textures {
     try {
       this._maxAniso = renderer.capabilities?.getMaxAnisotropy?.() ?? 1;
     } catch { this._maxAniso = 1; }
+
+    this._mrt = _detectMRT(renderer);
+    if (!this._mrt) {
+      Log.warn('Textures: this context cannot bind 3 colour attachments — baking each material '
+             + 'as three sequential single-target passes instead. Identical output, 3x the fill.');
+    }
 
     const t0 = performance.now();
     this._buildRig();
@@ -1652,15 +1667,43 @@ export class Textures {
   _material(name, def) {
     const seedBase = this.ctx?.settings?.get?.('seed') ?? 0;
     const seed = hashStr(`${name}|${seedBase}`) * 61.0;
+
+    // Without MRT the three outputs become plain globals and one selected attachment is written
+    // per pass. MAIN is reused verbatim (renamed) so both paths bake byte-identical results.
+    const prelude = this._mrt ? PRELUDE : PRELUDE
+      .replace('layout(location = 0) out vec4 oAlbedo;',
+               'layout(location = 0) out vec4 oFrag;\nvec4 oAlbedo;')
+      .replace('layout(location = 1) out vec4 oNormal;', 'vec4 oNormal;')
+      .replace('layout(location = 2) out vec4 oORM;', 'vec4 oORM;\nuniform float uOutput;');
+
+    const main = this._mrt ? MAIN : MAIN.replace('void main() {', 'void scBake() {')
+      + '\nvoid main() {\n'
+      + '  oAlbedo = vec4(0.0); oNormal = vec4(0.0); oORM = vec4(0.0);\n'
+      + '  scBake();\n'
+      + '  oFrag = uOutput < 0.5 ? oAlbedo : (uOutput < 1.5 ? oNormal : oORM);\n'
+      + '}\n';
+
     const frag = [
-      PRELUDE,
+      prelude,
       `#define AO_TAPS ${Math.max(3, def.taps | 0)}`,
       def.alpha ? '#define HAS_ALPHA' : '',
       NOISE,
       DECLS,
       M[name],
-      MAIN,
+      main,
     ].join('\n');
+
+    const uniforms = {
+      uRes: { value: new THREE.Vector2(1, 1) },
+      uNormalStrength: { value: def.relief / Math.max(def.tile, 1e-4) },
+      uAOStrength: { value: def.ao },
+      uCavity: { value: def.cavity },
+      uToksvig: { value: def.toksvig },
+      uSeed: { value: seed },
+      uTime: { value: 0 },
+      uHeightOnly: { value: 0 },
+    };
+    if (!this._mrt) uniforms.uOutput = { value: 0 };
 
     return new THREE.RawShaderMaterial({
       glslVersion: THREE.GLSL3,
@@ -1668,16 +1711,7 @@ export class Textures {
       fragmentShader: frag,
       depthTest: false,
       depthWrite: false,
-      uniforms: {
-        uRes: { value: new THREE.Vector2(1, 1) },
-        uNormalStrength: { value: def.relief / Math.max(def.tile, 1e-4) },
-        uAOStrength: { value: def.ao },
-        uCavity: { value: def.cavity },
-        uToksvig: { value: def.toksvig },
-        uSeed: { value: seed },
-        uTime: { value: 0 },
-        uHeightOnly: { value: 0 },
-      },
+      uniforms,
     });
   }
 
@@ -1691,10 +1725,20 @@ export class Textures {
       Math.round(this._baseRes * (SIZE_SCALE[def.size] ?? 0.5)), 64, 2048,
     );
 
-    // MRT: albedo+opacity / normal+height / ORM+cavity.
-    const rt = new THREE.WebGLRenderTarget(size, size, { ..._rtOpts, count: 3 });
-    rt.texture.name = `${name}.albedo`;
-    const [albedoTex, normalTex, ormTex] = rt.textures;
+    // MRT: albedo+opacity / normal+height / ORM+cavity, in one pass. Without MRT the same three
+    // attachments become three single-target passes; `attach` hides the difference downstream.
+    let rt = null, rts = null, attach;
+    if (this._mrt) {
+      rt = new THREE.WebGLRenderTarget(size, size, { ..._rtOpts, count: 3 });
+      attach = [[rt, 0], [rt, 1], [rt, 2]];
+    } else {
+      rts = [0, 1, 2].map(() => new THREE.WebGLRenderTarget(size, size, { ..._rtOpts, count: 1 }));
+      rt = rts[0];
+      attach = [[rts[0], 0], [rts[1], 0], [rts[2], 0]];
+    }
+    const albedoTex = attach[0][0].textures[attach[0][1]];
+    const normalTex = attach[1][0].textures[attach[1][1]];
+    const ormTex = attach[2][0].textures[attach[2][1]];
     _configure(albedoTex, THREE.SRGBColorSpace, this._maxAniso, `${name}.albedo`);
     _configure(normalTex, THREE.NoColorSpace, this._maxAniso, `${name}.normal`);
     _configure(ormTex, THREE.NoColorSpace, this._maxAniso, `${name}.orm`);
@@ -1708,7 +1752,7 @@ export class Textures {
     }
 
     const material = this._material(name, def);
-    this._rec.set(name, { rt, dispRt, material, size, def });
+    this._rec.set(name, { rt, rts, attach, dispRt, material, size, def });
 
     this._render(name, 0);
 
@@ -1755,13 +1799,23 @@ export class Textures {
     try {
       material.uniforms.uRes.value.set(size, size);
       material.uniforms.uHeightOnly.value = 0;
-      renderer.setRenderTarget(rt);
-      renderer.render(rig.scene, rig.camera);
+      if (rec.rts) {
+        for (let i = 0; i < 3; i++) {
+          material.uniforms.uOutput.value = i;
+          renderer.setRenderTarget(rec.rts[i]);
+          renderer.render(rig.scene, rig.camera);
+        }
+      } else {
+        renderer.setRenderTarget(rt);
+        renderer.render(rig.scene, rig.camera);
+      }
 
       if (dispRt) {
         const ds = dispRt.width;
         material.uniforms.uRes.value.set(ds, ds);
         material.uniforms.uHeightOnly.value = 1;
+        // The height-only branch of MAIN writes h into oAlbedo, i.e. attachment 0.
+        if (material.uniforms.uOutput) material.uniforms.uOutput.value = 0;
         renderer.setRenderTarget(dispRt);
         renderer.render(rig.scene, rig.camera);
         material.uniforms.uHeightOnly.value = 0;
@@ -2101,10 +2155,11 @@ export class Textures {
     for (const name of names) {
       const rec = this._rec.get(name);
       if (!rec) continue;
+      const at = rec.attach ?? [[rec.rt, 0], [rec.rt, 1], [rec.rt, 2]];
       const layers = [
-        ['albedo', rec.rt, 0, rec.size],
-        ['normal', rec.rt, 1, rec.size],
-        ['ORM (r=ao g=rough b=metal)', rec.rt, 2, rec.size],
+        ['albedo', at[0][0], at[0][1], rec.size],
+        ['normal', at[1][0], at[1][1], rec.size],
+        ['ORM (r=ao g=rough b=metal)', at[2][0], at[2][1], rec.size],
       ];
       if (rec.dispRt) layers.push(['height', rec.dispRt, 0, rec.dispRt.width]);
       for (const [label, rt, idx, sz] of layers) {
@@ -2145,7 +2200,12 @@ export class Textures {
 
   dispose() {
     for (const rec of this._rec.values()) {
-      try { rec.rt?.dispose(); } catch { /* ignore */ }
+      // rec.rt aliases rts[0] in the fallback path, so free the array when it exists.
+      if (rec.rts) {
+        for (const t of rec.rts) { try { t.dispose(); } catch { /* ignore */ } }
+      } else {
+        try { rec.rt?.dispose(); } catch { /* ignore */ }
+      }
       try { rec.dispRt?.dispose(); } catch { /* ignore */ }
       try { rec.material?.dispose(); } catch { /* ignore */ }
     }
@@ -2183,6 +2243,22 @@ export class Textures {
 // ---------------------------------------------------------------------------------------------
 // helpers
 // ---------------------------------------------------------------------------------------------
+
+/**
+ * Can this context bind three colour attachments at once?  WebGL2 mandates MAX_DRAW_BUFFERS >= 4
+ * so this is true everywhere in practice, but a software/ANGLE fallback or a future headless
+ * context can report less, and a silently incomplete framebuffer is a miserable thing to debug.
+ */
+function _detectMRT(renderer) {
+  try {
+    const gl = renderer?.getContext?.();
+    if (!gl || gl.MAX_DRAW_BUFFERS === undefined) return false;
+    const max = gl.getParameter(gl.MAX_DRAW_BUFFERS);
+    return Number.isFinite(max) && max >= 3;
+  } catch {
+    return false;
+  }
+}
 
 function _configure(tex, colorSpace, aniso, name) {
   tex.name = name;
