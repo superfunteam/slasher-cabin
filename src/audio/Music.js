@@ -975,10 +975,15 @@ export class Music {
     slot.until = startT + durS;
     slot.attack = Math.max(0.004, attackMs / 1000) / 3;
     slot.release = Math.max(0.008, releaseMs / 1000) / 3;
+    // Event-driven silences must land on the frame they fire, not on the next 10 Hz
+    // parameter tick — S3 in particular is only 180 ms wide.
+    if (this._gate && startT <= this.ac.currentTime + 1e-6) this._evalHolds(this.ac.currentTime);
   }
 
   _releaseHold(id) {
-    for (const h of this._holds) if (h.active && h.id === id) h.active = false;
+    let hit = false;
+    for (const h of this._holds) if (h.active && h.id === id) { h.active = false; hit = true; }
+    if (hit && this._gate) this._evalHolds(this.ac.currentTime);
   }
 
   /** Highest-priority active rule wins and rules do not blend (§8). No allocation. */

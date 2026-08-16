@@ -357,14 +357,19 @@ const M = {};
 // cracks, fibre bundles, micro grain, and moss pads that only grow in the fissures.
 M['bark-pine'] = /* glsl */`
 float H(vec2 uv) {
-  vec2 w = warp(uv, vec2(4.0, 2.0), 0.028, 3);
-  float furrow = ridged(w * vec2(16.0, 4.0), vec2(16.0, 4.0), 5);
-  Cell c = worley(w * vec2(8.0, 3.0), vec2(8.0, 3.0), 1.0);
-  float crack = smoothstep(0.0, 0.20, c.f2 - c.f1);          // 0 inside the crack
-  float plate = crack * (0.72 + 0.56 * c.id);                 // plates differ in thickness
-  float fibre = fbm(w * vec2(48.0, 12.0), vec2(48.0, 12.0), 4, 0.5);
-  float grain = fbm(uv * vec2(256.0, 72.0), vec2(256.0, 72.0), 2, 0.5);
-  float h = furrow * 0.44 + plate * 0.30 + fibre * 0.15 + grain * 0.05;
+  // Warp mostly in U: the furrows must meander sideways but stay VERTICAL.
+  vec2 w = uv + vec2(0.030, 0.006) * (vec2(
+      fbm(uv * vec2(3.0, 1.0) + 1.7, vec2(3.0, 1.0), 3, 0.55),
+      fbm(uv * vec2(2.0, 2.0) + 8.3, vec2(2.0, 2.0), 3, 0.55)) - 0.5) * 2.0;
+  // Macro furrows: ridged, 7:1 vertical stretch.  This is the dominant read at 3 m.
+  float furrow = ridged(w * vec2(21.0, 3.0), vec2(21.0, 3.0), 5);
+  // Plates between the furrows: worley cells 6x taller than wide, narrow crack borders.
+  Cell c = worley(w * vec2(12.0, 2.0), vec2(12.0, 2.0), 0.85);
+  float crack = smoothstep(0.0, 0.085, c.f2 - c.f1);          // 0 inside the crack
+  float plate = crack * (0.62 + 0.60 * c.id);                 // plates differ in thickness
+  float fibre = fbm(w * vec2(64.0, 9.0), vec2(64.0, 9.0), 4, 0.5);
+  float grain = fbm(uv * vec2(300.0, 48.0), vec2(300.0, 48.0), 2, 0.5);
+  float h = furrow * 0.56 + plate * 0.20 + fibre * 0.16 + grain * 0.05;
   float mossN = fbm(uv * vec2(6.0, 6.0), vec2(6.0, 6.0), 4, 0.55);
   float moss = smoothstep(0.50, 0.76, mossN) * (1.0 - smoothstep(0.26, 0.60, h));
   h += moss * 0.11 * (0.55 + 0.45 * fbm(uv * vec2(140.0, 140.0), vec2(140.0, 140.0), 2, 0.5));
@@ -372,11 +377,11 @@ float H(vec2 uv) {
 }
 Surf S(vec2 uv, float h, float ao, vec3 n) {
   Surf o;
-  vec3 deep = C3(19.0, 16.0, 13.0);      // fissure floor, below bark.wet #15120f
-  vec3 mid  = C3(45.0, 39.0, 33.0);      // bark.dry #38312a, a touch up
-  vec3 crest= C3(96.0, 87.0, 75.0);      // moonlit plate crest -- the only bright bark tone
-  vec3 alb = mix(deep, mid, smoothstep(0.04, 0.46, h));
-  alb = mix(alb, crest, smoothstep(0.55, 0.97, h));
+  vec3 deep = C3(15.0, 13.0, 11.0);      // fissure floor, below bark.wet #15120f
+  vec3 mid  = C3(38.0, 33.0, 28.0);      // bark.dry #38312a
+  vec3 crest= C3(78.0, 70.0, 60.0);      // moonlit plate crest -- the only bright bark tone
+  vec3 alb = mix(deep, mid, smoothstep(0.02, 0.44, h));
+  alb = mix(alb, crest, smoothstep(0.58, 0.98, h));
   // low frequency: whole regions of trunk are darker where rain tracks down
   float stain = fbm(uv * vec2(3.0, 2.0), vec2(3.0, 2.0), 4, 0.6);
   float rainTrack = fbm(uv * vec2(14.0, 2.0), vec2(14.0, 2.0), 3, 0.6);
@@ -504,12 +509,16 @@ M['wet-earth'] = /* glsl */`
 float H(vec2 uv) {
   vec2 w = warp(uv, vec2(3.0, 3.0), 0.024, 3);
   float base = fbm(w * vec2(5.0, 5.0), vec2(5.0, 5.0), 6, 0.55);
-  float h = 0.14 + base * 0.46;
-  Cell p1 = worley(w * vec2(22.0, 22.0), vec2(22.0, 22.0), 0.9);
-  float rad = 0.30 + 0.20 * p1.id2;
-  h += sqrt(max(0.0, rad * rad - p1.f1 * p1.f1)) * 0.62 * step(0.38, p1.id);
-  Cell p2 = worley(w * vec2(60.0, 60.0), vec2(60.0, 60.0), 1.0);
-  h += sqrt(max(0.0, 0.0324 - p2.f1 * p2.f1)) * 0.55 * step(0.55, p2.id);
+  // clods: the compacted-soil lumps that give mud its 10 cm read
+  float clod = ridged(w * vec2(11.0, 11.0), vec2(11.0, 11.0), 4);
+  float h = 0.10 + base * 0.40 + clod * 0.20;
+  // Sparse, size-varied, mostly-buried pebbles.  Density matters more than anything else here:
+  // a dense uniform field reads as polka dots, which is the classic procedural tell.
+  Cell p1 = worley(w * vec2(18.0, 18.0), vec2(18.0, 18.0), 0.95);
+  float rad = 0.13 + 0.26 * p1.id2 * p1.id2;
+  h += sqrt(max(0.0, rad * rad - p1.f1 * p1.f1)) * 0.75 * step(0.74, p1.id);
+  Cell p2 = worley(w * vec2(52.0, 52.0), vec2(52.0, 52.0), 1.0);
+  h += sqrt(max(0.0, 0.0144 - p2.f1 * p2.f1)) * 0.60 * step(0.84, p2.id);
   Seg sc = segField(uv * vec2(9.0, 9.0) + 5.0, vec2(9.0, 9.0), 0.45, 0.35, 1.40);
   h -= (1.0 - smoothstep(0.03, 0.14, sc.d)) * step(0.62, sc.id) * 0.17;
   h += (fbm(uv * vec2(150.0, 150.0), vec2(150.0, 150.0), 3, 0.5) - 0.5) * 0.08;
@@ -525,13 +534,14 @@ Surf S(vec2 uv, float h, float ao, vec3 n) {
   vec3 alb = mix(mudWet, mud, smoothstep(0.18, 0.62, h));
   alb = mix(alb, dust, smoothstep(0.72, 0.98, h) * (1.0 - zone) * 0.8);
   alb *= mix(0.70, 1.16, zone);
-  // pebbles read as cool grey stone, not tinted mud
+  // pebbles read as cool grey stone, but half-buried and mud-smeared -- never clean discs
   vec2 w = warp(uv, vec2(3.0, 3.0), 0.024, 3);
-  Cell p1 = worley(w * vec2(22.0, 22.0), vec2(22.0, 22.0), 0.9);
-  float rad = 0.30 + 0.20 * p1.id2;
-  float peb = step(0.38, p1.id) * smoothstep(rad, rad * 0.55, p1.f1);
-  vec3 pebCol = mix(C3(52.0, 56.0, 57.0), C3(88.0, 92.0, 92.0), p1.id2);
-  alb = mix(alb, pebCol * mix(0.72, 1.0, zone), peb * 0.92);
+  Cell p1 = worley(w * vec2(18.0, 18.0), vec2(18.0, 18.0), 0.95);
+  float rad = 0.13 + 0.26 * p1.id2 * p1.id2;
+  float peb = step(0.74, p1.id) * smoothstep(rad, rad * 0.45, p1.f1);
+  vec3 pebCol = mix(C3(44.0, 47.0, 48.0), C3(78.0, 80.0, 79.0), p1.id2);
+  pebCol *= 0.72 + 0.42 * fbm(uv * vec2(120.0, 120.0), vec2(120.0, 120.0), 3, 0.5);
+  alb = mix(alb, pebCol * mix(0.66, 0.94, zone), peb * 0.72);
   // standing water: the ART_DIRECTION §5.1 puddle op, baked as the material's rest state
   float pud = smoothstep(0.34, 0.14, h) * smoothstep(0.42, 0.75, zone);
   alb = mix(alb, water, pud);

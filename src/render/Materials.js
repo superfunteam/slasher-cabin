@@ -1152,7 +1152,7 @@ const SPECS = {
     porosity: 0.9, wetScale: 1.0, family: 'organic', uv: [1, 1],
     detail: [14, 0.45], breakup: [0.30, 22], ao: 0.6,
     cavity: { contrast: 1.2, bias: 0.0 },
-    card: 'needle', alphaTest: 0.42, side: THREE.DoubleSide,
+    card: 'needle', alphaTest: 0.30, alphaToCoverage: true, side: THREE.DoubleSide,
     wind: [1.0, 0.85, 0.0, 3.2],
     playerPush: [0.0, 0.0],
     translucent: [1.15, 0.36, 3.2, 0.45], transColor: 0x2c4a34,
@@ -1165,7 +1165,7 @@ const SPECS = {
     porosity: 0.9, wetScale: 1.0, family: 'organic', uv: [1, 1],
     detail: [12, 0.40], breakup: [0.32, 18], ao: 0.55,
     cavity: { contrast: 1.2, bias: 0.0 },
-    card: 'fern', alphaTest: 0.38, side: THREE.DoubleSide,
+    card: 'fern', alphaTest: 0.30, alphaToCoverage: true, side: THREE.DoubleSide,
     wind: [1.25, 1.15, 0.0, 1.1],
     playerPush: [0.85, 0.30],
     translucent: [1.55, 0.40, 2.6, 0.55], transColor: 0x35563c,
@@ -1308,6 +1308,7 @@ const SPECS = {
     // subsurface red bleed: a thin film lit from behind goes blood.hot
     translucent: [1.25, 0.20, 4.0, 0.35], transColor: PAL.bloodHot,
     physical: true, ior: 1.36, specularIntensity: 1.0,
+    decal: true, alphaTest: 0.04,
   },
   'blood-dry': {
     texKey: 'wet-earth',
@@ -1315,6 +1316,7 @@ const SPECS = {
     porosity: 0.75, wetScale: 0.7, family: 'ground', uv: [3, 3],
     detail: [22, 0.65], breakup: [0.22, 3], ao: 0.85,
     cavity: { contrast: 1.9, bias: 0.05 },
+    decal: true, alphaTest: 0.04,
   },
   'tarp-plastic': {
     texKey: 'canvas-tent',
@@ -1810,6 +1812,21 @@ export class Materials {
 
     const material = new Ctor(params);
 
+    // Alpha-tested cards: ART_DIRECTION trap 10 wants alpha-to-coverage rather than a hard
+    // cutout, but A2C is inert without a multisampled target — so we ship BOTH. The low
+    // alphaTest keeps the soft gradient A2C needs, and guarantees a correct silhouette when
+    // Postprocessing renders to a single-sample buffer. See setAlphaToCoverage().
+    if (spec.alphaToCoverage && tierIndex >= 2) material.alphaToCoverage = true;
+
+    // Blood is a decal: it must not fight the surface it is painted on.
+    if (spec.decal) {
+      material.transparent = true;
+      material.depthWrite = false;
+      material.polygonOffset = true;
+      material.polygonOffsetFactor = -2;
+      material.polygonOffsetUnits = -2;
+    }
+
     // Textures: never assigned for triplanar surfaces (they need no uvs at all).
     if (!spec.triplanar && !spec.noMaps) {
       if (set.map) material.map = set.map;
@@ -2067,14 +2084,15 @@ uniform sampler2D uAlphaMap;
       }
     }
 
-    // ---- foliage cards: the alpha shape IS the material, so we always want one.
-    if (spec.card && !out.alpha) {
+    // ---- foliage cards. Textures.js bakes these with the opacity silhouette in map.a; only
+    //      if it gave us nothing do we draw our own sprig/frond card.
+    if (spec.card && !out.map) {
       const card = this._getCard(spec.card);
       if (card) {
-        // The card carries its own albedo variation and alpha; it replaces the family map.
         out.map = card.map;
         out.alpha = card.alpha;
         out.normal = out.normal ?? card.normal;
+        out.tile = null;   // a card maps once across its quad
       }
     }
 

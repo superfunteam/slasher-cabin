@@ -75,7 +75,7 @@ export const TERRAIN_TUNING = {
   },
   thermal: { passes: 4, soilTalus: 1.00, rockTalus: 1.96, rate: 0.42 },
 
-  puddles: { max: 56, minSep: 7.0, minRadius: 0.55, maxRadius: 2.6, depthWindow: 0.16 },
+  puddles: { max: 56, minSep: 7.0, minRadius: 0.50, maxRadius: 2.20, depthWindow: 0.16 },
   microSink: 0.035,        // max downward-only vertex-shader micro-displacement at LOD0 (m)
 };
 
@@ -451,6 +451,11 @@ export class Terrain {
     const s = this._seed;
     const ratio = mc / T.cell;                      // 4
 
+    // _shoreZ() depends only on x — 513 evaluations instead of 263 169.
+    const shoreLUT = new Float32Array(n);
+    for (let i = 0; i < n; i++) shoreLUT[i] = this._shoreZ(this.x0 + i * T.cell);
+    this._shoreLUT = shoreLUT;
+
     const sampleCR = (arr, fi, fj) => {
       const i1 = Math.floor(fi), j1 = Math.floor(fj);
       const tx = fi - i1, tz = fj - j1;
@@ -471,10 +476,11 @@ export class Terrain {
         const fi = i / ratio;
         let v = sampleCR(macro, fi, fj);
 
-        // 3 octaves of full-res detail. Amplitude tapers into the lake so the bed stays smooth.
-        const shoreFade = smoothstep(-4, 16, z - this._shoreZ(x));
+        // Full-res detail. Amplitude tapers into the lake so the bed stays smooth. Sub-metre
+        // relief is handled by the vertex shader, so 2 octaves here is the right stopping point.
+        const shoreFade = smoothstep(-4, 16, z - shoreLUT[i]);
         const d = (fbm(x * 0.055, z * 0.055, 3, s + 61) - 0.5) * 1.55
-          + (fbm(x * 0.21, z * 0.21, 2, s + 67) - 0.5) * 0.42;
+          + (vnoise(x * 0.21, z * 0.21, s + 67) - 0.5) * 0.40;
         v += d * (0.35 + 0.65 * shoreFade);
 
         const idx = j * n + i;
@@ -931,6 +937,36 @@ export class Terrain {
     const wl = this.waterLevel;
     const inv2c = 1 / (2 * T.cell);
 
+    // These three noise fields have 11 m - 139 m wavelengths, so evaluating them per 1 m cell
+    // is 2.4 million wasted noise lookups. Bake them coarse and interpolate.
+    const jn = ((n - 1) >> 1) + 1;            // 2 m
+    const dn = ((n - 1) >> 2) + 1;            // 4 m
+    const jitF = new Float32Array(jn * jn);
+    const wetF = new Float32Array(jn * jn);
+    const denF = new Float32Array(dn * dn);
+    for (let j = 0; j < jn; j++) {
+      const z = this.z0 + j * 2;
+      for (let i = 0; i < jn; i++) {
+        const x = this.x0 + i * 2;
+        jitF[j * jn + i] = fbm(x * 0.07, z * 0.07, 3, s + 201) - 0.5;
+        wetF[j * jn + i] = fbm(x * 0.09, z * 0.09, 3, s + 313) - 0.5;
+      }
+    }
+    for (let j = 0; j < dn; j++) {
+      const z = this.z0 + j * 4;
+      for (let i = 0; i < dn; i++) {
+        denF[j * dn + i] = fbm((this.x0 + i * 4) * 0.0072 + 4.3, z * 0.0072 - 2.7, 4, s + 401);
+      }
+    }
+    const bi = (arr, w, fi, fj) => {
+      const ix = fi | 0, iz = fj | 0;
+      const tx = fi - ix, tz = fj - iz;
+      const i0 = iz * w + ix;
+      const a = arr[i0] + (arr[i0 + 1] - arr[i0]) * tx;
+      const b = arr[i0 + w] + (arr[i0 + w + 1] - arr[i0 + w]) * tx;
+      return a + (b - a) * tz;
+    };
+
     for (let j = 0; j < n; j++) {
       const z = this.z0 + j * T.cell;
       const jm = Math.max(0, j - 1), jp = Math.min(n - 1, j + 1);
@@ -959,7 +995,9 @@ export class Terrain {
         const flw = flow[idx];
 
         // ---------------- surface type ----------------
-        const jitter = fbm(x * 0.07, z * 0.07, 3, s + 201) - 0.5;
+        const fi2 = Math.min(i * 0.5, jn - 1.001), fj2 = Math.min(j * 0.5, jn - 1.001);
+        const fi4 = Math.min(i * 0.25, dn - 1.001), fj4 = Math.min(j * 0.25, dn - 1.001);
+        const jitter = bi(jitF, jn, fi2, fj2);
         let type;
         if (depth > 0.0) {
           type = S_WATER;
@@ -990,11 +1028,11 @@ export class Terrain {
         w += pathW * 0.30;                                      // compacted ruts hold water
         w += (type === S_MUD ? 0.18 : 0) + (type === S_MOSS ? 0.22 : 0);
         w -= rockW * 0.12;
-        w += (fbm(x * 0.09, z * 0.09, 3, s + 313) - 0.5) * 0.22;
+        w += bi(wetF, jn, fi2, fj2) * 0.22;
         wet[idx] = Math.round(clamp01(w) * 255);
 
         // ---------------- forest density (Forest.js reads this) ----------------
-        let d = fbm(x * 0.0072 + 4.3, z * 0.0072 - 2.7, 4, s + 401);
+        let d = bi(denF, dn, fi4, fj4);
         d = smoothstep(0.34, 0.74, d);
         d *= 1 - smoothstep(0.26, 0.52, slope01);
         d *= smoothstep(0.7, 3.4, overWater);
@@ -1034,6 +1072,9 @@ export class Terrain {
         const hv = h[idx];
         if (hv < wl + 0.6) continue;                 // in / next to the lake
         if (surf[idx] === S_GRANITE) continue;
+        // never inside the flattened camp core or the build plot: those are published
+        // landmarks and BuildSystem/Props need dry, predictable ground there
+        if (this._flat && this._flat[idx] > 160) continue;
         if (flow[idx] < 0.05 && wet[idx] < 80) continue;
 
         // strict local minimum over the 8-neighbourhood
@@ -1074,7 +1115,7 @@ export class Terrain {
         if (tooClose) continue;
 
         const jit = ihash(i, j, this._seed ^ 0x5ee);
-        const rr = clamp(0.42 + radius * 0.26 * (0.45 + jit * 1.45) + flow[idx] * 0.35,
+        const rr = clamp(0.42 + radius * 0.16 * (0.45 + jit * 1.45) + flow[idx] * 0.25,
           P.minRadius, P.maxRadius);
         found.push({ x, z, y: hv + 0.025, r: rr, score: flow[idx] + wet[idx] / 255 + jit * 1.7 });
       }
@@ -1159,7 +1200,7 @@ export class Terrain {
   _buildTextures() {
     const st = this.ctx?.settings;
     const dRes = st?.tier?.(128, 192, 256, 256) ?? 256;
-    const nRes = st?.tier?.(256, 384, 512, 512) ?? 512;
+    const nRes = st?.tier?.(192, 256, 384, 512) ?? 384;
     const s = this._seed;
 
     // ---- detail map: r = grain, g = clumps, b = cracks, a = cavity/height -------------------
@@ -1189,9 +1230,9 @@ export class Terrain {
       for (let i = 0; i < nRes; i++) {
         const u = (i / nRes) * nper, v = (j / nRes) * nper;
         hgt[j * nRes + i] =
-          0.55 * pfbm(u * 3, v * 3, 4, nper * 3, s + 811)
+          0.55 * pfbm(u * 3, v * 3, 3, nper * 3, s + 811)
           + 0.30 * (1 - Math.abs(pnoise(u * 6, v * 6, nper * 6, s + 823) * 2 - 1))
-          + 0.15 * pfbm(u * 12, v * 12, 2, nper * 12, s + 829);
+          + 0.15 * pnoise(u * 12, v * 12, nper * 12, s + 829);
       }
     }
     const nData = new Uint8Array(nRes * nRes * 4);

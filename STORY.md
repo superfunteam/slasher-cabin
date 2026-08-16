@@ -1480,3 +1480,195 @@ she never asked about. She inherited the land's twenty-two years and has been he
 them, and the nine-year gap is exactly the size of the thing nobody has looked at.
 
 ---
+
+## 8. AMBIENT VO SCRIPT
+
+### 8.1 Rules
+
+Heard at distance, in 3D, through trees, through rain, usually half-caught. **Never a narrator.
+Never plot-critical — every line is deniable.** Most under twelve words. `VoiceBank` applies the
+full distance chain in `AUDIO_DIRECTION.md` §7.2; the target ratio is **4:1 half-heard to clear**
+and there are **at most three fully intelligible lines per night** (§7.1 there).
+
+**Write for the words that survive the filter.** At `I ∈ (0.30, 0.62]` the player gets cadence,
+gender, emotion and maybe one word. Every line below is built so that the word most likely to
+survive is the one that matters — "mortise," "four," "signed," "hinges," "name."
+
+**The game must be fully playable, and fully sad, with the VO folder deleted.** Voice is weather.
+
+**Projection (`Proj`) — resolves collision C5.** `AUDIO_DIRECTION.md` §7.2's `voLP` curve is tuned
+for conversation and makes anything past ~50 m an unrecoverable 200 Hz mush. Half this bank is
+people calling to each other across 80–160 m. Every line therefore carries a projection, and
+`VoiceBank` applies the constants in §14.4:
+
+| Code | Projection | `voLP` multiplier `k` | `preGain` |
+|---|---|---|---|
+| **S** | spoken | 1.0 | 0 dB |
+| **C** | called (raised, unhurried) | 2.6 | +7 dB |
+| **G** | sung / hollered to nobody | 3.1 | +8 dB |
+| **H** | shouted (fear, or across water) | 4.0 | +11 dB |
+
+At 118 m an **H** line resolves to a 474 Hz lowpass at +11 dB — a human shape with no words, which
+is exactly the intended experience and is currently unreachable.
+
+### 8.2 The six lines that were cut, and why
+
+v1.0 contained six lines that explained the theme to the audience — the exact wink the brief
+forbids. They are recorded here so they are not helpfully restored.
+
+| Cut | Was | Now | Reason |
+|---|---|---|---|
+| `ROB_FEAR_02` | "He looks at you sideways. **Like a bird.**" | **"He looks at you sideways."** | §2.2 already says the bird comparison is what makes nobody believe her. Having Robin supply the simile does the audience's work and kills the line. **She stops at "sideways."** |
+| `ROB_FEAR_03` | "It's not a shack. It's a *house*." | **deleted, not replaced** | The thesis, stated aloud, in direct violation of §1.1's own rule. The player has been building the house for six nights. They know what it is |
+| `ROB_EVID_03` | "Somebody's *building* something out there." | **"That's a mortise. Somebody cut a *mortise*."** | Technical and worse. Her expertise is her character and it is the only thing that lets her say something the audience cannot |
+| `ROB_LATE_03` | "Oh. Oh, you poor —" | **"There's no nails in this. There's no *nails* in it."** (now `ROB_LATE_04`) | The original cued pity on command. The replacement is a fact only a boatyard kid would notice, and it means every joint in the building was cut by hand by one person |
+| `MRG_FEAR_01` | "I counted five. There were five of us." | **"Nobody signed out. The board's clean."** | The stock headcount beat. The replacement is Marg being *competent* — the camp has a sign-out board, it is untouched, therefore whoever is gone did not leave |
+| `BEV_LATE_04` | "His name was Ansel V—" | **"His name was—"** | v1.0 claimed nobody says his name and then said two-thirds of it fifteen lines later. Now the only identification in the game is "he looks at you sideways," and the name arrives once, wordless, on the last card |
+
+Bev's "Twenty-two summers" / "Twenty-two years" are corrected to **thirteen** throughout (§6, Night
+Six).
+
+### 8.3 Legality matrix and repetition budget
+
+v1.0 gated two of ten tables and had a bank of 90 lines carrying six characters across seven nights
+of a stealth game in which audio position is the primary threat signal. Pitch-shifting a raccoon
+line by 3% on its fortieth play does not make it new; it makes the player aware of the bank.
+
+**Legality — which categories may play on which nights.** `VoiceBank` must refuse anything outside
+this grid.
+
+| Category | § | Lines | N1 | N2 | N3 | N4 | N5 | N6 | N7 |
+|---|---|---|---|---|---|---|---|---|---|
+| Idle chatter | 8.4 | 30 | ● | ● | ● | ● | ● | — | — |
+| Work & logistics | 8.5 | 16 | ● | ● | ● | ● | — | — | — |
+| Calling across distance | 8.6 | 20 | ● | ● | ● | ● | ● | ● | ● |
+| Campfire | 8.7 | 12 | ● | ● | ● | — | — | — | — |
+| Arguments | 8.8 | 12 | — | ● | ● | ● | — | — | — |
+| "I heard something" | 8.9 | 18 | — | ● | ● | ● | ● | ● | — |
+| False alarms | 8.10 | 10 | — | ● | ● | ● | ● | — | — |
+| Searching | 8.11 | 24 | — | — | — | ● | ● | ● | ● |
+| Finding evidence | 8.12 | 14 | — | — | — | ● | ● | ● | ● |
+| Genuine fear | 8.13 | 16 | — | — | — | — | ● | ● | ● |
+| Very late | 8.14 | 14 | — | — | — | — | — | ● | ● |
+| `CHATTER_BED` (non-lexical) | — | 36 takes | ● | ● | ● | ● | ● | ● | ● |
+
+Dale's lines are legal N1–N4 only. All other speakers are legal on every night they are present.
+
+**Repetition budget** (extends `AUDIO_DIRECTION.md` §7.3, which already forbids a line playing
+twice in a night and forbids a second clear play ever):
+
+| Rule | Value |
+|---|---|
+| Max plays of one line **per night** | **1** (already in `AUDIO_DIRECTION.md` §7.3) |
+| Max plays of one line **per playthrough** | **2** |
+| Minimum interval between the two plays | **22 minutes of clock time** |
+| Second play must be at | `I ≤ 0.62` — half-heard or worse, always |
+| Max **scripted** lines per night | **34** |
+| Max per category per night | `ceil(nightMinutes / 2.5)` → N1: 4, N4: 6, N7: 9 |
+| Bank sufficiency test | any category legal on ≥ 3 nights must hold **≥ 2.2 ×** its per-night cap |
+
+Everything under the cap is `CHATTER_BED` — six non-lexical takes per voice, 4–9 s, delivered as
+real sentences and then processed until unrecoverable (`AUDIO_DIRECTION.md` §7.3). **The bed is the
+workhorse. Scripted lines are the spice.** At 34 scripted lines across a 19-minute Night Six, a
+camper says something specific roughly once every 33 seconds of contact, and the rest of the time
+they are just people, audibly, in a wood.
+
+**Total scripted bank: 186 lines**, against v1.0's 90.
+
+### 8.4 Idle chatter — banal, overlapping, funny by accident (N1–5)
+
+| ID | Speaker | Line | Delivery | Proj | Δ |
+|---|---|---|---|---|---|
+| `MRG_IDLE_01` | Marg | "One, two — and that's the last of the tarps." | counting to herself | S | |
+| `MRG_IDLE_02` | Marg | "Whoever loaded this truck hates me personally." | half-laugh at the end | S | |
+| `MRG_IDLE_03` | Marg | "Six life jackets. There should be nine." | mild, logging it | S | |
+| `MRG_IDLE_04` | Marg | "I'm not doing the raft again. I did the raft." | flat | S | |
+| `MRG_IDLE_05` | Marg | "That's not level. That's nowhere near level." | unbothered | S | |
+| `COO_IDLE_01` | Coop | "I'm just saying, powdered eggs are a *choice*." | mid-bit, no punchline | S | |
+| `COO_IDLE_02` | Coop | "Sorry, that was — yeah. Sorry." | apologising to nobody | S | |
+| `COO_IDLE_03` | Coop | "Does this look level to you? Don't lie." | genuinely asking | S | |
+| `COO_IDLE_04` | Coop | "Four chords, Marg. Four. It's a whole song." | delighted with himself | S | |
+| `COO_IDLE_05` | Coop | "Okay but who *decided* the archery range goes there." | idle, real question | S | |
+| `COO_IDLE_06` | Coop | *tuneless humming, 6 s, trails off* | to himself | G | |
+| `DAL_IDLE_01` | Dale | "Third year that pump's gone out. Anyway." | trails off, no ending | S | |
+| `DAL_IDLE_02` | Dale | "You want it done, or done right. Champ." | old joke, said flat | S | |
+| `DAL_IDLE_03` | Dale | "Ah — nope. That's a hornet situation." | retreating, unbothered | S | |
+| `DAL_IDLE_04` | Dale | "Ground's soft down there. Always has been." | to nobody | S | |
+| `DAL_IDLE_05` | Dale | "Somebody's been in my ladder. Anyway." | not suspicious, mildly put out | S | |
+| `DAL_IDLE_06` | Dale | *two bars of a song, gives up, starts again, gives up* | drunk, cheerful | G | |
+| `ROB_IDLE_01` | Robin | "Okay so — okay, no. Start over." | correcting herself | S | |
+| `ROB_IDLE_02` | Robin | "Teddy. Teddy. Did you eat? Don't lie to me." | sisterly, insistent | C | |
+| `ROB_IDLE_03` | Robin | "My dad would've had this done in an hour." | fond, a little proud | S | |
+| `ROB_IDLE_04` | Robin | "These brushes are older than me. Genuinely." | amused | S | |
+| `ROB_IDLE_05` | Robin | "It's warped. It's — you can see it's warped." | to someone not listening | S | |
+| `TED_IDLE_01` | Teddy | "Sorry — is this the right shed? Sorry." | over-polite | S | |
+| `TED_IDLE_02` | Teddy | "My mom packed like nine cans of soup." | small laugh at himself | S | |
+| `TED_IDLE_03` | Teddy | "Am I allowed to just — do that? Or." | asking permission again | S | |
+| `TED_IDLE_04` | Teddy | "There's a *loon*. That's a loon, right?" | genuinely delighted | S | |
+| `BEV_IDLE_01` | Bev | "Rain by Thursday. Get the canvas up." | no articles, no warmth | C | |
+| `BEV_IDLE_02` | Bev | "Thirteen summers. Never once on schedule." | almost affectionate | S | |
+| `BEV_IDLE_03` | Bev | "Coffee's in the hall. Don't make more." | absolute | C | |
+| `BEV_IDLE_04` | Bev | "Company sold the lease. So now there's a survey." | disgusted, about paperwork | S | |
+
+### 8.5 Work & logistics — people being good at their jobs (N1–4)
+
+| ID | Speaker | Line | Delivery | Proj | Δ |
+|---|---|---|---|---|---|
+| `MRG_WORK_01` | Marg | "Docks first, then the rack, then we eat." | organising | C | |
+| `MRG_WORK_02` | Marg | "Two on that end. Two. Not one. Two." | patient, repeating | C | |
+| `MRG_WORK_03` | Marg | "Tide's nothing, it's a lake, just — hold it." | exasperated, fond | S | |
+| `MRG_WORK_04` | Marg | "One, two, and — okay. Okay, down." | counting a lift | S | |
+| `DAL_WORK_01` | Dale | "Breaker's out. Give me ten. Anyway." | walking away | C | |
+| `DAL_WORK_02` | Dale | "That joist is done. That whole run's done." | professional judgement | S | |
+| `DAL_WORK_03` | Dale | "I'll shim it. It'll hold till August." | resigned | S | |
+| `DAL_WORK_04` | Dale | "Don't drive on the grass. Bev'll skin us." | mild | C | |
+| `ROB_WORK_01` | Robin | "Grain's going the wrong way. See that? See?" | teaching, delighted | S | |
+| `ROB_WORK_02` | Robin | "It's not glued, it's *pegged*. Somebody pegged it." | admiring | S | |
+| `ROB_WORK_03` | Robin | "Hand me the — no, the other — thank you." | absorbed | S | |
+| `COO_WORK_01` | Coop | "I have got this. I have absolutely got this." | does not have this | C | |
+| `COO_WORK_02` | Coop | "Okay that's heavier than it looks. That's heavy." | laughing, straining | S | |
+| `TED_WORK_01` | Teddy | "Where does this go? Sorry — where does this go." | anxious | S | |
+| `TED_WORK_02` | Teddy | "I can carry more than that. I can, honestly." | wanting to be useful | S | |
+| `BEV_WORK_01` | Bev | "Buses at nine on Saturday. Nine. Move." | flat, absolute | C | |
+
+### 8.6 Calling across distance — the loudest lines in the game (N1–7)
+
+| ID | Speaker | Line | Delivery | Proj | Δ |
+|---|---|---|---|---|---|
+| `MRG_CALL_01` | Marg | "Coop! Other end! Other *other* end!" | shouted, laughing | H | |
+| `MRG_CALL_02` | Marg | "Say again? You're breaking up in the trees!" | cupped hands | H | |
+| `MRG_CALL_03` | Marg | "Two minutes! I said two minutes!" | mock-furious | H | |
+| `MRG_CALL_04` | Marg | "Robin! You seen Dale?" | ordinary, N4+ | H | |
+| `COO_CALL_01` | Coop | "Yeah — hang on — yeah!" | half-shouted, muffled | H | |
+| `COO_CALL_02` | Coop | "I'm coming! I'm literally coming!" | laughing | H | |
+| `COO_CALL_03` | Coop | "Teddy! Ted! Stay where I can see you!" | N5+, no bit in it | H | |
+| `ROB_CALL_01` | Robin | "Dale? You up by the shed?" | carrying, unworried | C | |
+| `ROB_CALL_02` | Robin | "Nothing! Never mind!" | giving up on being heard | H | |
+| `ROB_CALL_03` | Robin | "Turn it *off* a second! Just — off!" | urgent, N3+ | H | |
+| `ROB_CALL_04` | Robin | "Marg! Come look at this! Marg!" | N4+ | H | |
+| `DAL_CALL_01` | Dale | "Yeah, chief, I'm here!" | from far off | H | |
+| `DAL_CALL_02` | Dale | "Give me a minute! I'm up a ladder!" | cheerful | H | |
+| `BEV_CALL_01` | Bev | "Everybody. Mess hall. Ten minutes." | flat, absolute | C | |
+| `BEV_CALL_02` | Bev | "Torches. Everyone gets a torch. Now." | N4+ | C | |
+| `BEV_CALL_03` | Bev | "Nobody past the fire road. Nobody." | N5+ | H | |
+| `TED_CALL_01` | Teddy | "Coop? Was that you?" | too quiet to carry | C | |
+| `TED_CALL_02` | Teddy | "Is anyone — hello? Sorry — hello?" | N5+, thin | C | |
+| `MRG_CALL_05` | Marg | "Sound off! Everybody sound off!" | N6+, command voice | H | |
+| `COO_CALL_04` | Coop | "Dale! DALE!" | N5+, no joke left | H | `style +0.10` |
+
+### 8.7 Campfire — Nights 1–3 only
+
+| ID | Speaker | Line | Delivery | Proj | Δ |
+|---|---|---|---|---|---|
+| `COO_FIRE_01` | Coop | "…and *that's* why we don't swim past the raft." | doing a voice, badly | S | |
+| `MRG_FIRE_01` | Marg | "That's not true. None of that is true." | interrupting | S | |
+| `COO_FIRE_02` | Coop | "It's *emotionally* true, Marguerite." | mock-wounded | S | |
+| `DAL_FIRE_01` | Dale | "There was a house out on the point. Before." | throwaway, no weight | S | |
+| `MRG_FIRE_02` | Marg | "Before what?" | genuine, small | S | |
+| `DAL_FIRE_02` | Dale | "Before the camp. Burned, I think. Anyway." | he does not care yet | S | |
+| `TED_FIRE_01` | Teddy | "Is it okay if I sit here? Sorry." | barely audible | S | |
+| `ROB_FIRE_01` | Robin | "Sit down, Teddy. God." | laughing at him kindly | S | |
+| `BEV_FIRE_01` | Bev | "Fire's out by eleven. I mean out." | not unkind | S | |
+| `COO_FIRE_03` | Coop | "Bev. Bev. Tell the one about the bear." | wheedling | S | |
+| `BEV_FIRE_02` | Bev | "No." | complete sentence | S | |
+| `ROB_FIRE_02` | Robin | "My dad says a good dock outlives the man." | quiet, fond, N3 | S | |

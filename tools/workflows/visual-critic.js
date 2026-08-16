@@ -51,6 +51,22 @@ You cannot diff against a real Call of Duty screenshot — you do not have one, 
 try to reproduce copyrighted art. Judge instead against your own knowledge of how those frames
 are built. Be concrete about the difference, never vague.
 
+YOU DO HAVE A CONCRETE REFERENCE TARGET. Two photographic key-art frames in this repo were
+generated to embody the art direction exactly, and the engine is supposed to look like them:
+
+    ${ROOT}/public/img/keyart-lake.png   — the lake at night: crushed blue-green blacks, moon
+        through broken cloud, low mist sitting ON the water, a wet dock catching a rim of light
+        in the foreground, and exactly ONE warm human light (a cabin window) with its reflection
+        running down the water.
+    ${ROOT}/public/img/keyart-site.png   — the build site: lantern-lit half-built timber frame,
+        enormous shadows thrown up into the pines, rain falling through the beam.
+
+READ THE RELEVANT ONE WITH THE Read TOOL and look at it before you judge. Then say explicitly,
+for your frame: what does the reference have that the render does not? Name the specific missing
+quality (mist sitting in a layer rather than filling the frame; the wet specular rim along the
+dock boards; the single warm light against total blue-black; the way the far treeline loses
+contrast but not detail). That comparison is the most useful thing in your report.
+
 What actually separates AAA from a hobby WebGL scene — score each 1-10 and justify with what you
 SEE in the image, quoting specific regions of the frame:
 
