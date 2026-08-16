@@ -8,6 +8,7 @@
  */
 import { Engine } from './core/Engine.js';
 import { Input } from './core/Input.js';
+import { Shots } from './core/Shots.js';
 import { Log } from './core/Log.js';
 
 /** Registration order — see ARCHITECTURE.md §3. */
@@ -77,6 +78,10 @@ async function boot() {
   if (missing.length) {
     Log.warn(`${missing.length} system(s) not loaded: ${missing.join(', ')}`);
   }
+
+  // Registered last so it runs after every other system has posed the world, and can
+  // override anything that would drift a canonical shot.
+  engine.register('Shots', new Shots(ctx));
 
   await engine.initSystems();
 

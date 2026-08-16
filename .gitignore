@@ -6,3 +6,7 @@ dist/
 # Generated assets are committed by CI, but never local scratch renders:
 /shots/
 /.scratch/
+
+# Local secret cache — pulled from Netlify. NEVER commit.
+.env
+.netlify/
