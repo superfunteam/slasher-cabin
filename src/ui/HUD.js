@@ -108,14 +108,17 @@ const C = {
 // =================================================================================================
 
 const G = {
-  ringR: 0.455,              // × min(w, h) — the detection ring
+  edgeInset: 26,             // px in from the viewport edge — the detection ellipse
+  maskInset: 11,             // px further in for the thunder arc, so the two never touch
   maskROffset: 15,           // px outside the detection ring
   reticleBox: 44,            // px viewBox of the reticle SVG
-  arcWidth: {                // ° of arc, per detection stage. It SHORTENS as attention narrows.
-    forming: 118, building: 74, critical: 44, spotted: 360,
-  },
-  arcStroke: { forming: 1.6, building: 2.4, critical: 3.4, spotted: 4.2 },
-  arcAlpha: { forming: 0.10, building: 0.24, critical: 0.42, spotted: 0.66 },
+  // ° of arc, per detection stage. It SHORTENS as attention narrows — and none of these is wide
+  // enough to read as a *ring*. An arc that spans a third of the frame stops being a bearing and
+  // becomes a gauge, which is the failure mode this whole file exists to avoid.
+  arcWidth: { forming: 76, building: 50, critical: 30, spotted: 360 },
+  arcStroke: { forming: 1.6, building: 2.4, critical: 3.2, spotted: 3.8 },
+  arcAlpha: { forming: 0.10, building: 0.22, critical: 0.36, spotted: 0.56 },
+  maskArcMax: 96,            // ° — the thunder window lives at top-centre and NEVER rings the frame
   noiseLife: 0.62,           // s
   noiseMaxMetres: 90,        // the Night Three saw. Maps to the screen edge exactly.
   promptFadeMs: 130,
@@ -134,6 +137,7 @@ const TAU = Math.PI * 2;
 const _v1 = new THREE.Vector3();
 const _v2 = new THREE.Vector3();
 const _fwd = new THREE.Vector3();
+const _pt = { x: 0, y: 0 };
 
 const clamp = (v, a, b) => (v < a ? a : v > b ? b : v);
 const clamp01 = (v) => (v < 0 ? 0 : v > 1 ? 1 : v);
@@ -197,26 +201,32 @@ function setText(node, value) {
 }
 
 /**
- * Position a segment on a `pathLength="1000"` circle.
- * An SVG circle starts at 3 o'clock and runs clockwise, so 12 o'clock is at 750.
- * `centreDeg` is measured clockwise from 12 o'clock — i.e. it is a screen bearing.
+ * Position a segment on a `pathLength="1000"` circle or ellipse, given its start (0) and length
+ * (1000) already resolved into path-length units by the caller.
  */
-function setArc(node, centreDeg, widthDeg, dashCache) {
-  const len = clamp(widthDeg, 0, 360) / 360 * 1000;
-  const start = ((750 + (centreDeg / 360) * 1000 - len / 2) % 1000 + 1000) % 1000;
+function setArcRaw(node, startLen, lenLen) {
   const m = node.__hud || (node.__hud = {});
-  const qLen = Math.round(len * 4) / 4;
+  const qLen = Math.round(clamp(lenLen, 0, 1000) * 4) / 4;
   if (m.arcLen !== qLen) {
     m.arcLen = qLen;
     // One string per quantised length change — never on a steady frame.
     node.style.strokeDasharray = qLen >= 999.5 ? 'none' : `${qLen} ${1000 - qLen}`;
   }
-  const qOff = Math.round(start * 2) / 2;
+  const qOff = Math.round((((startLen % 1000) + 1000) % 1000) * 2) / 2;
   if (m.arcOff !== qOff) {
     m.arcOff = qOff;
     node.style.strokeDashoffset = -qOff;
   }
-  return dashCache;
+}
+
+/**
+ * Position a segment on a `pathLength="1000"` CIRCLE, by screen bearing.
+ * An SVG circle starts at 3 o'clock and runs clockwise, so 12 o'clock is at 750.
+ * `centreDeg` is measured clockwise from 12 o'clock — i.e. it is a screen bearing.
+ */
+function setArc(node, centreDeg, widthDeg) {
+  const len = clamp(widthDeg, 0, 360) / 360 * 1000;
+  setArcRaw(node, 750 + (centreDeg / 360) * 1000 - len / 2, len);
 }
 
 /** Deterministic 0..1 from a string. FNV-1a — no unseeded RNG anywhere (ARCHITECTURE.md §6). */
@@ -489,7 +499,10 @@ const CSS = `
 
 /* --- the screen-edge layer: detection, noise, the mask window --- */
 #sc-hud .edge{position:absolute;inset:0;width:100%;height:100%;overflow:visible}
-#sc-hud .edge circle,#sc-hud .edge line{fill:none;stroke-linecap:butt;vector-effect:none}
+/* Round caps here and ONLY here. §13.2's butt-cap law governs the manual's line art, which is
+   1971 offset print; the screen-edge layer is not print, and a butt-capped arc has two hard
+   chisel ends that read as a sci-fi gauge. The brief asks for a SOFT arc. */
+#sc-hud .edge ellipse,#sc-hud .edge line{fill:none;stroke-linecap:round;vector-effect:none}
 
 /* --- reticle --- */
 #sc-hud .ret{position:absolute;left:50%;top:50%;width:${G.reticleBox}px;height:${G.reticleBox}px;
@@ -499,7 +512,7 @@ const CSS = `
   stroke-linecap:butt;stroke-linejoin:miter;stroke-miterlimit:4}
 
 /* --- interaction prompt: a piece of the manual, 92% opacity, hard contact shadow (§13.8) --- */
-#sc-hud .prompt{position:absolute;left:50%;bottom:9.5vh;transform:translateX(-50%);
+#sc-hud .prompt{position:absolute;left:50%;bottom:6.5vh;transform:translateX(-50%);
   display:flex;align-items:center;gap:9px;padding:7px 11px 7px 8px;
   background:${C.paper};opacity:0;
   box-shadow:0 2px 0 rgba(0,0,0,.35),0 24px 60px rgba(0,0,0,.75);
@@ -509,6 +522,7 @@ const CSS = `
 #sc-hud .prompt .cap{position:relative;width:26px;height:26px;flex:0 0 auto;
   border:1.6px solid ${C.ink};display:grid;place-items:center}
 #sc-hud .prompt .cap.wide{width:44px}
+#sc-hud .prompt .cap.bare{border-color:transparent}
 #sc-hud .prompt .cap b{font-weight:500;font-size:10px;letter-spacing:.06em;color:${C.ink};
   font-variant-numeric:tabular-nums lining-nums;line-height:1}
 #sc-hud .prompt .cap i{position:absolute;left:-4px;top:-4px;right:-4px;bottom:-4px}
@@ -516,7 +530,7 @@ const CSS = `
   text-transform:lowercase;max-width:22ch}
 
 /* --- carry --- */
-#sc-hud .carry{position:absolute;left:3.2vw;bottom:8.2vh;opacity:0;
+#sc-hud .carry{position:absolute;left:3.2vw;bottom:11vh;opacity:0;
   transition:opacity .35s ease}
 #sc-hud .carry path{fill:none;stroke-linecap:butt;stroke-linejoin:miter;stroke-miterlimit:4}
 
@@ -524,15 +538,16 @@ const CSS = `
 #sc-hud .scrim{position:absolute;left:0;right:0;bottom:0;height:34vh;opacity:0;
   background:radial-gradient(120% 100% at 50% 118%,rgba(4,7,10,.62) 0%,rgba(4,7,10,0) 72%);
   transition:opacity .5s ease}
-#sc-hud .subs{position:absolute;left:0;right:0;bottom:12vh;display:flex;
+#sc-hud .subs{position:absolute;left:0;right:0;bottom:13vh;display:flex;
   flex-direction:column;align-items:center;gap:3px}
-#sc-hud .sub{position:relative;display:flex;align-items:baseline;gap:6px;
+/* Lane offset rides on 'left', not 'transform', so reduced-motion's transform reset cannot
+   silently destroy the one channel that tells you who is speaking. */
+#sc-hud .sub{position:relative;left:0;display:flex;align-items:baseline;gap:6px;
   font-weight:500;font-size:1.05rem;line-height:1.42;letter-spacing:.005em;
   text-transform:lowercase;color:rgba(${C.subtitle},.78);
   max-width:min(34ch,72vw);text-align:left;opacity:0;
-  transition:opacity .34s ease,transform .34s ease;
-  transform:translateY(3px);will-change:opacity}
-#sc-hud .sub[data-on="1"]{opacity:1;transform:translateY(0)}
+  transition:opacity .34s ease;will-change:opacity}
+#sc-hud .sub[data-on="1"]{opacity:1}
 #sc-hud .sub[data-far="1"]{color:rgba(${C.subtitle},.5);font-size:.98rem}
 #sc-hud .sub .ch{flex:0 0 auto;width:0;height:0;align-self:center;
   border-top:4px solid transparent;border-bottom:4px solid transparent;opacity:.55}
@@ -542,7 +557,7 @@ const CSS = `
 #sc-hud .sub.cap{color:rgba(${C.subtitle},.5);font-size:.95rem;letter-spacing:.02em}
 
 /* --- toast: a small piece of paper, and almost never --- */
-#sc-hud .toasts{position:absolute;left:50%;bottom:17vh;transform:translateX(-50%);
+#sc-hud .toasts{position:absolute;left:50%;bottom:23vh;transform:translateX(-50%);
   display:flex;flex-direction:column-reverse;align-items:center;gap:7px}
 #sc-hud .toast{display:flex;align-items:center;gap:9px;padding:8px 12px;
   background:${C.paper};opacity:0;transform:translateY(5px);
@@ -555,8 +570,8 @@ const CSS = `
 #sc-hud .toast path{fill:none;stroke-linecap:butt;stroke-linejoin:miter;stroke-miterlimit:4}
 
 /* --- reduced motion: nothing travels, nothing pulses. Things simply are, or are not. --- */
-#sc-hud[data-rm="1"] .sub,#sc-hud[data-rm="1"] .toast{transform:none!important;
-  transition:opacity .2s linear}
+#sc-hud[data-rm="1"] .sub{transition:opacity .2s linear}
+#sc-hud[data-rm="1"] .toast{transform:none!important;transition:opacity .2s linear}
 #sc-hud[data-rm="1"] .prompt,#sc-hud[data-rm="1"] .ret g{transition:opacity .06s linear}
 `;
 
@@ -580,7 +595,14 @@ export class HUD {
     //     comparisons) rather than trusting that we were told.
     this._w = this._viewW();
     this._h = this._viewH();
-    this._ringR = G.ringR * Math.min(this._w, this._h);
+    // The edge layer is an ELLIPSE matched to the viewport, not a circle. A circle inscribed in a
+    // 16:9 frame draws its arcs across the sky, which reads as a gauge; an ellipse hugs the edge,
+    // which reads as peripheral vision. The cost is that arc length is no longer proportional to
+    // angle, so `_lut` is a 256-entry cumulative-arc-length table rebuilt on resize and the
+    // bearing→dashoffset conversion is exact rather than approximate.
+    this._rx = 1; this._ry = 1;
+    this._lut = new Float32Array(257);
+    this._lutTotal = 1;
 
     // --- settings mirror (re-read on settings:changed; never polled in update)
     this._subtitlesOn = true;
@@ -664,8 +686,10 @@ export class HUD {
       this._readSettings();
       this._build();
       this._bind();
-      this.resize(this._viewW(), this._viewH());
+      // `_built` before `resize()`, not after: resize is a no-op until the nodes exist and this is
+      // the only chance to lay them out before the first frame.
       this._built = true;
+      this.resize(this._viewW(), this._viewH());
       Log.debug('HUD: overlay up.');
     } catch (e) {
       Log.error('HUD: init failed — running headless.', e);
@@ -717,8 +741,8 @@ export class HUD {
     this._arcs = [];
     for (let i = 0; i < 3; i++) {
       const g = svg('g');
-      const outer = svg('circle', { 'pathLength': '1000', 'stroke-linecap': 'butt' });
-      const inner = svg('circle', { 'pathLength': '1000', 'stroke-linecap': 'butt' });
+      const outer = svg('ellipse', { 'pathLength': '1000' });
+      const inner = svg('ellipse', { 'pathLength': '1000' });
       const notch = svg('line', {});
       g.appendChild(outer); g.appendChild(inner); g.appendChild(notch);
       edge.appendChild(g);
@@ -727,14 +751,14 @@ export class HUD {
     }
 
     // The mask window: one ring outside the detection ring. It drains clockwise from 12 o'clock.
-    this._maskRing = svg('circle', { 'pathLength': '1000', 'stroke-linecap': 'butt' });
+    this._maskRing = svg('ellipse', { 'pathLength': '1000' });
     edge.appendChild(this._maskRing);
     styleNum(this._maskRing, 'opacity', 0);
 
     // Noise rings: a pool of eight. Eight simultaneous significant noises is not a thing that
     // happens; the ninth silently reuses the oldest.
     for (let i = 0; i < 8; i++) {
-      const c = svg('circle', { 'fill': 'none' });
+      const c = svg('ellipse', { 'fill': 'none' });
       edge.appendChild(c);
       const ring = { node: c, live: false, t: 0, dur: 1, r0: 0, r1: 0, alpha: 0, seq: 0 };
       styleNum(c, 'opacity', 0);
@@ -820,6 +844,23 @@ export class HUD {
     this._promptCap = el('div', 'cap');
     this._promptCapLabel = el('b');
     this._promptCap.appendChild(this._promptCapLabel);
+    // A mouse button is not a letter, so it is not printed as one. The cap swaps its border and
+    // label for a drawn mouse with the pressed half filled — the same wordless contract the
+    // manual keeps (§13.7).
+    this._promptMouse = svg('svg', { viewBox: '0 0 20 28', width: 15, height: 21 });
+    this._promptMouseBody = svg('path', {
+      d: 'M2 9 a8 8 0 0 1 16 0 v10 a8 8 0 0 1 -16 0 z', fill: 'none', stroke: C.ink,
+      'stroke-width': 1.5, 'stroke-linejoin': 'miter', 'stroke-miterlimit': '4',
+    });
+    this._promptMouseSplit = svg('path', {
+      d: 'M2 12 H18 M10 4 V12', fill: 'none', stroke: C.ink, 'stroke-width': 1.2,
+    });
+    this._promptMouseFill = svg('path', { d: '', fill: C.ink, stroke: 'none' });
+    this._promptMouse.appendChild(this._promptMouseFill);
+    this._promptMouse.appendChild(this._promptMouseBody);
+    this._promptMouse.appendChild(this._promptMouseSplit);
+    this._promptCap.appendChild(this._promptMouse);
+    this._promptMouse.style.display = 'none';
     // The hold ring — a hold verb (force-place, provoke, set-down) fills it. Drawn on the cap, so
     // the progress is attached to the key rather than floating in space.
     this._promptHold = svg('svg', { viewBox: '0 0 34 34' });
@@ -843,7 +884,7 @@ export class HUD {
     // --- 4. the carry indicator -----------------------------------------------------------------
     const carry = el('div', 'carry');
     this._carryEl = carry;
-    this._carrySvg = svg('svg', { viewBox: '0 0 44 108', width: 44, height: 108 });
+    this._carrySvg = svg('svg', { viewBox: '0 0 44 108', width: 62, height: 152 });
     this._carryG = svg('g');
     this._carryGlyphs = [];
     for (let i = 0; i < 4; i++) {
@@ -1128,19 +1169,89 @@ export class HUD {
   resize(w, h) {
     this._w = Math.max(1, w | 0 || this._w);
     this._h = Math.max(1, h | 0 || this._h);
-    if (!this._built) return;
+    if (!this._edge) return;
     const cx = this._w / 2, cy = this._h / 2;
-    const R = G.ringR * Math.min(this._w, this._h);
-    this._ringR = R;
+    const rx = Math.max(24, cx - G.edgeInset);
+    const ry = Math.max(24, cy - G.edgeInset);
+    this._rx = rx; this._ry = ry;
+    this._buildLut(rx, ry);
+
     attrStr(this._edge, 'viewBox', `0 0 ${this._w} ${this._h}`);
     for (const a of this._arcs) {
-      attrNum(a.outer, 'cx', cx, 10); attrNum(a.outer, 'cy', cy, 10); attrNum(a.outer, 'r', R, 10);
-      attrNum(a.inner, 'cx', cx, 10); attrNum(a.inner, 'cy', cy, 10); attrNum(a.inner, 'r', R - 5.5, 10);
+      attrNum(a.outer, 'cx', cx, 10); attrNum(a.outer, 'cy', cy, 10);
+      attrNum(a.outer, 'rx', rx, 10); attrNum(a.outer, 'ry', ry, 10);
+      attrNum(a.inner, 'cx', cx, 10); attrNum(a.inner, 'cy', cy, 10);
+      attrNum(a.inner, 'rx', rx - 5.5, 10); attrNum(a.inner, 'ry', ry - 5.5, 10);
     }
     attrNum(this._maskRing, 'cx', cx, 10);
     attrNum(this._maskRing, 'cy', cy, 10);
-    attrNum(this._maskRing, 'r', R + G.maskROffset, 10);
+    attrNum(this._maskRing, 'rx', rx - G.maskInset, 10);
+    attrNum(this._maskRing, 'ry', ry - G.maskInset, 10);
     for (const r of this._rings) { attrNum(r.node, 'cx', cx, 10); attrNum(r.node, 'cy', cy, 10); }
+  }
+
+  /**
+   * Cumulative arc length of the ellipse, sampled at 256 parametric steps from the SVG start
+   * point (3 o'clock) running clockwise. Rebuilt only on resize; nothing here runs per frame.
+   */
+  _buildLut(rx, ry) {
+    const lut = this._lut;
+    const N = lut.length - 1;
+    const step = TAU / N;
+    let acc = 0;
+    lut[0] = 0;
+    for (let i = 1; i <= N; i++) {
+      // Midpoint rule on ds = sqrt(rx²sin²t + ry²cos²t) dt — exact to ~1e-6 of the perimeter at
+      // 256 samples, which is a quarter of a pixel on a 4K screen.
+      const t = (i - 0.5) * step;
+      const s = Math.sin(t), c = Math.cos(t);
+      acc += Math.sqrt(rx * rx * s * s + ry * ry * c * c) * step;
+      lut[i] = acc;
+    }
+    this._lutTotal = acc > 1e-6 ? acc : 1;
+  }
+
+  /**
+   * Screen bearing (degrees clockwise from 12 o'clock) → position along the ellipse in
+   * `pathLength` units. Two conversions, both necessary and both easy to get wrong:
+   *   1. bearing → the GEOMETRIC direction from the centre, which is what the player means;
+   *   2. geometric direction → the PARAMETRIC angle of the ellipse, which is not the same angle
+   *      (tan t = (rx / ry) · tan φ), and which is what arc length is measured against.
+   */
+  _lenAt(bearingDeg) {
+    const b = bearingDeg * Math.PI / 180;
+    // Screen direction: 12 o'clock is (0, −1) with y down.
+    const dx = Math.sin(b), dy = -Math.cos(b);
+    let t = Math.atan2(this._rx * dy, this._ry * dx);
+    if (t < 0) t += TAU;
+    const lut = this._lut;
+    const N = lut.length - 1;
+    const f = (t / TAU) * N;
+    const i = Math.min(N - 1, f | 0);
+    const frac = f - i;
+    const len = lut[i] + (lut[i + 1] - lut[i]) * frac;
+    return (len / this._lutTotal) * 1000;
+  }
+
+  /** Place a segment of angular width `widthDeg` centred on `centreDeg`, along the ellipse. */
+  _setArcE(node, centreDeg, widthDeg) {
+    if (widthDeg >= 359.9) { setArcRaw(node, 0, 1000); return; }
+    const half = widthDeg * 0.5;
+    const a = this._lenAt(centreDeg - half);
+    const b = this._lenAt(centreDeg + half);
+    let len = b - a;
+    if (len < 0) len += 1000;
+    setArcRaw(node, a, len);
+  }
+
+  /** The point on the ellipse at a screen bearing, written into `out` as {x, y}. */
+  _pointAt(bearingDeg, out) {
+    const b = bearingDeg * Math.PI / 180;
+    const dx = Math.sin(b), dy = -Math.cos(b);
+    const t = Math.atan2(this._rx * dy, this._ry * dx);
+    out.x = this._w / 2 + Math.cos(t) * this._rx;
+    out.y = this._h / 2 + Math.sin(t) * this._ry;
+    return out;
   }
 
   dispose() {
@@ -1172,9 +1283,20 @@ export class HUD {
     const input = this._sys('Input');
     if (input && typeof input.wasPressed === 'function' && !this._paused) {
       if (input.wasPressed('blueprint')) {
-        this._blueprintOpen = !this._blueprintOpen;
+        const want = !this._blueprintOpen;
+        // ARCHITECTURE §5 assigns the emit to HUD and STORY §2.4.1 repeats it. But `BlueprintUI`'s
+        // contract also lists `toggle()`, so if it has claimed the key too, emitting here would
+        // toggle the page twice and it would appear not to open at all. Ask it what it thinks the
+        // state is; if it already agrees with where we are going, it handled the key and we do not.
+        let theirs = null;
+        const bp = this._sys('BlueprintUI');
+        try {
+          if (bp && typeof bp.isOpen === 'function') theirs = !!bp.isOpen();
+          else if (bp && typeof bp.isOpen === 'boolean') theirs = bp.isOpen;
+        } catch { theirs = null; }
+        this._blueprintOpen = want;
         this._manualEverOpened = true;
-        this.bus?.emit(this._blueprintOpen ? 'ui:blueprint-open' : 'ui:blueprint-close', {});
+        if (theirs !== want) this.bus?.emit(want ? 'ui:blueprint-open' : 'ui:blueprint-close', {});
       }
     }
     if (this._manualHint > 0 && (this._manualEverOpened || this._phase !== 'build')) this._manualHint = 0;
@@ -1560,7 +1682,7 @@ export class HUD {
       // 1.1 Hz, ±0.09 of alpha. It exists so a player looking at a joint still catches it in
       // peripheral vision. `reducedMotion` removes it and the notch carries the state instead.
       if (!this._reducedMotion && lvl >= DETECT.critical && !spotted) {
-        alpha *= 1 + 0.16 * Math.sin(this._t * TAU * 1.1);
+        alpha *= 1 + 0.11 * Math.sin(this._t * TAU * 1.1);
       }
       if (stripped || this._paused) alpha = 0;
 
@@ -1574,25 +1696,29 @@ export class HUD {
       attrNum(a.outer, 'stroke-width', stroke, 10);
       attrStr(a.outer, 'stroke', `rgb(${rgb})`);
       styleNum(a.outer, 'opacity', alpha, 200);
-      setArc(a.outer, centre, width);
+      this._setArcE(a.outer, centre, width);
 
       if (showInner) {
         attrNum(a.inner, 'stroke-width', Math.max(1, stroke * 0.5), 10);
         attrStr(a.inner, 'stroke', `rgb(${rgb})`);
         styleNum(a.inner, 'opacity', alpha * 0.62, 200);
-        setArc(a.inner, centre, Math.max(10, width * (spotted ? 1 : 0.72)));
+        this._setArcE(a.inner, centre, Math.max(10, width * (spotted ? 1 : 0.72)));
       } else {
         styleNum(a.inner, 'opacity', 0);
       }
 
       if (showNotch) {
+        // A short radial spike, pointing in from the arc toward the centre of the frame. It is
+        // the third and last mark the meter ever adds, and it means: this one has you.
         const cx = this._w / 2, cy = this._h / 2;
-        const rad = (centre - 90) * Math.PI / 180;
-        const r1 = this._ringR - 9, r0 = this._ringR - 20;
-        attrNum(a.notch, 'x1', cx + Math.cos(rad) * r1, 10);
-        attrNum(a.notch, 'y1', cy + Math.sin(rad) * r1, 10);
-        attrNum(a.notch, 'x2', cx + Math.cos(rad) * r0, 10);
-        attrNum(a.notch, 'y2', cy + Math.sin(rad) * r0, 10);
+        this._pointAt(centre, _pt);
+        let ix = cx - _pt.x, iy = cy - _pt.y;
+        const il = Math.hypot(ix, iy) || 1;
+        ix /= il; iy /= il;
+        attrNum(a.notch, 'x1', _pt.x + ix * 7, 10);
+        attrNum(a.notch, 'y1', _pt.y + iy * 7, 10);
+        attrNum(a.notch, 'x2', _pt.x + ix * 19, 10);
+        attrNum(a.notch, 'y2', _pt.y + iy * 19, 10);
         attrNum(a.notch, 'stroke-width', 2.2, 10);
         attrStr(a.notch, 'stroke', `rgb(${rgb})`);
         styleNum(a.notch, 'opacity', alpha * 0.9, 200);
@@ -1717,18 +1843,21 @@ export class HUD {
   // THE THUNDER-MASK WINDOW
   //
   // `GAME_DESIGN.md` §7.5, restated in `NoiseSystem.js`'s own header: "a mechanic the player cannot
-  // see coming is not a mechanic." Two shapes, both outside the detection ring so they never
-  // collide with it:
+  // see coming is not a mechanic." So it is telegraphed — but a ring drawn all the way round the
+  // frame is a spaceship, not a HUD, and the first version of this was exactly that. It lives at
+  // TOP-CENTRE instead, one short arc, outside the detection ring, where nothing else ever draws:
   //
-  //   INCOMING (flash seen, thunder not yet arrived)  a DASHED ring that GROWS clockwise from
-  //                                                   12 o'clock as the wave closes. It fills as
-  //                                                   the thunder gets nearer.
-  //   OPEN     (cover available now)                  the ring goes SOLID at full circumference
-  //                                                   and DRAINS clockwise. What is left is what
-  //                                                   you have left.
+  //   INCOMING (flash seen, thunder still travelling)  a hairline arc that GROWS outward from
+  //                                                    12 o'clock as the wave closes. Half the
+  //                                                    weight of cover, and it never reaches full
+  //                                                    width, so it cannot be mistaken for cover.
+  //   OPEN     (cover available now)                   the arc thickens and CLOSES inward toward
+  //                                                    12 o'clock. What is left of it is what is
+  //                                                    left of the window.
   //
-  // Dashed→solid is a topology change, legible without colour and without a number, and it is the
-  // difference between "get ready" and "go". A deaf player additionally gets §16.3's caption.
+  // Growing-outward vs closing-inward is a motion difference; hairline vs medium is a weight
+  // difference; both survive greyscale and neither needs a number. A deaf player gets §16.3's
+  // caption on top of it, which is what makes thunder masking usable without audio at all.
   // ===============================================================================================
 
   _updateMask(dt) {
@@ -1738,41 +1867,38 @@ export class HUD {
 
     if (this._stripped || this._paused || (!open && !incoming)) {
       styleNum(ring, 'opacity', 0);
-      if (this._maskWasOpen && !open) this._maskWasOpen = false;
+      if (!open) this._maskWasOpen = false;
       if (!incoming) this._maskWasIncoming = false;
       return;
     }
+
+    attrStr(ring, 'stroke', 'rgb(242,239,230)');
 
     if (open) {
       if (!this._maskWasOpen) {
         this._maskWasOpen = true;
         this._maskWasIncoming = false;
+        this._maskIncomingCaptioned = false;
         this._caption(`[thunder — ${Math.max(1, Math.round(this._maskRemaining))} seconds]`);
       }
       const frac = clamp01(this._maskRemaining / Math.max(this._maskSpan, 0.5));
-      styleStr(ring, 'strokeDasharray', '');
-      attrNum(ring, 'stroke-width', 2.4, 10);
-      attrStr(ring, 'stroke', `rgba(${C.paper.length ? '242,239,230' : '242,239,230'},1)`);
-      // Drains clockwise from 12 o'clock: the arc starts at 12 and its LENGTH is the time left.
-      setArc(ring, frac * 180, frac * 360);
-      let a = 0.34;
-      if (!this._reducedMotion && frac < 0.28) a *= 0.72 + 0.28 * Math.sin(this._t * TAU * 2.4);
+      attrNum(ring, 'stroke-width', 2.2, 10);
+      this._setArcE(ring, 0, G.maskArcMax * frac);
+      let a = 0.30;
+      // The last quarter of the window blinks — the only urgent thing this file ever does, and it
+      // is urgent because the alternative is hammering into silence.
+      if (!this._reducedMotion && frac < 0.28) a *= 0.70 + 0.30 * Math.sin(this._t * TAU * 2.4);
       styleNum(ring, 'opacity', a, 200);
       return;
     }
 
-    // Incoming. Grows as the wave arrives; dashed so it can never be mistaken for cover.
+    // Incoming. Grows toward — but never to — the width that means cover.
     if (!this._maskWasIncoming) { this._maskWasIncoming = true; this._maskWasOpen = false; }
     const t = 1 - clamp01(this._maskIncoming / 12);
-    styleStr(ring, 'strokeDasharray', '');
-    attrNum(ring, 'stroke-width', 1.3, 10);
-    attrStr(ring, 'stroke', 'rgba(242,239,230,1)');
-    setArc(ring, t * 180, t * 360);
-    styleNum(ring, 'opacity', 0.10 + 0.10 * t, 200);
-    // Dash it. `setArc` owns strokeDasharray, so the dashes are painted by the stroke pattern on a
-    // second pass: a short dash array multiplied into the segment length would fight the arc, so
-    // instead the incoming ring is distinguished by being HALF the stroke width and dimmer, plus
-    // the caption below. Shape + weight + caption: three channels, no hue.
+    attrNum(ring, 'stroke-width', 1.1, 10);
+    setArc(ring, 0, G.maskArcMax * 0.62 * t);
+    styleNum(ring, 'opacity', 0.09 + 0.09 * t, 200);
+
     if (this._maskIncoming < 3.2 && !this._maskIncomingCaptioned) {
       this._maskIncomingCaptioned = true;
       this._caption(`[thunder — ${Math.max(1, Math.round(this._maskIncoming))} seconds]`);
@@ -1883,15 +2009,24 @@ export class HUD {
 
     if (key !== this._promptKey) {
       this._promptKey = key;
-      let label = null, wide = false, showCap = true;
-      if (key === 'mouse-left' || key === 'mouse-right') { label = key === 'mouse-left' ? '◧' : '◨'; }
-      else if (typeof key === 'string' && BINDINGS && BINDINGS[key]) { label = labelForAction(key); }
-      else if (typeof key === 'string') { label = key.length <= 5 ? key.toUpperCase() : null; }
-      if (label === null) { wide = true; label = ''; }
-      if (!key) showCap = false;
-      setText(this._promptCapLabel, label);
+      const mouse = key === 'mouse-left' || key === 'mouse-right';
+      let label = null, wide = false;
+      if (!mouse) {
+        if (typeof key === 'string' && BINDINGS && BINDINGS[key]) label = labelForAction(key);
+        else if (typeof key === 'string') label = key.length <= 5 ? key.toUpperCase() : null;
+        if (label === null) { wide = true; label = ''; }
+      }
+      setText(this._promptCapLabel, mouse ? '' : label);
+      this._promptCapLabel.style.display = mouse ? 'none' : 'block';
+      this._promptMouse.style.display = mouse ? 'block' : 'none';
+      if (mouse) {
+        attrStr(this._promptMouseFill, 'd', key === 'mouse-left'
+          ? 'M10 4 a8 8 0 0 0 -8 8 h8 z'
+          : 'M10 4 a8 8 0 0 1 8 8 h-8 z');
+      }
       this._promptCap.classList.toggle('wide', wide);
-      this._promptCap.style.display = showCap ? 'grid' : 'none';
+      this._promptCap.classList.toggle('bare', mouse);
+      this._promptCap.style.display = key ? 'grid' : 'none';
     }
 
     if (word !== this._promptWord) {
@@ -1940,6 +2075,7 @@ export class HUD {
   // ===============================================================================================
 
   _repaintCarry() {
+    if (!this._carryGlyphs) return;
     for (let i = 0; i < 4; i++) {
       const g = this._carryGlyphs[i];
       const type = this._carryTypes[i];
@@ -2009,8 +2145,7 @@ export class HUD {
     const q = Math.round(lane * 40) / 40;
     if (slot.lane !== q) {
       slot.lane = q;
-      slot.node.style.transform = `translateX(${(q * 20).toFixed(1)}%)`;
-      slot.node.style.marginLeft = '0';
+      slot.node.style.left = `${(q * 19).toFixed(1)}vw`;
     }
     slot.live = true; slot.t = 0; slot.ms = ms;
     slot.node.dataset.on = '1';
