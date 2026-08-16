@@ -73,7 +73,10 @@ export const SHOTS = {
   },
   'moon': {
     desc: 'Canopy against the moon. Sky, stars, cloud, and tree silhouette test.',
-    from: 'origin', offset: [-30, 0, 20], at: 'origin', aim: [-52, 40, -14], eye: 1.7,
+    // Aims at wherever the moon actually is, read from Sky each frame. A hardcoded aim of
+    // (-52, 40, -14) pointed at empty canopy: Sky puts the moon at azimuth ~118 degrees, i.e.
+    // +x/+z, and the ephemeris also drifts with timeOfNight. Never hardcode a moving target.
+    from: 'origin', offset: [-30, 0, 20], at: 'origin', aimAt: 'moon', eye: 1.7,
     timeOfNight: 0.4, rain: 0.0, fog: 0.3, lantern: false,
   },
   'lightning': {
@@ -159,14 +162,23 @@ export class Shots {
     // --- resolve landmarks, then pose the camera and hold it there
     const terrain = ctx.systems.get('Terrain');
     this._landmark(terrain, s.from, _pos).add(_off.fromArray(s.offset ?? [0, 0, 0]));
-    this._landmark(terrain, s.at, _tgt).add(_off.fromArray(s.aim ?? [0, 1.5, 0]));
+
+    if (s.aimAt === 'moon') {
+      // Follow the live moon rather than a fixed point in the sky.
+      const dir = ctx.systems.get('Sky')?.moonDirection;
+      if (dir && Number.isFinite(dir.x)) _tgt.copy(_pos).addScaledVector(dir, 300);
+      else _tgt.set(_pos.x + 120, _pos.y + 90, _pos.z + 220);   // plausible fallback
+    } else {
+      this._landmark(terrain, s.at, _tgt).add(_off.fromArray(s.aim ?? [0, 1.5, 0]));
+    }
 
     // Sit the camera the right height above actual ground, so shots survive terrain edits.
     if (terrain?.heightAt) {
       const groundY = terrain.heightAt(_pos.x, _pos.z);
       if (Number.isFinite(groundY)) _pos.y = groundY + (s.eye ?? 1.7);
       // Aim points given with a small y are meant as "above the ground there", not absolute.
-      if ((s.aim?.[1] ?? 0) < 12) {
+      // Skipped when aiming at the sky, where the target is deliberately far above terrain.
+      if (!s.aimAt && (s.aim?.[1] ?? 0) < 12) {
         const tGround = terrain.heightAt(_tgt.x, _tgt.z);
         if (Number.isFinite(tGround)) _tgt.y = tGround + (s.aim?.[1] ?? 1.5);
       }
