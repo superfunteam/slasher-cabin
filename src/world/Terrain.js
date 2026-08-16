@@ -1168,6 +1168,7 @@ export class Terrain {
 
   /** Resolve the y of every published landmark now that the field is final. */
   _resolveLandmarkHeights() {
+    this._tightenBounds();
     this.campCenter.y = this.heightAt(this.campCenter.x, this.campCenter.z);
     this.buildSiteCenter.y = this.heightAt(this.buildSiteCenter.x, this.buildSiteCenter.z);
     this.latrine.y = this.heightAt(this.latrine.x, this.latrine.z);
@@ -1209,6 +1210,28 @@ export class Terrain {
       length: 7.4,
       radius: 0.34,
     };
+  }
+
+  /**
+   * Collapse `bounds` onto the height range the generator actually produced, so anything that
+   * frustum- or broadphase-tests against it is not testing a 60 m tall slab of empty air.
+   */
+  _tightenBounds() {
+    const h = this._h;
+    if (!h || !h.length) return;
+    let lo = Infinity, hi = -Infinity;
+    for (let i = 0; i < h.length; i++) {
+      const v = h[i];
+      if (!Number.isFinite(v)) continue;
+      if (v < lo) lo = v;
+      if (v > hi) hi = v;
+    }
+    if (!Number.isFinite(lo) || !Number.isFinite(hi)) return;
+    lo -= 2; hi += 2;                       // skirts hang below; props stand above
+    this.bounds.min.y = lo;
+    this.bounds.max.y = hi;
+    this.bounds.minY = lo;
+    this.bounds.maxY = hi;
   }
 
   // ===========================================================================================
@@ -1800,6 +1823,11 @@ if ( uHeightFog > 0.001 ) {
     const nrm = new Float32Array(total * 3);
     const splat = new Uint8Array(total * 4);
     const misc = new Uint8Array(total * 4);
+    // Materials.js documents `aExposure : vec2` as THE optional attribute its wetness shader
+    // reads (x = how wet/open, y = validity). Ours is the ground's baked wetness lifted by sky
+    // exposure, so any Materials-patched material laid over terrain geometry — a decal, a
+    // swapped ground material — is wet in exactly the places the terrain itself is wet.
+    const wexp = new Uint8Array(total * 2);
     const sw = _splatScratch;
     const nv = _v3b;
 
@@ -1814,10 +1842,14 @@ if ( uHeightFog > 0.001 ) {
       splat[vi * 4 + 1] = Math.round(sw[1] * 255);
       splat[vi * 4 + 2] = Math.round(sw[2] * 255);
       splat[vi * 4 + 3] = Math.round(sw[3] * 255);
+      const wet = this._sampleU8(this._wet, wx, wz);
+      const sky = this._sampleU8(this._expo, wx, wz);
       misc[vi * 4] = Math.round(sw[4] * 255);               // gravel
-      misc[vi * 4 + 1] = this._sampleU8(this._wet, wx, wz);  // wetness
-      misc[vi * 4 + 2] = this._sampleU8(this._expo, wx, wz); // sky exposure
+      misc[vi * 4 + 1] = wet;                               // wetness
+      misc[vi * 4 + 2] = sky;                               // sky exposure
       misc[vi * 4 + 3] = Math.round(this._aoAt(wx, wz) * 255);
+      wexp[vi * 2] = Math.min(255, Math.round(sky * 0.45 + wet * 0.80));
+      wexp[vi * 2 + 1] = 255;                               // validity flag
     };
 
     for (let r = 0; r < W; r++) {
@@ -1845,6 +1877,7 @@ if ( uHeightFog > 0.001 ) {
     geo.setAttribute('normal', new THREE.BufferAttribute(nrm, 3));
     geo.setAttribute('aSplat', new THREE.BufferAttribute(splat, 4, true));
     geo.setAttribute('aMisc', new THREE.BufferAttribute(misc, 4, true));
+    geo.setAttribute('aExposure', new THREE.BufferAttribute(wexp, 2, true));
     const cy = (minY + maxY) * 0.5;
     geo.boundingSphere = new THREE.Sphere(
       new THREE.Vector3(span * 0.5, cy, span * 0.5),
@@ -2411,13 +2444,15 @@ diffuseColor.rgb = mix( diffuseColor.rgb, vec3( 0.070, 0.062, 0.036 ), smoothste
         const gx = c % cells, gz = (c / cells) | 0;
         const x = this.bounds.minX + (gx + r.next()) * cw;
         const z = this.bounds.minZ + (gz + r.next()) * cw;
-        const info = this.sampleInfo(x, z);
+        // Probe into the shared scratch: a scatter of 20 000 trees rejects far more points than
+        // it keeps, and only the keepers are worth an object.
+        const probe = this.sampleInfo(x, z, _infoScratch);
         if (filterFn) {
           let ok = false;
-          try { ok = !!filterFn(info); } catch (e) { Log.once('terrain:filter', 'Terrain.getSpawnCandidates filter threw', e); return out; }
+          try { ok = !!filterFn(probe); } catch (e) { Log.once('terrain:filter', 'Terrain.getSpawnCandidates filter threw', e); return out; }
           if (!ok) continue;
         }
-        out.push(info);
+        out.push({ ...probe });
       }
       if (attempts >= maxAttempts) break;
     }
@@ -2459,7 +2494,8 @@ diffuseColor.rgb = mix( diffuseColor.rgb, vec3( 0.070, 0.062, 0.036 ), smoothste
 
   update(dt, _elapsed) {
     if (!this.ready) return;
-    const d = Math.min(dt, 0.1);
+    // A non-finite dt would poison uTime, and a NaN in a vertex shader turns the lake invisible.
+    const d = Number.isFinite(dt) ? Math.min(Math.max(dt, 0), 0.1) : 0;
     this._time += d;
     this._rain += (this._rainTarget - this._rain) * Math.min(1, d * 0.6);
     this._wind += (this._windTarget - this._wind) * Math.min(1, d * 0.5);
@@ -2469,9 +2505,12 @@ diffuseColor.rgb = mix( diffuseColor.rgb, vec3( 0.070, 0.062, 0.036 ), smoothste
     if (U) {
       if (!g?.uTime) U.uTime.value = this._time;
       if (!g?.uRain) U.uRain.value = this._rain;
-      // wetness accumulates slowly over the night; it never fully dries during one
-      const wTarget = clamp01(0.22 + this._rain * 0.9);
-      U.uWet.value += (wTarget - U.uWet.value) * Math.min(1, d * 0.03);
+      // Wetness accumulates slowly over the night and never fully dries. When Materials is
+      // present this uniform IS its uWetness — it owns the integrator, so we do not touch it.
+      if (!g?.uWetness) {
+        const wTarget = clamp01(0.22 + this._rain * 0.9);
+        U.uWet.value += (wTarget - U.uWet.value) * Math.min(1, d * 0.03);
+      }
 
       if (!this._fogResolved) {
         this._fogResolved = true;
@@ -2479,14 +2518,20 @@ diffuseColor.rgb = mix( diffuseColor.rgb, vec3( 0.070, 0.062, 0.036 ), smoothste
         if (this.ctx?.scene?.fog) U.uHeightFog.value = 0;
       }
     }
+    // Materials.globalUniforms.uWind is a Vector3 (direction * strength, ~0..1.4); our water
+    // and reeds want a scalar 0..1. Prefer it so the chop and the trees lean on the same gust.
+    const gw = g?.uWind?.value;
+    const wind = (gw && Number.isFinite(gw.x))
+      ? clamp01(Math.hypot(gw.x, gw.y, gw.z) / 1.4)
+      : this._wind;
     if (this._waterUniforms) {
       if (!g?.uTime) this._waterUniforms.uTime.value = this._time;
       if (!g?.uRain) this._waterUniforms.uRain.value = this._rain;
-      this._waterUniforms.uWind.value = this._wind;
+      this._waterUniforms.uWind.value = wind;
     }
     if (this._reedUniforms) {
       if (!g?.uTime) this._reedUniforms.uTime.value = this._time;
-      this._reedUniforms.uWind.value = this._wind;
+      this._reedUniforms.uWind.value = wind;
     }
 
     this._cull();

@@ -6,6 +6,7 @@
  * whole game down. This is what lets many agents build in parallel against one branch
  * and still have a runnable build at every moment.
  */
+import * as THREE from 'three';
 import { Engine } from './core/Engine.js';
 import { Input } from './core/Input.js';
 import { Shots } from './core/Shots.js';
@@ -105,7 +106,6 @@ async function boot() {
 
 /** Minimal stand-in scene so a partially-built repo still renders something legible. */
 async function installPlaceholderScene(ctx) {
-  const THREE = await import('three');
   const { scene, camera } = ctx;
 
   scene.fog = new THREE.FogExp2(0x0a1216, 0.035);

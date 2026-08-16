@@ -531,6 +531,442 @@ export class AudioEngine {
     const key = BUS_ALIAS[name] ?? name;
     return this.buses?.[key]?.gain.gain.value ?? 0;
   }
+
+  /**
+   * Play a sound.
+   * @param {string} id
+   * @param {{ position?: THREE.Vector3, volume?: number, rate?: number, detune?: number,
+   *   priority?: number, bus?: string, loop?: boolean, reverb?: number, variant?: number,
+   *   occlusion?: number, elevation?: number, rolloff?: number, refDistance?: number,
+   *   noise?: object, fadeInMs?: number, when?: number }} [opts]
+   * @returns {Voice|null} a handle, valid only while the sound is playing.
+   */
+  play(id, opts = {}) {
+    if (!this.enabled || !this.sfx) return null;
+    const resolved = resolveId(id);
+    if (!resolved) {
+      Log.once(`audio:id:${id}`, `audio: unknown sfx id '${id}'.`);
+      return null;
+    }
+    const buf = opts.variant != null
+      ? this.sfx.variant(resolved, opts.variant)
+      : this.sfx.get(resolved, this.rand);
+    if (!buf) return null;                       // still rendering — drop it, never stall
+    const info = recipeInfo(resolved);
+    const busName = opts.bus ?? (info?.family === 'ui' ? 'sfxUI' : 'sfxWorld');
+    const spatial = !!opts.position && busName !== 'sfxUI' && busName !== 'body';
+
+    let gainValue = (opts.volume ?? 1);
+    let distance = 0;
+    let occT = opts.occlusion ?? 0;
+
+    if (spatial) {
+      this._listenerPosition(_lis);
+      _tmp.copy(opts.position);
+      distance = _tmp.distanceTo(_lis);
+      if (opts.rolloff !== 0) {
+        // The panner applies its own inverse-distance law; only pre-scale when we have
+        // taken that job over (the noise:emit path).
+        gainValue *= 1;
+      }
+    }
+
+    return this._playBuffer(buf, {
+      id: resolved,
+      family: opts.family ?? info?.family ?? 'sfx',
+      priority: opts.priority ?? info?.priority ?? 2,
+      bus: busName,
+      position: spatial ? opts.position : null,
+      gain: gainValue,
+      rate: opts.rate ?? 1,
+      detune: opts.detune ?? 0,
+      loop: !!opts.loop,
+      reverb: opts.reverb,
+      occlusion: occT,
+      distance,
+      rolloff: opts.rolloff,
+      refDistance: opts.refDistance,
+      elevation: opts.elevation,
+      when: opts.when,
+      fadeInMs: opts.fadeInMs ?? 0,
+    });
+  }
+
+  /** Positional convenience form. */
+  playAt(id, position, opts = {}) {
+    return this.play(id, { ...opts, position });
+  }
+
+  /** Stop a handle returned by play(). Always a fade — never a hard stop (§9.2). */
+  stop(handle, fadeMs = 60) {
+    if (!handle || handle.free) return;
+    this._releaseVoice(handle, false, fadeMs);
+  }
+
+  stopAll(fadeMs = 80) {
+    for (let i = 0; i < this._voices.length; i++) {
+      const v = this._voices[i];
+      if (!v.free) this._releaseVoice(v, false, fadeMs);
+    }
+  }
+
+  /** §2.3 — duck a bus by dB with an attack / hold / release envelope. */
+  duck(busName, dB, attackMs = 40, holdMs = 200, releaseMs = 800) {
+    const b = this.buses?.[BUS_ALIAS[busName] ?? busName];
+    if (!b || !this.context) return;
+    const p = b.duck.gain;
+    const now = this.now();
+    const target = Math.max(MIN_G, dbToGain(-Math.abs(dB)));
+    this._hold(p, now);
+    p.setTargetAtTime(target, now, Math.max(0.005, attackMs / 3000));
+    const back = now + (attackMs + holdMs) / 1000;
+    p.setTargetAtTime(1, back, Math.max(0.02, releaseMs / 3000));
+  }
+
+  /** Manual reverb override. Omit to let the probe grid decide again. */
+  reverbZone(name, fadeMs = null) {
+    if (!this.context) return;
+    if (name == null) { this._spaceLocked = false; return; }
+    if (!SPACES.includes(name)) return;
+    this._spaceLocked = fadeMs !== -1;
+    if (name === this._spaceTarget) return;
+    const ir = this._irs.get(name);
+    if (!ir) { this._spaceTarget = name; return; }   // not rendered yet; take it next probe
+
+    // Architectural transitions are abrupt, environmental ones are gradual (§3.3).
+    const arch = name === 'CABIN_SHELL' || name === 'TIN_ROOF'
+      || this._spaceTarget === 'CABIN_SHELL' || this._spaceTarget === 'TIN_ROOF';
+    const fade = Math.max(0.05, (fadeMs ?? (arch ? 250 : 900)) / 1000);
+
+    const toB = this._activeConv === 'A';
+    const conv = toB ? this._convB : this._convA;
+    const rise = toB ? this._retB : this._retA;
+    const fall = toB ? this._retA : this._retB;
+    if (!conv || !rise || !fall) return;
+    if (this.settings?.tierIndex === 0) {
+      // One convolver on `low`: swap the buffer, no crossfade — just a send-level dip.
+      this._convA.buffer = ir;
+      this._spaceTarget = name; this._space = name;
+      return;
+    }
+    try { conv.buffer = ir; } catch { return; }
+    const now = this.now();
+    this._crossfade(rise.gain, fall.gain, now, fade);
+    this._activeConv = toB ? 'B' : 'A';
+    this._spaceTarget = name;
+    this._space = name;
+  }
+
+  /** Doc alias (§9.5). `weight` is accepted and ignored — spaces do not blend, they cross. */
+  setSpace(spaceId, weight = 1) {
+    void weight;
+    this.reverbZone(spaceId);
+  }
+
+  /** §2.5 / S10 — the shell. `enabled=false` returns to the always-present baseline. */
+  setMask(enabled, fadeMs = 1400) {
+    this._maskOn = !!enabled;
+    this._maskBlend(this._maskOn ? 0.82 : 0.34, fadeMs);
+  }
+
+  // =============================================================== playback core
+
+  _playBuffer(buf, o) {
+    const c = this.context;
+    if (!c || !buf) return null;
+    // Kill anything under −60 dB before we build it. At 60 m in the rain, a cricket does
+    // not need to exist (§9.3).
+    if (o.gain < 1e-3) return null;
+
+    const v = this._acquire(o.family, o.priority, o.gain, o.distance ?? 0);
+    if (!v) return null;
+
+    const now = c.currentTime;
+    const when = Math.max(now + 0.02, o.when ?? 0);
+    const busKey = BUS_ALIAS[o.bus] ?? o.bus ?? 'sfxWorld';
+    const busObj = this.buses[busKey] ?? this.buses.sfxWorld;
+    const spatial = !!o.position;
+
+    // ---- occlusion split (§3.2)
+    const T = clamp(o.occlusion ?? 0, 0, 14);
+    const fc = clamp(18000 * Math.exp(-0.55 * T), 180, 18000);
+    const directDb = clamp(-3.2 * T, -34, 0);
+    const bleedDb = T > 0.02 ? clamp(-14 - 1.1 * T, -40, -14) : -60;
+    this._set(v.directLP.frequency, fc, now);
+    this._set(v.directGain.gain, dbToGain(directDb), now);
+    this._set(v.bleedGain.gain, T > 0.02 ? dbToGain(bleedDb) : 0, now);
+
+    // ---- elevation cue: HRTF elevation is weak, so we fake it with a shelf (§3.1)
+    let shelf = 0;
+    if (spatial) {
+      this._listenerPosition(_lis);
+      const dy = o.position.y - _lis.y;
+      shelf = o.elevation ?? (dy > 2 ? 3 : dy < -2 ? -4 : 0);
+    }
+    this._set(v.tone.gain, shelf, now);
+
+    // ---- panner
+    if (spatial) {
+      const p = v.panner;
+      const far = (o.distance ?? 0) > 45;
+      // Beyond 45 m HRTF cues are meaningless and rolloff dominates (§9.3).
+      p.panningModel = (!far && v.index < this._maxHrtf) ? 'HRTF' : 'equalpower';
+      p.refDistance = o.refDistance ?? REF_DISTANCE;
+      p.rolloffFactor = o.rolloff ?? ROLLOFF.world;
+      p.maxDistance = MAX_DISTANCE;
+      this._setPannerPosition(p, o.position, now, 0);
+      v.position.copy(o.position);
+      v.hasPosition = true;
+      v.tone.connect(p);
+      v.panner.connect(v.out);
+    } else {
+      v.hasPosition = false;
+      v.tone.connect(v.out);
+    }
+
+    // ---- routing
+    v.out.gain.value = 1;
+    v.out.connect(busObj.input ?? busObj.gain);
+    const sendLevel = o.reverb ?? (busKey === 'sfxWorld' ? 0.22 : 0);
+    if (sendLevel > 0.001 && this._verbIn) {
+      v.send.gain.value = sendLevel;
+      v.out.connect(v.send);
+      v.send.connect(this._verbIn);
+    }
+
+    // ---- the source (the only node recreated per play)
+    const pg = c.createGain();
+    const src = c.createBufferSource();
+    src.buffer = buf;
+    src.loop = !!o.loop;
+    if (o.loop) { src.loopStart = 0; src.loopEnd = buf.duration; }
+    src.playbackRate.value = clamp(o.rate ?? 1, 0.06, 6);
+    if (o.detune) { try { src.detune.value = o.detune; } catch { /* no detune param */ } }
+    src.connect(pg);
+    pg.connect(v.gain);
+
+    // The level is set *before* the source starts, so a hard transient stays hard without
+    // a 0 ms envelope on a live node (§9.2.2).
+    const g = Math.max(MIN_G, o.gain);
+    if (o.fadeInMs > 0) {
+      pg.gain.setValueAtTime(MIN_G, when);
+      pg.gain.linearRampToValueAtTime(g, when + Math.max(0.005, o.fadeInMs / 1000));
+    } else {
+      pg.gain.setValueAtTime(g, Math.max(now, when - 0.005));
+    }
+
+    v.src = src;
+    v.pg = pg;
+    v.bus = busObj;
+    v.id = o.id;
+    v.loop = !!o.loop;
+    v.sustained = !!o.loop;
+    v.baseGain = g;
+    v.distance = o.distance ?? 0;
+    v.startedAt = when;
+    v.endsAt = o.loop ? Infinity : when + buf.duration / (o.rate ?? 1) + 0.05;
+    v.serial = ++_voiceSerial;
+
+    if (!o.loop) src.onended = v._onEnded;
+    try { src.start(when); } catch (e) { Log.once('audio:start', 'source.start failed', e); }
+
+    this._remember(o.id, o.position);
+    return v;
+  }
+
+  _acquire(family, priority, gainValue, distance) {
+    // Per-family caps (§9.1).
+    const cap = this._famCaps[family];
+    if (cap != null && (this._famCount[family] ?? 0) >= cap) {
+      const victim = this._weakest(family);
+      if (!victim || victim.priority > priority) return null;
+      this._releaseVoice(victim, false, 8);
+    }
+
+    let v = null;
+    for (let i = 0; i < this._voices.length; i++) {
+      if (this._voices[i].free) { v = this._voices[i]; break; }
+    }
+    if (!v) {
+      const victim = this._weakest(null);
+      if (!victim) return null;
+      const mine = this._score(priority, gainValue, distance, 0);
+      if (this._scoreOf(victim) >= mine) return null;
+      this._releaseVoice(victim, false, 8);
+      v = victim;
+    }
+
+    v.free = false;
+    v.family = family;
+    v.priority = priority;
+    this._famCount[family] = (this._famCount[family] ?? 0) + 1;
+    return v;
+  }
+
+  _score(priority, gainValue, distance, ageMs) {
+    return priority * 1000 + 20 * Math.log10(Math.max(1e-5, gainValue))
+      - 0.4 * distance - 0.001 * ageMs;
+  }
+
+  _scoreOf(v) {
+    const age = (this.now() - v.startedAt) * 1000;
+    return this._score(v.priority, v.baseGain, v.distance, age);
+  }
+
+  _weakest(family) {
+    let best = null;
+    let bestScore = Infinity;
+    for (let i = 0; i < this._voices.length; i++) {
+      const v = this._voices[i];
+      if (v.free) continue;
+      if (family && v.family !== family) continue;
+      if (v.priority >= 3) continue;                 // never stolen (§9.1)
+      const s = this._scoreOf(v);
+      if (s < bestScore) { bestScore = s; best = v; }
+    }
+    return best;
+  }
+
+  /**
+   * Release a slot. A stolen or stopped voice is detached from the slot and allowed to fade
+   * out dry into its own bus, so the slot's filters are free immediately and nothing ever
+   * clicks (§9.1: release with a fade, never a stop).
+   */
+  _releaseVoice(v, fromEnded = false, fadeMs = 0) {
+    if (v.free) return;
+    v.free = true;
+    v.gen++;
+    if (v.family) this._famCount[v.family] = Math.max(0, (this._famCount[v.family] ?? 1) - 1);
+
+    const now = this.now();
+    const src = v.src;
+    const pg = v.pg;
+    const busNode = v.bus?.input ?? v.bus?.gain ?? null;
+    v.src = null;
+    v.pg = null;
+    v.bus = null;
+    v.sustained = false;
+    v.hasPosition = false;
+
+    if (src && pg && !fromEnded) {
+      const fade = Math.max(0.008, fadeMs / 1000);
+      try {
+        pg.disconnect();
+        if (busNode) pg.connect(busNode);
+        this._hold(pg.gain, now);
+        pg.gain.setTargetAtTime(MIN_G, now, fade / 3);
+      } catch { /* graph already torn down */ }
+      const stopAt = now + fade + 0.02;
+      try { src.stop(stopAt); } catch { /* already stopped */ }
+      src.onended = () => { try { src.disconnect(); pg.disconnect(); } catch { /* gone */ } };
+    } else {
+      try { src?.disconnect(); } catch { /* gone */ }
+      try { pg?.disconnect(); } catch { /* gone */ }
+      if (src) src.onended = null;
+    }
+
+    // Idle slots are disconnected from the bus so they cost nothing.
+    try { v.tone.disconnect(); } catch { /* not connected */ }
+    try { v.panner.disconnect(); } catch { /* not connected */ }
+    try { v.out.disconnect(); } catch { /* not connected */ }
+    try { v.send.disconnect(); } catch { /* not connected */ }
+    v.panner.connect(v.out);
+  }
+
+  // --------------------------------------------------------------- param helpers
+
+  _hold(param, now) {
+    try { param.cancelAndHoldAtTime(now); }
+    catch { try { param.cancelScheduledValues(now); } catch { /* unsupported */ } }
+  }
+
+  /** Filter/gain moves are always ramped — biquad coefficient jumps click too (§9.2.6). */
+  _set(param, value, now, tau = 0.008) {
+    if (!param) return;
+    const v = Number.isFinite(value) ? value : 0;
+    if (Math.abs(param.value - v) < 1e-5) return;
+    try { param.setTargetAtTime(v, now, tau); }
+    catch { try { param.value = v; } catch { /* frozen param */ } }
+  }
+
+  _setPannerPosition(p, pos, now, tau = 0.02) {
+    if (!p || !pos) return;
+    if (p.positionX) {
+      if (tau <= 0) {
+        try {
+          p.positionX.setValueAtTime(pos.x, now);
+          p.positionY.setValueAtTime(pos.y, now);
+          p.positionZ.setValueAtTime(pos.z, now);
+          return;
+        } catch { /* fall through */ }
+      }
+      p.positionX.setTargetAtTime(pos.x, now, tau);
+      p.positionY.setTargetAtTime(pos.y, now, tau);
+      p.positionZ.setTargetAtTime(pos.z, now, tau);
+    } else if (p.setPosition) {
+      p.setPosition(pos.x, pos.y, pos.z);
+    }
+  }
+
+  _maskBlend(wet, fadeMs) {
+    if (!this._mask || !this.context) return;
+    const now = this.now();
+    const w = clamp01(wet);
+    const tau = Math.max(0.01, fadeMs / 3000);
+    this._set(this._mask.wet.gain, w, now, tau);
+    this._set(this._mask.dry.gain, 1 - w * 0.85, now, tau);
+  }
+
+  _crossfade(rise, fall, now, dur) {
+    try {
+      rise.cancelScheduledValues(now);
+      fall.cancelScheduledValues(now);
+      rise.setValueCurveAtTime(XF_UP, now, dur);
+      fall.setValueCurveAtTime(XF_DOWN, now, dur);
+    } catch {
+      this._set(rise, 1, now, dur / 3);
+      this._set(fall, 0, now, dur / 3);
+    }
+  }
+
+  _listenerPosition(out) {
+    const cam = this.ctx?.camera;
+    if (cam) out.setFromMatrixPosition(cam.matrixWorld);
+    else out.set(0, 1.7, 0);
+    return out;
+  }
+
+  /** Ring of recent plays, for de-duplicating a noise:emit against its own audio:sfx. */
+  _remember(id, position) {
+    const i = this._recentI;
+    this._recentIds[i] = id;
+    this._recentX[i] = position?.x ?? 0;
+    this._recentZ[i] = position?.z ?? 0;
+    this._recentT[i] = this.now();
+    this._recentI = (i + 1) % this._recentIds.length;
+  }
+
+  _playedRecently(id, position, windowSec = 0.12, radius = 2) {
+    const now = this.now();
+    for (let i = 0; i < this._recentIds.length; i++) {
+      if (this._recentIds[i] !== id) continue;
+      if (now - this._recentT[i] > windowSec) continue;
+      if (!position) return true;
+      const dx = this._recentX[i] - position.x;
+      const dz = this._recentZ[i] - position.z;
+      if (dx * dx + dz * dz <= radius * radius) return true;
+    }
+    return false;
+  }
+}
+
+// Equal-power crossfade curves for the two reverb returns (§3.3).
+const XF_UP = new Float32Array(33);
+const XF_DOWN = new Float32Array(33);
+for (let i = 0; i <= 32; i++) {
+  const u = (i / 32) * Math.PI * 0.5;
+  XF_UP[i] = Math.sin(u);
+  XF_DOWN[i] = Math.cos(u);
 }
 
 export default AudioEngine;

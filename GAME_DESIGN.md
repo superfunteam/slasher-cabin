@@ -1087,7 +1087,7 @@ be cut. "You cannot rush a saw. The monster is hostage to the physics of a saw."
 | Total sawing | 14 × 5.2 = **73 s of noise**, budgeted at 200 s wall-clock in §5.3 to cover the waiting |
 
 **Effective reach against a counselor.** This is the number that makes the mechanic playable, and
-it is derived, not chosen. Counselor hearing threshold 0.11 (§9.2); Night 3 `maskFloor = 0.151`;
+it is derived, not chosen. Counselor hearing threshold 0.11 (§9.1); Night 3 `maskFloor = 0.151`;
 assume one tree trunk between (`occlusion = 0.88`):
 
 ```

@@ -428,20 +428,30 @@ export class Music {
   _resolveContext() {
     const audio = this.ctx?.systems?.get?.('Audio') ?? null;
 
-    let busNode = null;
-    try {
-      if (audio && typeof audio.bus === 'function') busNode = audio.bus('music') ?? null;
-    } catch { busNode = null; }
+    // AudioEngine's own `.bus` property is the EventBus, so the music-bus accessor is named
+    // `busNode()` there (with `bus_()` as the §9.5 doc alias). Probe every documented shape
+    // rather than assuming one — this file must work whatever the Audio agent settled on.
+    let musicBus = null;
+    for (const getter of ['busNode', 'bus_', 'bus', 'getBus']) {
+      try {
+        const fn = audio?.[getter];
+        if (typeof fn !== 'function') continue;
+        const n = fn.call(audio, 'music');
+        if (n && n.context && typeof n.connect === 'function') { musicBus = n; break; }
+      } catch { /* wrong shape — keep probing */ }
+    }
 
-    if (busNode && busNode.context && typeof busNode.connect === 'function') {
-      this.ac = busNode.context;
-      this._dest = busNode;
+    if (musicBus) {
+      this.ac = musicBus.context;
+      this._dest = musicBus;
+      // The bus already applies settings.musicVolume; applying it again would square it.
       this._ownsOutput = false;
       return;
     }
 
-    // Some other AudioEngine shape may still expose its context; use it before making one.
-    const foreign = audio?.audioContext ?? audio?.actx ?? audio?.ac ?? null;
+    // No music bus, but the engine may still own a context — share it rather than opening
+    // a second one (two AudioContexts means two output devices' worth of latency).
+    const foreign = audio?.context ?? audio?.audioContext ?? audio?.actx ?? audio?.ac ?? null;
     if (foreign && typeof foreign.createGain === 'function') {
       this.ac = foreign;
       this._dest = foreign.destination;

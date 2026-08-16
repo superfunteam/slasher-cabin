@@ -1820,3 +1820,198 @@ they are just people, audibly, in a wood.
 not be regenerated.
 
 ---
+
+## 9. ENVIRONMENTAL STORYTELLING — 22 OBJECTS
+
+Placed by `Props.js` or `CabinSite.js`. All are **inert** — no pickup prompt, no lore entry, no
+audio sting — except props 1, 3, 10, 16 and 22, which are parts or tools and are handled by
+`BuildSystem`. If a player never notices one, that is fine. That is the point.
+
+**What changed.** v1.0's twenty objects stated one fact eleven times: *his boot, his swing, his
+mother's grave, his mask, his house, his drawing, his survey, his photo, his notches, his blanket.*
+That is not environmental storytelling — environmental storytelling runs on **gap and
+contradiction**, and everything there resolved to the same answer. Meanwhile the twenty-two years
+between the fire and the game, the thing nobody in the fiction has thought about, was a blank.
+
+Four "his" props are cut outright: the tool roll spread under an oilcloth (he wears it), the
+carpenter's pencil as scenery (it is a tool now, §10.3), the floor plan carved into a rock face
+(the twelfth statement of the same fact), and the rusted swing seat in the archery range (the
+thirteenth). Two clichés are replaced in place (props 4 and 21). **Five new objects carry
+1962–1984**, and the best of them is walked on every single night.
+
+**Kept against the note:** the tin of ruined pages (prop 6). It is the only object in the game that
+shows him *failing*, and everything else shows him succeeding. It earns its slot on contradiction.
+
+### 9.1 His — nine objects
+
+| # | Object | Where | Reads as | On replay |
+|---|---|---|---|---|
+| 1 | **The 1961 Minnesota licence plate**, folded in three | Under the fallen log, 31.6 m NW | Somebody levelled something out here once | It was under the original house. He kept it. It has always been the shim |
+| 2 | **A ring of foundation stones**, black at the edges | The build site — **visible from Night One, in every light**, with the tutorial's chalk squares drawn onto them | A fire | Every pier lands on an old one. He is building exactly on the footprint. On Night Six they are the only true reference in the world (§6, N6) |
+| 3 | **A porcelain sink**, cracked, a rectangular section missing from its splash-back | Propped against a birch, 60.0 m WNW | Camp junk | That rectangle is on his face — and on Night Six the player carries it back and installs it (§10.1) |
+| 4 | **A child's boot, size 3, on a shelf** | The lean-to, 77.2 m WNW | Somebody built a shelf out here | The shelf is hand-cut, mortised, and level. **There is a second shelf beside it and it is empty.** *(v1.0 hung the boot on a nail at head height — haunted-woods boilerplate, and it contradicts the character: hanging a totem is a raving gesture and §2 insists he never raves. He built it somewhere sensible.)* |
+| 5 | **Fifty-one wooden survey stakes**, carpenter's pencil, driven in a perfect grid | Across the site | Planning | The numbering starts at **1953**. They are years, not stake numbers, and there are fifty-one of them |
+| 6 | **A tin of ruined manual pages**, weighted under a rock, dry | 24 m W of the site | Somebody's rubbish | Twelve attempts at the same panel, each worse than the last. He has been trying to draw his mother's hand, and failing, since long before Night One |
+| 7 | **Four notches on a birch trunk** at 91, 108, 124 and 141 cm | 15.0 m SSW — the tree that stood outside the kitchen door | Somebody measured something | They match the doorframe marks the player makes on Night Six **exactly**, and they predate the house by thirty-one years |
+| 8 | **A wide flat stump, a folded blanket, a tin cup** | 11.4 m SE | A place to sit | The player has been sitting there every night since Night One (§13.2). **The second seat, the one with the blanket on it, cannot be sat in.** The game refuses it silently for six nights |
+| 9 | **Two chairs**, hand-made, identical joinery, different sizes | Inside the house, Night Seven | Furniture | — |
+
+### 9.2 1984 — the county — two objects
+
+| # | Object | Where | Reads as |
+|---|---|---|---|
+| 10 | **Ten steel survey stakes with orange plastic ribbon**, driven April 1984 | Across the point; four inside the kitchen footprint; one in the doorway | The most recent thing that has happened here. The player pulls the first one in the game's first ninety seconds (§1.4) |
+| 11 | **The brass survey marker**, 1962, stamped `WANAKA PINES LAND CO.` | 21.9 m SE, at the property line | Polished bright by something rubbing it. He cleans it. Every night. It is the only piece of the Land Company he has ever been able to maintain |
+
+### 9.3 1962–1984 — the middle — five objects
+
+| # | Object | Where | Reads as | The gap |
+|---|---|---|---|---|
+| 12 | **The dock** | 49.6 m NNW | The dock | He fixed it in 1962 for nothing and it is still the best-built structure at this camp. **It is the only wooden structure in the game that never creaks** — `state.installed` treats its boards as `correct: true, torque: 1.0` permanently. In a game where creak means wrongness, one thing in the world is silent, and the player walks over it every night, and by about Night Four they notice. If the Ranger arrives (§6.10, rung 5) his truck parks on it |
+| 13 | **The camp entrance sign** | 202.2 m SSE, on the county road | A camp sign | It is painted on a panelled door. There is a **mortised lockset hole** in it, plugged with a wooden bung. The camp made its welcome sign out of his front door in 1971 and nobody alive remembers doing it. Robin's `ROB_EVID_03` is about a mortise |
+| 14 | **A burn permit**, nailed inside the boathouse | The boathouse | A form. **Unreadable** (§0.6) — a grey blur with a county seal, one legible date stamp — `14 OCT 1962` — and one legible number, `9-114` | Marit is not on it, because she was not a structure |
+| 15 | **A 1958 Land Company travel brochure**, in the box | Inside prop 16 | Photographs of a lake, mountains, pines | It is a lake in **Otago, New Zealand**. It is not this lake. This is where the name came from (§4.5) |
+| 16 | **A cardboard box of the Vik house's papers**, under the canoe rack, holding it level | The boathouse | A box | The Land Company cleared the house in 1962 and boxed the papers and the box has been shimming a canoe rack for twenty-two years. **The Night Six errata slip — the real step 9, in Marit's hand — is in it**, and to the game and to the manual and to the man it is a red-outlined manifest item |
+
+### 9.4 The camp — four objects
+
+| # | Object | Where | Reads as |
+|---|---|---|---|
+| 17 | **Bev's ashtray** — a hubcap, forty butts, all crushed the same direction | Camp office porch, 157.9 m ESE | A woman who sits in the same chair every night. **The chair faces bearing 293°, which is the datum**, which is where the house used to be, and she has never once wondered why that is the nice view |
+| 18 | **The camp photo board** — thirteen summers of group photos | Mess hall | In the **1971** frame — Bev's first — at the back edge, out of focus, a very large man at the treeline **with his head tilted** (§2.2) |
+| 19 | **The boathouse door frame** | 100.5 m ENE | Leaf gone from Night Four. Hinges gone from Night Six. Propped with an oar and never fixed. The camp is losing, one component at a time, and each one is a part number |
+| 20 | **Dale's torch, stood upright on a stump, lens-up, still on** | `(+46, −4)`, 46 m E | Because he needed both hands, and there was a stump, and you put a light where it will be useful. A 20 m cone straight up into the rain, browning as the battery dies, **visible from the canoe rack**, and nobody comes. On Night Seven it is off, and it has been moved **8.5 m toward the house**, and set down neatly |
+
+### 9.5 The ground — two objects
+
+| # | Object | Where | Reads as |
+|---|---|---|---|
+| 21 | **A rectangle of hand-cut grass.** No stone. No mound. No fence. No flowers | 117.0 m WSW, ridge shoulder, +14 m | *(v1.0 had an unmarked, well-kept grave — the most predictable object available in this genre, and it answers the mystery before the manual gets to it.)* This is a patch of grass that is mowed. It is not evidence of anything. **There is nothing to find here and that is what makes it unbearable**: a 2.0 × 0.9 m rectangle where the grass is 40 mm and everywhere else it is 300 mm, and no tool anywhere near it, and no path to it |
+| 22 | **A canoe, upside down, full of lake stones**, one gunwale crushed under a truss heel | The build site, from Night Five | Improvisation. It is Dale's canoe. It is holding up the roof |
+
+---
+
+## 10. THE THREE FIRST-PLAYTHROUGH REVELATIONS
+
+v1.0's story was legible only on a second playthrough and the document knew it: eleven of twenty
+props carried a *Replay:* tag, props were inert, there was no narrator, no world text, no
+collectible and no readable manual. That left exactly one first-playthrough channel for the whole
+Marit story — four `BEV_LATE_*` lines heard at distance through rain, and one scene of Robin in a
+doorway. A first-time player would finish with "big man built a house, family lived here once, two
+chairs," and the thesis would never arrive.
+
+**Three revelations are now unmissable, and each is gated on a mechanic the player must perform to
+finish the game.** None of them is a cutscene. None of them takes the camera. All three are on
+Night Six.
+
+### 10.1 The sink — *he carries his own face across the site and mounts it*
+
+**Slot `SK-01`. Required to complete Night Six.**
+
+The porcelain sink has been leaning against a birch at 60.0 m WNW since Night One, with a
+rectangular section missing from its splash-back. On Night Six the manual asks for it. It is a
+class-C carry, 31 kg, 60 m of wet ground, and it takes about 80 seconds.
+
+The sink seats **under a window**, and the glazing goes in first, and the glass is black because it
+is 02:00 and there is a forest behind it.
+
+**On the seating of `SK-01`, for 1.4 seconds, the window reflects.**
+
+| Property | Value |
+|---|---|
+| Surface | The `GL-06` glazing quad only — 0.62 × 0.94 m |
+| Technique | One planar reflection, `RenderTarget` 256 × 384, one camera, one frame captured at seat, held | 
+| Cost | ~0.4 ms, once, for 1.4 s |
+| Camera | **Unmoved.** No cut, no take-over, no zoom, no slow-motion. The player has leaned in because seating a sink requires leaning in |
+| What is in it | A mask. Off-white. Curved. A left eye that is a nipped oval and a right eye that is a factory overflow slot, 31 mm too low |
+| What is 400 mm in front of it | The rectangular hole in the splash-back |
+| **They are the same rectangle** | |
+
+No sting. No line. No prompt. The reflection fades with the seating animation and the game does not
+mention it again. Flag `installedSink`.
+
+### 10.2 The ruin anchors — *the validation channel, visible and explained*
+
+Already covered mechanically in §6, Night Six. The point for this section: the stones are the
+**second** revelation and they are revealed by *use*, not by looking.
+
+The player has placed every pier, sill, post and truss of this house on top of a burned foundation
+since minute two, and has never been told. On Night Six the manual breaks, the fog draws the trench
+(§6), and `BuildSystem` starts validating against `CabinSite.ruinAnchors` — and the moment the
+player realises the anchors *work*, they realise the anchors have been correct all along, which
+means the house they have built is not a copy of the drawing. **It is a copy of the ground.**
+
+`GAME_DESIGN.md` §2.2's `Slot` struct needs no change: the anchors are the slots' authority, and
+always were.
+
+### 10.3 The doorframe — *a placement he makes, not scenery she finds*
+
+**Slots `PM-01` … `PM-04`. Required to complete Night Six.**
+
+v1.0 had Robin discover four pencil marks on a doorframe. That is a nice image and it is the wrong
+verb: it is scenery, delivered to a character, in a game about a player's hands.
+
+**The player makes the marks.**
+
+After `DF-01` (the doorframe) seats, the manual's next panel is 6.8 (hero): the kitchen wall
+elevation in Marit's hand — a window over a sink, and four short horizontal ticks on the left jamb.
+Beside them, in the parts bracket: **the carpenter's pencil**, sharpened to 8 mm, which has been on
+his hip since Night One and has been replaced with an identical one every night.
+
+Four placements, in the manual's own grammar, against four 40 mm slots on the jamb:
+
+| Slot | Height | The player must |
+|---|---|---|
+| `PM-01` | **91 cm** | **Crouch.** The lowest interaction in the game |
+| `PM-02` | 108 cm | Crouch |
+| `PM-03` | 124 cm | Stand |
+| `PM-04` | 141 cm | Stand |
+
+Each mark takes 1.6 s and is silent. **The player draws a child's growth on a doorframe, four
+times, from a diagram, and has to crouch for the first two.**
+
+And beside each one the manual asks for a numeral, and he copies it, because Marit taught him
+numbers even though she never got him past them: `53`, `55`, `57`, and a fourth that is not a year
+and is the reason there are only four marks.
+
+**He does not know they are years.** He knows they are part of the drawing.
+
+If `DF-01`'s jamb is out by more than 1.0°, the marks land at the wrong heights, and the manual
+redraws them, in his hand, wrong, and he copies them anyway (§6.8).
+
+Flag `markedDoorframe`. It gates `n6_robin_inside`, because the marks are what she finds — and by
+then they are ninety minutes old and the player put them there.
+
+They match the birch (prop 7) exactly, and the birch has been standing 15 m from the build site for
+seven nights.
+
+### 10.4 The interior — the money shot, budgeted, with an owner (resolves C6)
+
+`ARCHITECTURE.md` §9 gives `CabinSite.js` "the build plot, foundation, slot layout." **Nobody owned
+the furnished interior**, which is the last ten minutes of the game and the image the whole thing
+is for. `CabinSite.js` owns it. Amend the ownership line to *"the build plot, foundation, slot
+layout, and the finished interior."*
+
+**On the Call of Duty parity claim: we drop it for this one room, on purpose, and here is the
+reasoning so nobody re-adopts it.** A wet exterior forest at night hides a multitude — silhouette
+mass, fog, falloff, rain. A lit room at 03:40 hides nothing, and authored micro-detail, decals and
+hand-placed dressing are exactly where a fully procedural, zero-binary-asset pipeline has nowhere
+to go. Competing there is a fight we would lose in the one place we cannot afford to lose it.
+
+**So the interior is not detailed. It is *dark*, and it is *shaped*, and it is one light.**
+
+| Budget | Value |
+|---|---|
+| **Draw calls** | **≤ 34** of the 220 (`ARCHITECTURE.md` §10). Walls are the best occluder in the game — the forest culls almost entirely, so the interior is a net *win* on the frame |
+| Breakdown | shell 4 (one call per material) · floorboards 1 (instanced) · glazing 1 (instanced) · furniture 1 (table + both chairs, merged) · sink + flue + doorframe 1 · pencil-mark decal atlas 1 · lantern volumetric 2 · slack **23** |
+| **Unique procedural materials in the room: 7** | sawn pine · planed pine · fired porcelain · blackened steel (flue) · glass · cast iron (stove, cold) · graphite (the marks) |
+| **Texel density** | **512 px/m** on exactly three hero surfaces — the doorframe jamb, the sink splash-back, the small chair's seat. **170 px/m** everywhere else. `ART_DIRECTION.md`'s `settings.tier(256,512,1024,2048)` hero-surface budget already covers this |
+| **Lighting: one practical.** | The player's lantern, set down on the table at 0.72 m. `SpotLight` → `PointLight`, `decay: 2`, `distance: 6.5`, intensity 22, `#ffb865`. **Nothing else in the room emits.** The stove is cold |
+| Falloff | At `decay: 2` and intensity 22, luminance at 3.0 m is ≈ 0.004 — below `#0a1216` (`ART_DIRECTION.md` §2). **The far corners of the room are not dark for atmosphere. They are dark because that is what one lamp does** |
+| The read | Shapes. A doorway. A rectangle of window. A table edge. Two chair backs, one of them low. Near-silhouette |
+| Reference | Single-source Wyeth interior, not a lit set. Andrew Wyeth, *Christina's World*'s house from inside. `ART_DIRECTION.md` §1's reference table should add it |
+
+The one thing in the room rendered at full fidelity is the surface the player's hand is on, and the
+lantern is 400 mm from it.
+
+---

@@ -156,12 +156,24 @@ const MAX_CONVERSATIONS = 2;      // §7.3 hard cap
 const MAX_TURNS = 4;
 const SPEAKERS_PER_CONV = 4;
 
-// Priority 0..3. Three is never denied a slot and never queued: it is the game telling the
-// player something important through the world, and it outranks every atmosphere concern.
-const CATEGORY_PRIORITY = {
+// TWO DIFFERENT PRIORITY SCALES LIVE HERE, AND CONFLATING THEM IS A BUG:
+//
+//   slotClass (0..3, ours)  — how hard this line fights for a voice slot. 3 is never denied
+//                             and never queued: it is the game telling the player something
+//                             important through the world. Derived from the CATEGORY.
+//   weight    (0..1, Story) — how much the Story agent wants THIS line rather than another
+//                             one in the same category. `Script.voiceLines[].priority` is
+//                             authored on this scale (0.2 … 0.98). It only picks; it never
+//                             preempts.
+//
+// `_buildIndex` sniffs the scale: a value ≤ 1 is a Story weight, a value > 1 is an explicit
+// slot class. That way either convention can appear in the manifest without breaking.
+const CATEGORY_SLOT_CLASS = {
   idle: 1, call: 2, campfire: 1, argue: 1, heard: 3, search: 2,
   falsealarm: 2, evidence: 2, fear: 3, late: 2, murmur: 0,
 };
+const DEFAULT_WEIGHT = 0.5;
+const MAX_AMBIENT_SLOT_CLASS = 2;   // the ambient scheduler may never award itself a 3
 
 // STORY.md §6 uses one vocabulary, tools/generate-voices.mjs another, AUDIO_DIRECTION §7.4 a
 // third. Normalise all of them, and fall back to parsing the id (`ROB_HEAR_01` → heard).
@@ -648,6 +660,17 @@ export class VoiceBank {
       const speaker = normSpeaker(m.speaker ?? s?.speaker, m.id);
       const bytes = Number.isFinite(m.bytes) ? m.bytes : 0;
 
+      // Resolve the two priority scales (see CATEGORY_SLOT_CLASS above). Story's 0..1 values
+      // choose between lines; only the category decides whether a line can preempt.
+      let weight = DEFAULT_WEIGHT;
+      let slotClass = CATEGORY_SLOT_CLASS[category] ?? 1;
+      const rawP = Number.isFinite(s?.priority) ? s.priority
+        : (Number.isFinite(m.priority) ? m.priority : null);
+      if (rawP !== null) {
+        if (rawP <= 1) weight = clamp01(rawP);
+        else slotClass = clamp(Math.round(rawP), 0, 3);
+      }
+
       const entry = {
         id: m.id,
         speaker,
@@ -658,8 +681,8 @@ export class VoiceBank {
         estDur: Number.isFinite(m.duration) ? m.duration
           : (bytes > 0 ? bytes / BYTES_PER_SECOND : 2.0),
         dur: 0,
-        priority: Number.isFinite(s?.priority) ? s.priority
-          : (Number.isFinite(m.priority) ? m.priority : (CATEGORY_PRIORITY[category] ?? 1)),
+        slotClass,
+        weight,
         // `clearOK: false` marks a line that must never play fully intelligible.
         clearOK: (s?.clearOK ?? m.clearOK) !== false,
       };
@@ -1276,7 +1299,9 @@ export class VoiceBank {
     if ((!pool || pool.length === 0) && allowRelax) pool = this._byCategory.get('idle') ?? null;
     if (!pool || pool.length === 0) return null;
 
-    // Weighted by priority, so a "did you hear that?" beats a tarp joke when both would fit.
+    // Weighted by the Story agent's 0..1 line weight, so within a category the line they
+    // cared about most is the one most likely to surface — but never deterministically, or
+    // the camp would say the same thing in the same order every playthrough.
     let best = null;
     let bestScore = -1;
     for (let i = 0; i < pool.length; i++) {
@@ -1284,7 +1309,7 @@ export class VoiceBank {
       if (this._usedThisNight.has(id) || this._failed.has(id)) continue;
       const e = this._lines.get(id);
       if (!e) continue;
-      const score = (e.priority + 1) * (0.35 + this._rand.next());
+      const score = (0.25 + e.weight) * (0.35 + this._rand.next());
       if (score > bestScore) { bestScore = score; best = e; }
     }
     // If everything in this category is spent tonight, silence is the correct answer.
@@ -1325,8 +1350,9 @@ export class VoiceBank {
     if (!a) return null;
     const now = a.currentTime;
 
-    const priority = Number.isFinite(opts.priority) ? opts.priority : entry.priority;
-    // Priority 3 is the game speaking through the world — a camper reacting to something the
+    // `opts.priority` is on the 0..3 SLOT CLASS scale, not Story's 0..1 line weight.
+    const priority = Number.isFinite(opts.priority) ? clamp(opts.priority, 0, 3) : entry.slotClass;
+    // Slot class 3 is the game speaking through the world — a camper reacting to something the
     // player actually did, aimed at where the player actually is. It always wins a slot.
     const force = opts.force === true || priority >= 3;
     const isTurn = opts.turn === true;
@@ -1861,7 +1887,11 @@ export class VoiceBank {
     if (!entry) { this._closeConversation(conv); return; }
 
     _convOpts.turn = true;
-    _convOpts.priority = entry.priority;
+    // The ambient scheduler may never award itself slot class 3. A conversation that happens
+    // to roll the "heard" topic is atmosphere; only a reaction requested from OUTSIDE this
+    // class — by Campers, by NightManager, by gameplay — is the game speaking to the player,
+    // and only that is allowed to preempt and hush the camp.
+    _convOpts.priority = Math.min(entry.slotClass, MAX_AMBIENT_SLOT_CLASS);
     _convOpts.facing = live?.hasFacing ? _convFacing : null;
     if (live?.hasFacing) { _convFacing.x = live.fx; _convFacing.y = live.fy; _convFacing.z = live.fz; }
 
