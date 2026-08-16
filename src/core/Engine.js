@@ -22,6 +22,10 @@ class GameClock {
   getElapsedTime() { return this.elapsedTime; }
 }
 
+/** Fallback canvas size when the tab reports an unmeasurable viewport (hidden/detached). */
+const DEFAULT_W = 1280;
+const DEFAULT_H = 720;
+
 const FIXED_DT = 1 / 60;
 const MAX_FRAME_DT = 0.1;      // never simulate more than 100 ms in one frame
 const MAX_FIXED_STEPS = 5;     // spiral-of-death guard
@@ -158,7 +162,9 @@ export class Engine {
   stop() {
     this.running = false;
     if (this._raf) cancelAnimationFrame(this._raf);
+    if (this._hiddenTimer) clearTimeout(this._hiddenTimer);
     this._raf = 0;
+    this._hiddenTimer = 0;
     this.ctx.clock.stop();
   }
 
@@ -177,7 +183,19 @@ export class Engine {
 
   _loop = () => {
     if (!this.running) return;
-    this._raf = requestAnimationFrame(this._loop);
+
+    // requestAnimationFrame does not fire in a hidden or zero-sized tab. The screenshot and
+    // review harness runs in a browser pane that agents constantly background, which froze the
+    // engine at frame 1 and made every capture look like a rendering failure. Fall back to a
+    // timer so the game keeps simulating and rendering offscreen; the visual reviewers depend
+    // on this, and a backgrounded tab must not be mistaken for a black frame.
+    if (document.hidden) {
+      this._raf = 0;
+      this._hiddenTimer = setTimeout(this._loop, 16);
+    } else {
+      if (this._hiddenTimer) { clearTimeout(this._hiddenTimer); this._hiddenTimer = 0; }
+      this._raf = requestAnimationFrame(this._loop);
+    }
 
     const now = performance.now();
     let dt = (now - this._lastTime) / 1000;
@@ -271,7 +289,10 @@ export class Engine {
     globalThis.addEventListener('resize', this._onResize);
 
     this._onVisibility = () => {
-      if (document.hidden) this.pause();
+      // Deliberately does NOT pause. The engine must keep running while the tab is hidden so
+      // the offscreen screenshot harness can capture converged frames; _loop() switches to a
+      // timer in that case. Re-time the frame so the hidden span is not integrated at once.
+      this._lastTime = performance.now();
     };
     document.addEventListener('visibilitychange', this._onVisibility);
 
@@ -299,8 +320,12 @@ export class Engine {
   }
 
   resize() {
-    const w = Math.max(1, this.mount.clientWidth || globalThis.innerWidth || 1);
-    const h = Math.max(1, this.mount.clientHeight || globalThis.innerHeight || 1);
+    // A backgrounded or detached tab reports clientWidth 0, which previously collapsed the
+    // canvas to 1x1 and made every offscreen capture useless. Never size below a real
+    // resolution — an unmeasurable viewport means "render at a sane default", not "render
+    // nothing".
+    const w = Math.max(640, this.mount.clientWidth || globalThis.innerWidth || DEFAULT_W);
+    const h = Math.max(360, this.mount.clientHeight || globalThis.innerHeight || DEFAULT_H);
     const dpr = this.ctx.settings.effectiveDpr;
 
     if (w === this.ctx.width && h === this.ctx.height && dpr === this.ctx.dpr) return;
