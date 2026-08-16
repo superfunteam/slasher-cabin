@@ -2507,4 +2507,173 @@ worse insult than the flash.
 pressure — none of which we relax. The frustration lives in *not knowing what you did wrong*,
 which we relax completely.
 
+---
+
+## 17. THE FIRST FIVE MINUTES
+
+Zero text tutorial. Zero prompts beyond the icon-only `ui:toast`. Everything is taught by the
+manual and by level design. Night 1: `nightDurationSeconds = 800`, rain 0.15, wind 0.20, fog 0.35,
+best moon of the game, `dale` on a loop that will not reach the plot.
+
+The title card (`STORY.md §9`) plays first: **NIGHT ONE / FOUNDATION (A)** with the sub-line
+*Check contents before beginning.* — thin black on flat white, 2.4 s, no music.
+
+| t | Beat | Systems | What it teaches |
+|---|---|---|---|
+| **0:00** | Black. One `audio:sfx { id:'crate_settle' }`. Then wind in pines, and one distant laugh from 140 m NE (`DAL_IDLE_01`, 3D, occluded). | Audio, Sky | The world before the interface. |
+| **0:04** | Fade in over 3 s. You are looking down at your own hands, which are enormous. `settings.fov 72`. | Player, HUD | Pillar 4, in one image. |
+| **0:07** | **The hand-wipe plays.** 0.9 s, two strokes, palms flat. *Then* the manual opens at 40% of screen. | Player, BlueprintUI | The most important 0.9 s in the game, and the player has no idea yet (§4.4). |
+| **0:09** | The manual's first figure: the masked man, a single pier block, a straight arrow pointing down into a square outline. Below it: `1/6`. Marit's hand. | Blueprint (G1) | The whole grammar, in one picture. |
+| **0:14** | Player looks up. Manual auto-lowers to hip. Ahead: six squares chalked on cleared ground, glowing faintly, and pallet A **12 m** away with six pier blocks on it. | CabinSite | Diagram-space → world-space. **The chalk squares literally match the drawing.** |
+| **0:22** | First step. Head bob, breath, the 0.23 s accel ramp. A `footstep` emits; nothing hears it. | Player, NoiseSystem | Weight. Slowness. |
+| **0:34** | The player walks into a low branch (deliberately placed at 1.9 m — you are 1.7 m and you still hit it). `brush` noise. Rustle for 1.1 s. Far off, Dale's torch **stops for 2 s**, then resumes. | Campers (Curious→Idle) | *Noise reaches people. People react. You survived it.* Taught at zero risk. |
+| **0:41** | At the pallet: `ui:toast { icon:'hand' }`, 900 ms, no words. Pick up a pier (class C, 24 kg, **2 slots**). Speed → 1.312 m/s. Screen tilts 2°. | BuildSystem, Physics | Carrying costs. |
+| **0:48** | The player picks up a **second** pier (2 + 2 = 4 slots). Speed → 1.075 m/s. **Two trips become one.** | BuildSystem | The carry economy, discovered rather than explained (§6.2). |
+| **0:55** | Approach a chalk square. A white ghost of the pier appears at 0.65 m. | BuildSystem | Snapping. |
+| **1:02** | Place. `build:place { correct:true }`. Soft thunk. The seating check opens automatically **the first time only**, with the band drawn at 2× width and time at 0.6× for this one instance. | BuildSystem | The torque check, in a safe room. |
+| **1:07** | Perfect join. `stats.perfectJoins = 1`. The manual, still at hip, redraws `1/6` as `1` with a tick. **No sound, no toast.** | BlueprintUI | Progress is legible on the paper, not the HUD. |
+| **1:12–2:05** | Piers 2–5. The player finds the rhythm: pallet → slot → seat. Around pier 3 they start hammering casually. **On pier 4, a distant voice reacts to the hammering** — `[NE, distant] "Huh."` (`DAL_HEAR_01`) — and the torch stops for 4 s. Nothing else happens. | Campers, VoiceBank | The hammering is heard. Bank it. |
+| **2:05** | Pier 6. The pallet is **empty.** Six squares, five blocks supplied. `tool:missing { toolId:'pier_06' }`. The manifest shows the sixth outlined in red with a 40 m contour inset. | Blueprint, BuildSystem | **The core comedy, in the first three minutes.** |
+| **2:12** | Nothing is highlighted. The item is **stone**, so there is no audio cue at any point (§6.9). The inset shows a slope and a fallen log. | BlueprintUI, Terrain | Spatial reading is the skill, and the game will not do it for you. |
+| **2:40** | 30 m east, down a slope, behind a fallen log: the sixth pier, half-buried — and beside it a **folded licence plate** (the shim, `STORY.md §7` object 1) **and the mallet**, which the player did not know they were missing, because they had been using their hands. | CabinSite, Props | The joke lands twice, and one of the two things is a piece of the ending. |
+| **2:48** | `tool:found` ×2. The bell. Two red outlines redraw in black. The mallet goes to the **tool belt**, not a carry slot. | BuildSystem, Audio | The reward feeling, established. The tool belt, established. |
+| **2:55** | Carrying the pier back **uphill** — class C on a 14° grade (×0.88) — Dale's loop crosses the return path at 45 m. The player sees the torch. | Campers, Navmesh | The first real stealth read. He **cannot** reach the plot. This is theatre and it is safe, and the player does not know that. |
+| **3:20** | Most players crouch here without being told. If they do: `motionF 0.65`, footsteps ×0.08, and the torch passes. If they don't: detection reaches ~0.30 and decays (§9.3 — unlit, walking, 20 m is 29.9 s to detect and he is there for 8). Either way they survive. | Campers, Player | Crouching is discovered, not instructed. |
+| **3:50** | Pier 6 placed. Shim goes under pier D: 2.5 s, silent. `build:stage-complete { stage:1 }`. The manual turns its own page with a paper sound. Figure 2: sill beams, class D, 62 kg. | BuildSystem, BlueprintUI | Escalation of mass. |
+| **4:05** | First class-D lift. Speed → 1.008 m/s. **The beam blocks the lower 28° of the screen.** The player cannot see their feet. They walk 18 m like this. | Physics | The hauling terror, at zero risk, on flat ground. |
+| **4:30** | Beam 1: `yawCandidates 2`, `symmetryOrder 2` — **both** orientations are correct, and it seats either way. **Beam 2 has `symmetryOrder 1`.** The ghost renders identically for both candidates (§6.4.2). If the player places it the wrong way round, it seats, and nothing at all happens. | BuildSystem | Rotated is a real, reachable outcome — which in v1.0 it was not. |
+| **4:39** | **The first creak.** Severity ~0.45, radius 35 m. A long, wet groan. `build:creak`. Then `DAL_HEAR_01` again — and this time **the torch turns toward the plot and starts walking.** | BuildSystem, Campers | The thesis of the game, delivered in one sound. |
+| **4:52** | The player must now re-seat (8 s + 3.0 s, loud), or hide, or freeze. **All three work.** Dale Searches for 30 s at a point 12 m off (error radius, §9.8), then returns to Idle. | Campers | Every verb in §9.6 is now motivated. |
+| **5:00** | The player understands the game. | | |
+
+**On what has and has not been written on screen.** v1.0's card at 5:00 read "No word has been
+written on screen," which was false — `STORY.md §9` puts a text title card up before 0:00, and the
+night-end card is fourteen lines of English. The accurate claim, and the one that matters:
+
+> **Since the title card, the game has not addressed the player once.** Every word the player has
+> seen is the manual's — a document that does not know they exist. No tutorial prompt, no button
+> glyph, no objective text, no tooltip. The title card and the night-end card are the manual
+> talking to itself; the 3D world has said nothing at all.
+
+**The acceptance test for this sequence** is §19 row **A1**. v1.0 asserted that if the player does
+not flinch at 4:39 "the game has failed and the sequence must be retuned until it does" — without
+saying retuned how, against what measurement. It now has both.
+
+---
+
+## 18. PERFORMANCE
+
+`ARCHITECTURE.md §12` is binding: **16.6 ms at 1920×1080 on an M-series Mac**, no system over
+1.5 ms, **max 12 raycasts per frame across the whole game**, draw calls < 220.
+
+### 18.1 The per-system millisecond budget
+
+| System | Budget (ms) | Notes |
+|---|---|---|
+| `Player` + `Physics` (capsule, ground) | 0.55 | |
+| `Physics` carried-part collision | **0.40** | §10.3, hard cap with a stated fallback |
+| `Campers` (senses + FSM + navmesh follow) | **1.20** | §18.2 |
+| `NoiseSystem` | 0.18 | grid lookups only, zero raycasts |
+| `BuildSystem` (creak ticks, slot queries) | 0.25 | 6 joins/frame max |
+| `NightManager` + `Weather` | 0.10 | |
+| `Forest` (wind uniforms, chunk streaming) | 0.60 | |
+| `Audio` | 0.35 | `AUDIO_DIRECTION.md §9.3` |
+| `Sky` + `VolumetricFog` | 1.40 | |
+| `Postprocessing` | 3.80 | |
+| **Shadow passes** | **4.20** | §18.3 — the largest single cost in the game |
+| Draw submission + misc | 2.10 | |
+| **Total** | **15.13** | 1.47 ms headroom at 60 fps |
+
+### 18.2 The raycast budget — reconciled
+
+v1.0 specified `occlF` from "**5 sample raycasts** per camper, per frame," which on Night 7 with
+9 agents was **45 rays/frame** against a hard cap of 12 — before `NoiseSystem`'s "max 4 blockers
+sampled" per camper per noise event, before `skylineFraction`'s 5 more, and before 6 creak
+evaluations fanning out to 9 campers. It was over budget by 3.75× at minimum, and v1.0 forbade the
+obvious escape hatch itself ("gameplay constants must never be routed through `settings.tier()`").
+
+**The allocation, summing to 10 of 12:**
+
+| Consumer | Rays/frame | Scheme |
+|---|---|---|
+| **`Campers` — the hot camper** | **5** | The single camper with the highest `detection`, or if all are 0, the nearest with the player in cone. Full 5-ray solve (head, shoulders ×2, hips ×2) **every frame**. |
+| **`Campers` — everyone else** | **2** | 1 ray each (chest only), round-robin, 2 campers per frame. With 9 agents that is a **6.7 Hz** refresh. |
+| **`Campers` — the flame percept** | **1** | §9.4. One ray, flame → hot camper's eye. Round-robins with the others when the hot camper has the lantern out of view. |
+| `Physics` — `skylineFraction` | **1** | Cached hemisphere probe, 8 directions, 1 ray/frame → full refresh at **7.5 Hz** |
+| `Player` — ground + step | **2** | |
+| **Total** | **10 / 12** | 2 spare for `Physics.raycast()` callers |
+
+**Rejection before any ray is cast** (this is what makes the budget work at all):
+
+1. Distance: `d > R` → skip entirely, `occlF` irrelevant.
+2. Cone: player outside the 55° half-angle → skip.
+3. Grid: the §9.6 occlusion grid gives a **free conservative answer** — if every 2 m cell along
+   the segment is opaque, `occlF = 0` with no ray at all. This resolves most cases in forest.
+4. Only what survives all three gets a ray.
+
+**Staleness clamp.** A cached `occlF` older than **1.0 s** is forced to **1.0** (assume visible),
+not to its last value. Assuming *visible* is punishing but safe; assuming *hidden* would be an
+exploit — a player could hide 9 campers' worth of rays behind a round-robin and walk past all of
+them. The conservative direction is the correct one.
+
+**`NoiseSystem` casts zero rays.** Occlusion comes from the 2 m byte grid (§9.6), which is also
+what makes placed cabin walls acoustically real. `skylineFraction` comes from a cached probe, not
+from a per-frame fan.
+
+**On the critic's suggestion of a uniform 12 Hz round-robin:** rejected in favour of the split
+above. A camper actively looking at you needs frame-accurate occlusion — the player dodging behind
+a trunk must register *now*, and at 12 Hz it registers up to 83 ms late, which is exactly the
+moment the player is judging the game's fairness. A camper 60 m away facing the lake needs nothing.
+Uniform budgets spend the same on both. This one spends 5 rays on the camper that matters and
+1/4.5th of a ray on the ones that do not.
+
+### 18.3 The shadow cost — the thing v1.0 never mentioned
+
+A moving `SpotLight` with `PCFSoftShadowMap`, re-rendering an instanced forest every frame from the
+player's hand, is the most expensive object in this game, and v1.0 asserted a CoD-comparable image
+at 60 fps in a browser without once costing it.
+
+| Caster | Map size | Update rate | Far plane | Layer contents |
+|---|---|---|---|---|
+| **Moon** (`DirectionalLight`) | `tier(1024, 2048, 2048, 4096)` | **cascade 0** every frame; **cascades 1–2** every 3rd frame, reprojected | 180 m | trees < 40 m, cabin, campers, rocks, tents (`ART_DIRECTION.md §3.3`) |
+| **The lantern** (`SpotLight`) | `tier(512, 1024, **2048**, **2048**)` | **every 2nd frame**, reprojected against the player's velocity | **22 m** | **only** objects tagged `castLanternShadow`: cabin parts, loose parts, campers, and trunks within 22 m |
+| Campfires (≤ 3) | 512 | every 4th frame | 14 m | tents, campers, props |
+
+**The lantern is capped at 2048 even on `ultra`.** 4096 for a per-frame moving spot through an
+instanced forest is not affordable in WebGL2 in a browser, and the visual difference at a 22 m far
+plane is not detectable — the shadow is soft, close, and constantly moving. This is a quality-tier
+decision (pixels, not outcomes) and therefore legal under §20.4.
+
+**Instanced forest shadow submission:** trunks render to the lantern map via a single
+`InstancedMesh` with a per-frame frustum-culled instance range, rebuilt only when the player moves
+more than 4 m. Foliage does **not** cast into the lantern map at any tier — it casts into the moon
+map only. Budget: **4.20 ms total** across all three casters (§18.1).
+
+**SSCS** (`ART_DIRECTION.md §3.3`) is charged to `Postprocessing`, not here.
+
+### 18.4 Audio budget
+
+Owned by `AUDIO_DIRECTION.md §9.1` and §9.3; the numbers this document is responsible for
+respecting:
+
+- **Per-family voice caps:** max 3 simultaneous creaks, 2 hammers, 1 thunder, 4 VO, 6 footsteps
+  across all agents. The `CABIN_CAP` of 4.0 creaks/min (§7.2) **guarantees** the 3-creak cap is
+  never exceeded, including during a settle cascade — which in v1.0 fired 3–5 simultaneous creaks
+  into a storm with no stated cap and would have hitched.
+- **The cascade's audio contract:** 3–5 joins fire within 1.5 s but `AudioEngine` renders at most
+  3; the remaining 1–2 are **dropped, not queued** (a late creak is a lie about where the sound
+  came from). Their `noise:emit` still fires — the AI hears what the player does not, which is the
+  correct asymmetry for a horror game.
+- `AudioEngine.update()` < 0.35 ms/frame; audio thread < 25% of one core on `ultra`.
+
+### 18.5 Determinism
+
+Every spawn, every storm schedule, every blueprint layout derives from `ctx.settings.seed`
+(default `0x51A5CAB`) via `new Rand(hash2(a, b) * 1e9 | 0)`. Consequences this document relies on:
+
+- Weather can be re-derived from `(night, timeOfNight)` on save restore (§14.2) — the storm
+  schedule is bit-identical, so a reloaded Night 6 has the same 33 strikes at the same times.
+- `Blueprint` output is not serialized (§14.1); it is regenerated.
+- Golden-image regression for the manual (§8.6) is possible at all.
+
 <!--SECTION-BREAK-->

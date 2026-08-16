@@ -2022,12 +2022,17 @@ uniform sampler2D uAlphaMap;
       cavityChannel: 0, tile: null,
     };
 
-    const texKey = spec.texKey ?? name;
-    if (this._textures && texKey) {
-      // Textures.get() logs and returns a flat grey fallback set for unknown names, so we
-      // only ask for sets it actually bakes — otherwise our own bakery would never run.
-      const known = typeof this._textures.has === 'function' ? this._textures.has(texKey) : true;
-      if (known) {
+    // Prefer the set that shares our own name (Textures.js bakes most of them under exactly
+    // these keys and resolves its own aliases); fall back to the family key in `texKey`.
+    // Textures.get() logs and returns a flat grey set for unknown names, so we only ask for
+    // sets it actually bakes — otherwise our own bakery would never get a chance to run.
+    let texKey = null;
+    if (this._textures) {
+      const known = (k) => k && (typeof this._textures.has === 'function' ? this._textures.has(k) : true);
+      texKey = known(name) ? name : (known(spec.texKey) ? spec.texKey : null);
+    }
+    if (texKey) {
+      {
         const got = await this._callTextures(texKey, undefined);
         if (got) {
           out.map = pickTex(got, ['map', 'albedo', 'diffuse', 'color', 'baseColor']);

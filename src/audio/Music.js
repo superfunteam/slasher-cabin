@@ -1125,8 +1125,12 @@ export class Music {
     // Pad filter tracks dread (§6.2). Under the mask the ceiling drops — the world came
     // back wrong and it never comes right again.
     const padCeil = this._masked ? 0.72 : 1;
-    this._padFilter.frequency.setTargetAtTime((240 + 900 * d) * padCeil, now, 0.25);
-    this._padFilter.Q.setTargetAtTime(3.5 + 1.5 * d, now, 0.4);
+    const cut = (240 + 900 * d) * padCeil;
+    if (Math.abs(cut - (this._lastPadCut ?? -1)) > 4) {
+      this._lastPadCut = cut;
+      this._padFilter.frequency.setTargetAtTime(cut, now, 0.25);
+      this._padFilter.Q.setTargetAtTime(3.5 + 1.5 * d, now, 0.4);
+    }
 
     // The work theme's rocking motion — a chair, not a groove. Off the instant dread rises.
     this._rockLfo.gain.setTargetAtTime(this._workMode ? 0.09 : 0, now, 0.8);
@@ -1143,7 +1147,13 @@ export class Music {
     if (this._isOn('seen')) bowP = 0.92;
     // §2.4: during the held breath ONE bowed partial survives at −22 dB. That is this.
     this._bowPressure.gain.setTargetAtTime(Math.max(0.0001, bowP * 0.5), now, 3.0);
-    this._setBowQ(180 + 600 * bowP, now);
+    const q = 180 + 600 * bowP;
+    // Only re-level the bank when the bow actually moves — 12 automation events at 10 Hz
+    // for a value that has not changed is pure waste on the audio thread.
+    if (Math.abs(q - this._bowQ) > 1.5 || Math.abs(this._bowDawn - (this._bowDawnApplied ?? -1)) > 0.02) {
+      this._bowDawnApplied = this._bowDawn;
+      this._setBowQ(q, now);
+    }
 
     // The pad's second/third/fourth voices. v3 is the only voice that ever retunes:
     // Eb (the flat second) becomes Ab (the reserved tritone) the moment the player is seen.
@@ -1159,8 +1169,10 @@ export class Music {
     }
 
     // --------------------------------------------------------------------------- mood
-    if (this._gateLevel < 0.02) this.currentMood = this._holds[this._holdWinner]?.id === 'failed' ? 'dead' : 'silent';
+    const winId = this._holdWinner >= 0 ? this._holds[this._holdWinner].id : '';
+    if (winId === 'failed') this.currentMood = 'dead';
     else if (tod > 0.92) this.currentMood = 'dawn';
+    else if (this._gateLevel < 0.02) this.currentMood = 'silent';
     else if (this._isOn('seen')) this.currentMood = 'seen';
     else if (this._isOn('pressure')) this.currentMood = 'pressure';
     else if (this._isOn('attention')) this.currentMood = 'attention';

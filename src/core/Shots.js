@@ -21,73 +21,90 @@ import { Log } from './Log.js';
 
 /**
  * Each shot pins everything that affects the image.
- * pos/target are world-space metres. timeOfNight 0..1. Everything else is optional.
+ *
+ * Positions are expressed RELATIVE TO A NAMED LANDMARK on Terrain rather than as absolute
+ * world coordinates, because absolute coordinates silently rot: the first version of this file
+ * hardcoded a build site at (-72,-62) while Terrain actually puts it at (-140,128), so every
+ * "canonical" shot framed empty forest. `from` and `at` are landmark names resolved at runtime;
+ * `offset` and `aim` are metre offsets applied to them. `eye` is height above ground.
+ *
+ * Landmarks: 'camp' | 'buildSite' | 'dock' | 'latrine' | 'origin'
  */
 export const SHOTS = {
   'site-wide': {
-    desc: 'The build site from the treeline — the game\'s establishing shot.',
-    pos: [-58, 3.2, -46], target: [-72, 1.4, -62],
+    desc: "The build site from the treeline — the game's establishing shot.",
+    from: 'buildSite', offset: [18, 0, 16], at: 'buildSite', aim: [0, 1.4, 0], eye: 2.2,
     timeOfNight: 0.35, rain: 0.15, fog: 0.55, lantern: true, hood: 0,
   },
   'site-close': {
     desc: 'Close on the half-built frame, lantern hung on a stud. Material detail test.',
-    pos: [-70, 1.6, -58], target: [-73.5, 1.1, -62],
+    from: 'buildSite', offset: [4.5, 0, 4.0], at: 'buildSite', aim: [0, 1.0, 0], eye: 1.6,
     timeOfNight: 0.4, rain: 0.3, fog: 0.5, lantern: true, hood: 0,
   },
   'ridge': {
-    desc: 'On the ridge looking down at camp. Silhouette, depth, and fog layering test.',
-    pos: [-16, 9.5, -20], target: [40, 2.0, -8],
+    desc: 'From the ridge looking down at camp. Silhouette, depth, and fog layering test.',
+    from: 'camp', offset: [-72, 0, 22], at: 'camp', aim: [0, 2.0, 0], eye: 2.0,
     timeOfNight: 0.3, rain: 0.0, fog: 0.65, lantern: false,
   },
   'camp-fire': {
     desc: 'Camp firelight through trees. The warm/cool palette collision.',
-    pos: [26, 1.7, -22], target: [44, 1.2, -6],
+    from: 'camp', offset: [-34, 0, -6], at: 'camp', aim: [0, 1.2, 0], eye: 1.7,
     timeOfNight: 0.25, rain: 0.0, fog: 0.45, lantern: false,
   },
   'camp-tents': {
     desc: 'Lit canvas tents glowing from within. Translucency and bloom test.',
-    pos: [38, 1.7, 4], target: [50, 1.5, 12],
+    from: 'camp', offset: [-16, 0, 20], at: 'camp', aim: [4, 1.5, 6], eye: 1.7,
     timeOfNight: 0.28, rain: 0.1, fog: 0.4, lantern: false,
   },
   'lake': {
-    desc: 'Across the lake to the far treeline. Water, reflection, and distance fog.',
-    pos: [10, 1.8, 84], target: [-14, 6.0, 128],
+    desc: 'From the dock across the lake. Water, reflection, and distance fog.',
+    from: 'dock', offset: [0, 0, -6], at: 'dock', aim: [-30, 8, -110], eye: 1.8,
     timeOfNight: 0.5, rain: 0.0, fog: 0.6, lantern: false,
   },
   'forest-deep': {
-    desc: 'Deep forest, lantern only. God rays and volumetric density test.',
-    pos: [-24, 1.7, 18], target: [-38, 1.5, 34],
+    desc: 'Deep forest between camp and the site. God rays and volumetric density test.',
+    from: 'origin', offset: [-20, 0, 40], at: 'origin', aim: [-46, 1.5, 66], eye: 1.7,
     timeOfNight: 0.45, rain: 0.35, fog: 0.75, lantern: true, hood: 0,
   },
   'forest-hooded': {
     desc: 'Same spot, lantern hooded. The darkness the stealth game actually lives in.',
-    pos: [-24, 1.7, 18], target: [-38, 1.5, 34],
+    from: 'origin', offset: [-20, 0, 40], at: 'origin', aim: [-46, 1.5, 66], eye: 1.7,
     timeOfNight: 0.45, rain: 0.35, fog: 0.75, lantern: true, hood: 1,
   },
   'moon': {
     desc: 'Canopy against the moon. Sky, stars, cloud, and tree silhouette test.',
-    pos: [-30, 1.7, 6], target: [-44, 34, -22],
+    from: 'origin', offset: [-30, 0, 20], at: 'origin', aim: [-52, 40, -14], eye: 1.7,
     timeOfNight: 0.4, rain: 0.0, fog: 0.3, lantern: false,
   },
   'lightning': {
     desc: 'Mid-lightning-flash. Everything lit flat and hard for one frame.',
-    pos: [-40, 1.7, -30], target: [-64, 3.0, -54],
+    from: 'buildSite', offset: [26, 0, 24], at: 'buildSite', aim: [0, 2.5, 0], eye: 1.9,
     timeOfNight: 0.55, rain: 0.8, fog: 0.7, lantern: true, hood: 0, lightning: 1.0,
   },
   'manual': {
     desc: 'The open manual over the world. The signature tonal contrast.',
-    pos: [-68, 1.7, -56], target: [-72, 1.3, -61],
+    from: 'buildSite', offset: [6, 0, 5], at: 'buildSite', aim: [0, 1.2, 0], eye: 1.7,
     timeOfNight: 0.4, rain: 0.25, fog: 0.5, lantern: true, hood: 0, manual: true,
   },
   'carry': {
     desc: 'Hauling a sill beam through the trees. Foreground occlusion and scale.',
-    pos: [-46, 1.7, -14], target: [-58, 1.5, -30],
+    from: 'buildSite', offset: [42, 0, -34], at: 'buildSite', aim: [0, 1.5, 0], eye: 1.7,
     timeOfNight: 0.38, rain: 0.2, fog: 0.6, lantern: true, hood: 0.5, carry: 'sill-beam',
   },
 };
 
+/** Fallbacks used only when Terrain is unavailable — keeps the harness usable standalone. */
+const LANDMARK_FALLBACK = {
+  camp: [124, 0, -18],
+  buildSite: [-140, 0, 128],
+  dock: [106, 0, -72],
+  latrine: [96, 0, 34],
+  origin: [0, 0, 0],
+};
+
 const _pos = new THREE.Vector3();
 const _tgt = new THREE.Vector3();
+const _off = new THREE.Vector3();
 
 export class Shots {
   constructor(ctx) {
@@ -139,15 +156,22 @@ export class Shots {
     const { ctx } = this;
     const s = this.active;
 
-    // --- pose the camera and hold it there
-    _pos.fromArray(s.pos);
-    _tgt.fromArray(s.target);
-
-    // Sit the camera on the terrain if we have it, so shots survive terrain edits.
+    // --- resolve landmarks, then pose the camera and hold it there
     const terrain = ctx.systems.get('Terrain');
+    this._landmark(terrain, s.from, _pos).add(_off.fromArray(s.offset ?? [0, 0, 0]));
+    this._landmark(terrain, s.at, _tgt).add(_off.fromArray(s.aim ?? [0, 1.5, 0]));
+
+    // Sit the camera the right height above actual ground, so shots survive terrain edits.
     if (terrain?.heightAt) {
       const groundY = terrain.heightAt(_pos.x, _pos.z);
-      if (Number.isFinite(groundY)) _pos.y = groundY + (s.pos[1] ?? 1.7);
+      if (Number.isFinite(groundY)) _pos.y = groundY + (s.eye ?? 1.7);
+      // Aim points given with a small y are meant as "above the ground there", not absolute.
+      if ((s.aim?.[1] ?? 0) < 12) {
+        const tGround = terrain.heightAt(_tgt.x, _tgt.z);
+        if (Number.isFinite(tGround)) _tgt.y = tGround + (s.aim?.[1] ?? 1.5);
+      }
+    } else {
+      _pos.y = s.eye ?? 1.7;
     }
 
     ctx.camera.position.copy(_pos);
@@ -190,6 +214,15 @@ export class Shots {
         Log.info(`Shot '${this.requested}' ready to capture.`);
       }
     }
+  }
+
+  /** Resolve a landmark name to a world position, writing into `out`. */
+  _landmark(terrain, name, out) {
+    const key = name ?? 'origin';
+    const v = terrain?.[key === 'buildSite' ? 'buildSiteCenter' : key === 'camp' ? 'campCenter' : key];
+    if (v && Number.isFinite(v.x)) return out.set(v.x, v.y ?? 0, v.z);
+    const f = LANDMARK_FALLBACK[key] ?? LANDMARK_FALLBACK.origin;
+    return out.fromArray(f);
   }
 
   _renderList() {

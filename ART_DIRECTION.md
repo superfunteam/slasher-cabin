@@ -1646,7 +1646,314 @@ entire useful range lives in the bottom 5% will band catastrophically. Triangula
 dither of ±1.0/255 as the final operation of the composite pass. **This one line of GLSL is the
 difference between "AAA" and "WebGL demo" more than any other single thing in this document.**
 
+---
+
+## 13. THE MANUAL
+
+`BlueprintUI.js` (DOM/canvas overlay) and `Blueprint.js` (procedural diagram generation). The manual
+is drawn to a **2D canvas at 2× DPR, or as inline SVG**, and composited above the WebGL canvas —
+never rendered in 3D, never given a perspective transform beyond the physical page-open animation.
+**It must never receive a single post-process pass.** No grain, no vignette, no CA, no DOF. It exists
+in a different universe and the player must feel that instantly.
+
+Revision 1 called the manual "the comedian" four times and gave it exactly one joke across seven
+nights. A document cannot assert funny; it must specify **the machine that generates funny.** §13.5
+is that machine.
+
+### 13.1 Page specification
+
+| Property | Value |
+|---|---|
+| Stock colour | `#f2efe6` — bone, 2% warm. **Never `#ffffff`** (too digital), never cream `#f5efd8` (too twee) |
+| Paper texture | Procedural: 3-octave fibre noise, ±1.8% luminance, 0.6 px scale, plus 0.4% vertical grain. Barely there; visible only on a good display, which is the point |
+| Fold creases | Two vertical creases at 33.3% and 66.6% width, 3 px gradient (−4% then +2% luminance). It has been in a pocket |
+| **Photocopy degradation** | Each night's page is one more generation of copy: edge darkening `+0.6%/night` on a 14 mm border, and a **0.3 px horizontal drum-jitter** on 4% of scanlines from Night 3. By Night 7 the paper is measurably tireder than the man |
+| Page ratio | 1:1.414 (A4) |
+| Page size on screen | 62% of viewport height, centred, max-width 44rem |
+| Ink | `#14181a`. Off-black. Pure black on off-white vibrates |
+| Accent | `#d92b2b`, on **at most 8% of the marks on any page** |
+| Second accent | None. There is no second accent. Do not add one |
+| Drop shadow over world | `0 2px 0 rgba(0,0,0,0.35)`, `0 24px 60px rgba(0,0,0,0.75)`. Hard contact edge, huge soft ambient. A physical sheet held 40 cm from a face |
+
+### 13.2 Line weight system
+
+Exactly **four** stroke widths. Never anything else. At base scale (page height = 900 css px):
+
+| Weight | px | Use |
+|---|---|---|
+| `hairline` | **0.75** | Hidden/ghost geometry, alignment guides, dimension extension lines |
+| `thin` | **1.5** | All standard object outlines. The default and 80% of marks |
+| `medium` | **2.5** | The part currently being discussed; assembled sub-group silhouettes |
+| `heavy` | **4.0** | Arrows, the mascot's outline, the ✗ and ✓ marks |
+
+All strokes: `butt` caps, `miter` joins, `miterLimit 4`. **No rounded caps.** Rounded caps are the
+fastest way to make this look like 2019 flat design instead of 1971 offset print. Scale by
+`pageHeightPx / 900`, snapped to `0.25 px`.
+
+### 13.3 Grid
+
+- Base unit **U = pageWidth / 48**. All geometry snaps to `U/4`; all glyph baselines to `U`.
+- Margins: 3U left/right, 4U top, 5U bottom.
+- Step badge: a `2U` filled `#14181a` circle with a `#f2efe6` **glyph** (not a numeral — §13.7),
+  top-left of each panel, always at the same offset.
+- Panels: 1–4 per page on a 2×2 of `21U × 15U` cells with `3U` gutters.
+- Projection: **true dimetric, 30°/30°**, no perspective, no foreshortening variance. Everything is
+  drawn as if measured, because he measured it.
+
+### 13.4 Arrow vocabulary (closed set — do not invent)
+
+| Arrow | Form | Meaning |
+|---|---|---|
+| **Straight insert** | 4.0 px shaft, solid triangular head `1.2U` long, 28° included angle | Push part A into slot B |
+| **Curved rotate** | 4.0 px arc, 90° or 180°, one head | Rotate this |
+| **Double-headed span** | 1.5 px shaft, 0.75 px extension lines, two open heads | A dimension. **Its length carries the number** — §13.7 |
+| **Spiral torque** | 4.0 px spiral, head at the outer end. **Turn count = the value**: 1.75 turns = 1.75 turns of the wrench | Tighten. This is the mechanism that replaces the printed torque value |
+| **Ghost trail** | 0.75 px dashed (`4,3`) along the motion path | Where the part came from |
+| **Exclamation lozenge** | 2.5 px rounded-rect outline, `#d92b2b` fill, `#f2efe6` `!` | Warning. **Max one per page.** (The `!` is a mark, not a letter) |
+| **✗** | 4.0 px, `#d92b2b`, two strokes at 90°, drawn *over* a panel | Do not do this |
+| **✓** | 4.0 px, `#14181a`, beside a panel | Do this |
+| **Magnifier callout** | 1.5 px circle + 2.5 px handle, contents at 2.2× | Detail inset. **Also the game's navigation system**: when a part is missing, the callout shows a *silhouette from the site where it is* (§4.4) — a canoe chine, a porch baluster — so the player navigates by remembered shape |
+| **Shape badge** | A `1.6U` outlined glyph — ◐ ◑ ▣ ▤ ◭ ⬒ ⬓ ⧗ ⬔ — unique per part family | **Replaces part numbers entirely.** §13.7 |
+
+### 13.5 The comedy pipeline — night-by-night escalation
+
+This table *is* the joke. Every column is authored per night by `Blueprint.js` from a seeded layout
+grammar; nothing here is emergent.
+
+| N | Pages | Panels | Facts/page | New BJÖRN pose | What the manual gets **wrong** | The gag |
+|---|---|---|---|---|---|---|
+| **1** | 1 | 3 | 5.0 | `standing-neutral`, `pointing` | Nothing. It is perfect and calm | **The calm is the gag.** A wordless diagram for digging a hole in a forest at night, drawn with the serenity of a bookshelf leaflet |
+| **2** | 2 | 4 + 3 | 4.5 | `shrugging-at-missing-hardware` | The parts row for `◐` shows **six** quantity glyphs and the crate contains five. The manual admits its own shortfall without comment | The shrug. First appearance, held for a full panel, arms out, mask blank. It is the funniest single image in the game and it is a stick figure standing still |
+| **3** | 2 | 4 + 4 | 6.0 | `hammering`, `head-tilt-confused` | An **off-by-one**: the stud rank is drawn with 11 studs; the dimension span says 12 spacings. Both are printed with total confidence | A ✗ drawn over a panel showing a **correct** action. No explanation. The player must decide whether to trust the picture or the mark |
+| **4** | 3 | 4 + 4 + 2 | 5.3 | `seated-on-floor`, `holding-part-two-hands` | **Panel 7 is printed upside down.** A physical mis-collation. The player must rotate their head, and the ghost-trail arrow now points the wrong way in world space | An exclamation lozenge placed next to an empty area of the page, warning about nothing |
+| **5** | 3 | 3 + 3 + 3 | 4.7 | `wagging-finger-no` | A panel shows the ridge beam being lifted by **two BJÖRNs**, one at each end, in identical poses. There is one of you | The second BJÖRN. It is played entirely straight and it is the point at which some players stop laughing. **The `#d92b2b` splatter appears from tonight**, one per page, in the corner, never acknowledged, drawn flat as if printed |
+| **6** | 4 | 4 × 4 | 4.75 | `thumbs-up` | **A panel depicts something the player did last night** — the exact route to the tent, the tarp's lash pattern, the counsellor's tent shown with the flap open at the angle the player left it — and it is drawn *slightly wrong*, the way you draw a thing you saw rather than a thing you planned | Not a gag. This is where the comedy machine turns over and becomes the horror machine. §0.5 |
+| **7** | 2 | 2 + 1 | 3.0 | **none.** BJÖRN is absent from the final page | Nothing. It is perfect again, exactly like Night 1 | **The joke stops.** The final panel is a dimetric section of the finished cabin with four bunks and **eight small figures in them**, drawn in the same 1.5 px `thin` weight as everything else, with a `4.0 px` `#14181a` ✓ beside it |
+
+Supporting escalations, each one a dial rather than an event:
+
+| Dial | N1 | N4 | N7 |
+|---|---|---|---|
+| Information density (marks/panel) | 34 | 71 | **19** |
+| `hairline` usage (ghost/hidden geometry) | 4% | 22% | 6% |
+| Panel-to-panel spatial continuity | Always the same viewpoint | Viewpoint jumps 2–3 times per page | One viewpoint |
+| Ink coverage (% of page) | 6.1% | 14.8% | 4.4% |
+| Fold-crease wear, drum-jitter scanlines | 0% | 2.1% | 4.0% |
+
+The shape of that table matters: **the manual gets busier and more anxious until Night 6, then goes
+quiet.** Night 7's page is emptier than Night 1's. He has stopped needing to explain it to himself.
+
+### 13.6 The recall spec — because the memory mechanic *is* the game
+
+The pitch: *"build the piece correctly from memory."* Revision 1 specified stroke widths to 0.25 px
+and grid snapping to `U/4` and never once specified **information density** — how many facts a page
+may hold, how a spatial relationship is made memorable, or what a forgettable panel looks like. You
+cannot design for recall by specifying miter joins.
+
+| Law | Spec |
+|---|---|
+| **Fact ceiling** | **≤ 7 discrete facts per page.** A "fact" is one thing the player must carry to the joint: a part identity, a count, an orientation, an order, a torque, a position, a handedness. Counted mechanically by `Blueprint.assertFactCount()`; a page over 7 fails the build |
+| **Double encoding** | Every fact is encoded **twice — once positionally, once symbolically.** Orientation is carried by the isometric drawing *and* by a shape badge whose glyph is chiral (`◐` vs `◑`). Count is carried by repeated glyphs *and* by the panel's physical arrangement. A player who remembers either encoding succeeds |
+| **The anchor asymmetry** | Every diagram contains exactly **one deliberate asymmetry** that has no functional purpose and cannot be confused: a single bolt hole offset by `1U`, one bracket arm 1.3× longer, one notch on the left only. **This is the thing the player actually remembers**, and it is what they check the real part against. Without it, two mirror-image brackets are the same object and the memory mechanic collapses |
+| **Orientation legibility** | A panel's up-axis must be derivable from the drawing alone, never from a caption. The dimetric projection plus the anchor asymmetry plus gravity cues (a ghost trail always falls) provide three redundant paths |
+| **The forgettable panel** | Symptoms, all disqualifying: two panels that differ only in rotation; a part drawn with all-equal proportions; a count above 6 shown as glyphs (use a 2×3 arrangement instead, which is remembered as a *shape*); more than one `medium`-weight subject per panel |
+
+**The testable gate.** Before any page ships:
+
+> **5 testers, 200 ms glance at the page, page removed, then asked to physically orient a real
+> part. 4 out of 5 must be correct. Fewer than 4, the panel is redrawn.**
+
+200 ms is one saccade. It is deliberately brutal, because the real play pattern is a man crouched in
+the rain who is not going to study. Logged in `test/blueprint-recall.md`, per page, per revision.
+
+### 13.7 True wordlessness — and the names (revision 2 fix)
+
+Revision 1 wrote *"The manual is wordless (per the pitch)"* and then, in the same sentence, allowed
+five categories of type: part numbers, quantities, torque values, page numbers, and a fake-Swedish
+product name. That abandons the funniest and most disciplined constraint in the pitch without a
+single line of argument. Revision 2 commits to it.
+
+| Old | Replacement | Why it is better |
+|---|---|---|
+| Part numbers (`A-04`) | **Shape badges** — 9 chiral outlined glyphs (§13.4), one per part family, embossed on the real part as a 2 mm stamped mark you can find with the lantern | The badge is *findable in the world*. A code is not. It converts reading into looking, which is the game |
+| Quantities (`×6`) | **Repeated glyphs in a fixed arrangement**: 1–3 in a row, 4 as a square, 5 as a quincunx, 6 as a 2×3 | Counts above 3 are remembered as *shapes*, not numbers — this is subitizing, it is real, and it is more reliable than digits at 200 ms |
+| Torque (`3 N·m`) | **The spiral arrow's turn count** (§13.4) — a mechanism revision 1 already invented and then undercut by printing the number next to it | The turn count is the instruction. Printing it twice was the manual not trusting its own language |
+| Page numbers | **A filled-segment progress bar** in the bottom margin: `n` filled cells of `total`, 1U each | Also tells you how much of tonight is left, which a page number does not |
+| Fake-Swedish product name | **See below.** Deleted with prejudice | §1, law 2 |
+
+**The names.** Every IKEA parody since 2004 has put a fake-Swedish word on a cover. Worse, it is this
+document violating its own thesis: §1 says the comedy comes from **form**, never from the game
+signalling "this is an IKEA parody" — and a Swedish word on the cover is precisely that signal, a
+reference to *another object* in a game whose entire joke depends on the manual reading as **a real
+object from this world**.
+
+So the manual is named the way a 1971 camp maintenance department would name it:
+
+```
+WANAKA 7
+```
+
+Two words, stencil-set, `1.6U`, `#14181a`, top-left of the cover, exactly where a property stamp
+goes. It is the camp's name and the cabin's number. It is not funny. That is why it works — it makes
+the manual **inventory**, and inventory is much funnier than parody.
+
+> **The only Latin characters anywhere in this game are: the cover word `WANAKA 7`, and the
+> stencils on the 1968 crates it was copied from — `L.W.P.` / `CABIN 7` / `1968` — sprayed on
+> `mat.tin` boxes and lumber ends in the maintenance shed.** That is the whole typographic budget.
+> The stencils came first; the cover copies them; and a player who notices that has found the
+> reveal (§0.5) three nights early, on their own, from a paint mark. Nothing else in the 3D world or
+> the UI contains a letter or a digit.
+
+Type spec, for those two cases only (CSS stack; no webfont downloads — zero binary assets):
+
+```css
+font-family: "Helvetica Neue", Helvetica, "Inter", Arial, system-ui, sans-serif;
+font-weight: 500; letter-spacing: 0.06em;
+font-variant-numeric: tabular-nums lining-nums;
+```
+
+Grotesque, closed apertures, horizontal terminals, double-storey `a`. **Absolutely not**: humanist
+(Frutiger/Myriad), geometric (Futura/Poppins), or anything with a single-storey `a`. Always
+`#14181a`, never red, never italic, never larger than `1.6U`.
+
+### 13.8 How the page sits over the world (revision 2 fix)
+
+The transition is the joke. Specify it exactly.
+
+| Phase | Duration | What happens |
+|---|---|---|
+| `ui:blueprint-open` t=0 | — | `paper-unfold` SFX. Two hands enter frame bottom |
+| t=0 → 0.18 s | 0.18 s | The page unfolds from a quarter-fold on two hinge axes (CSS `rotateX/rotateY`). Scene `toneMappingExposure` 0.62 → 0.44. Scene DOF → f/2.0 focused past the page. Scene gets an additional 8 px gaussian |
+| t=0.18 s | — | Page settles. **The page becomes a light source in the 3D scene** — see below |
+| Hold | — | The world behind is a dim, blurred, blue-black rectangle around a bright bone page. Page-to-background contrast: **≈ 90:1** |
+| `ui:blueprint-close` | 0.30 s | The page folds away *faster* than it opened. The bounce light dies over 0.12 s. Exposure returns over **0.55 s** — deliberately slower, so the forest "develops" back into view like a photograph |
+
+**The page bounce is a `SpotLight`, not a `RectAreaLight`.** Revision 1 specified a `RectAreaLight`
+(0.30 × 0.42 m, intensity 3.0) that "lights the lantern arm, the held part, the ground at the
+player's feet, and the mist for ~1.5 m." In Three, `RectAreaLight` casts no shadows, works only with
+Standard/Physical materials, requires `RectAreaLightUniformsLib` LTC lookup tables, and — fatally —
+**has no relationship whatsoever to the froxel volume**, so it could never have lit the mist. It was
+also a silent fourth light on those pixels. Replacement:
+
+| Component | Spec |
+|---|---|
+| **World light** | A shadowless `SpotLight`, `angle 1.2`, `penumbra 1.0`, intensity **3.0**, colour `#f2efe6`, positioned 0.40 m in front of the camera aimed forward-and-down 22°. Range 2.2 m. Listed in §3.2's table |
+| **Froxel** | It **takes a local-light slot in the §5.3 injection list** while the blueprint is open — it is by definition the nearest local light. That is how the mist within 1.5 m actually lights up, and it is why the injection cap is 4 and not 3 |
+| **Near-field bounce** | A screen-space term on `LAYER_HANDS` only: `bounce = pageLuma · saturate(dot(N, cameraForward)) · 0.42`, tinted `#f2efe6`. Two instructions. This is what puts the page's light on his gloved forearm in Shot 3, and it is not a light at all |
+| **Light-count accounting** | Hands during blueprint-open: moon + ambient + lantern + page bounce = **4**, which is the §3.2 exemption 1, named and budgeted. World surfaces: the page spot displaces whatever local was assigned, so they stay at 3 |
+
+**Everything else in the HUD obeys the same laws.** `HUD.js` reticle: a **single 2 px `#ffffff` dot
+at 55% opacity** with a 1 px `#14181a` outline. There is no crosshair, no health bar, no stamina
+ring, no compass, no objective marker, no minimap, no part counter. Interaction prompts are the
+**manual's own glyph vocabulary at 60% page scale**, bottom-centre, on a `#f2efe6` card at 92%
+opacity with the same hard-contact drop shadow. Subtitles (camper chatter only): `#ffffff`, 500
+weight, 1.05rem, `text-shadow: 0 1px 3px rgba(0,0,0,0.9)`, no box, bottom margin 12vh.
+
+### 13.9 The mascot
+
+He is the manual's only character, he is the joke's delivery system, and per §0.5 he is a
+self-portrait.
+
+| Property | Spec |
+|---|---|
+| Name (internal) | **BJÖRN**. Never shown to the player. It is a code name in our repo, not a word in the game — and it is the one place the Swedish joke is allowed to live, because only we can see it |
+| Construction | A `4.0 px` continuous outline. Head = perfect circle, `3U` diameter. Body = rounded rect `2.4U × 3.6U`, `0.4U` radius. Limbs = single `2.5 px` strokes, butt caps, small circle joints |
+| Face | **A hockey mask.** The head circle with three `1.5 px` breather holes in a triangle and two `1.5 px` almond eye slots. That is *all*. No expression, ever. §0.5: it is a mask because it is the only way this man knows how to draw a face |
+| Mouth | Never |
+| Proportion | 4.5 heads tall. Chunky. He is a large man |
+| Colour | `#14181a` outline, `#f2efe6` fill. His hammer's grip is the **only** part of him that is `#d92b2b` |
+| Poses (closed set, unlocked per §13.5) | `standing-neutral`, `pointing`, `shrugging-at-missing-hardware`, `hammering`, `head-tilt-confused`, `seated-on-floor`, `holding-part-two-hands`, `wagging-finger-no`, `thumbs-up` |
+| **Comic rule** | **BJÖRN is never in danger and never reacts to anything scary.** A camper's silhouette may appear in a panel; BJÖRN carries on. The horror is *in the diagram* and the diagram does not care. That is the entire joke |
+| **Anti-personality rule** | BJÖRN has no interior life, no arc, no relationship to the player, and never acknowledges the reader. He is a *drawing convention*, and the moment he becomes a character the manual stops being a document and starts being a friend, which kills §1 and §0.3 simultaneously. See §19 Trap B5 |
+| Blood | Night 5+, exactly one small `#d92b2b` splatter per page, in a corner. **Never acknowledged.** Drawn flat, in the same ink style, as if printed |
+
+### 13.10 Why this is the whole game
+
+Horror lives in **volume, ambiguity, and falloff** — you cannot tell how far away the thing is or
+what shape it has. Comedy lives in **flatness, certainty, and delineation** — a diagram asserts that
+the world is knowable and orderly. Putting a clinical, wordless, perfectly-lit A4 assembly diagram
+*inside* a lightless volumetric forest is not a UI decision; it is the **thesis of the game expressed
+as a photometric contrast ratio.** The player's pupils literally have to adjust between the two, and
+every time they do, the game re-tells its own joke without a word.
+
+And then §13.5 Night 6 draws them something they did, and the same contrast ratio tells a different
+joke, and it is not funny at all.
+
+---
+
+## 14. THE LOAD CONTRACT
+
+"Everything procedural" with no load budget is a ninety-second white screen and a lost player. It is
+the most likely single reason this project would ship as "a WebGL demo" regardless of how good the
+shaders are. Revision 1 specified a 33³ LUT, 64² blue noise, 2048² two-scale bark normals, Voronoi
+spangle, moss shells, a cloth-sim wrinkle bake, a **hydraulic erosion pass**, per-vertex `aExposure`
+baking, a `LightProbe` bake, 15 canopy variants, and six procedural humans — with no statement of
+where any of it runs.
+
+### 14.0 The gates
+
+| Gate | Target | Hard fail |
+|---|---|---|
+| **First pixel** (menu visible, animating) | **≤ 0.9 s** | 1.5 s |
+| **First playable frame**, `low` textures, night 1 | **≤ 4.0 s** | 6.0 s |
+| Full `high` bake complete, streamed in behind the menu | ≤ 14 s | 20 s |
+| Full `ultra` bake complete | **≤ 25 s** | 35 s |
+| Night 2–7 start (warm cache) | **≤ 0.6 s** | 1.2 s |
+| Main-thread block, any single task, after first pixel | **≤ 12 ms** | 20 ms — a longer block drops a frame in the menu, which is the first thing a player judges us on |
+
+### 14.1 Where every bake runs
+
+**Rule: every bake is a GPU render-target pass or a Worker job. There are no CPU pixel loops on the
+main thread, ever.**
+
+| Bake | Method | Where | Time | Tier gate |
+|---|---|---|---|---|
+| Blue noise 64² (void-and-cluster) | Precomputed constant, 4 KB, inlined as a base64 `Uint8Array` in source | — | **0 ms** | all |
+| 33³ night + dawn LUTs | Fullscreen shader → 1089×33 RGBA8 target | GPU | 6 ms | all |
+| Bark normals, 2 scales, 2048² | Shader → target, 3 species | GPU | 41 ms | `high`+ (1024² below) |
+| Galvanized spangle Voronoi | Shader → 1024² target, one per part family | GPU | 18 ms | all — **never cut, it is §4.3** |
+| Granite 3-tone speckle + Toksvig | Shader → 2048² | GPU | 22 ms | `high`+ |
+| Lumber kerf + anisotropy map | Shader → 1024² | GPU | 11 ms | all |
+| Canvas weave, tin dent, tarp wrinkle | Shader → 512², GPU relaxation ×12 | GPU | 31 ms | all |
+| Canopy variants (15) | Shader-generated alpha atlases, 2048² | GPU | 47 ms | `medium`+ (6 variants at `low`) |
+| **Terrain hydraulic erosion** | **Worker pool (`navigator.hardwareConcurrency − 1`, capped 4)**, 1024² heightfield, 60 k droplets, chunked into 40 ms jobs, transferred back as an `ArrayBuffer` | Worker | 780 ms wall / ~210 ms with 4 workers | all — **cached, see §14.2** |
+| `aExposure` per-vertex sky visibility | GPU: render 8 hemisphere-sampled depth passes of the static world, read back once per chunk into the vertex buffer | GPU + 1 readback | 96 ms | all |
+| `LightProbe` SH9 | 6-face 32² sky-only render + fragment-shader SH projection into a 3×3 target | GPU | 1.1 ms | all |
+| Camper bodies / hair / garments (6) | Loft + skin on CPU in a Worker; wrinkle normals on GPU | Worker + GPU | 85 ms / 21 ms | all |
+| Camper LOD3 billboard atlas (6 × 12 yaw × 6 frames) | Offscreen renders into a 1536×1536 atlas | GPU | 64 ms | all |
+| Cabin part meshes (all 7 nights, all states) | Parametric, CPU, Worker | Worker | 38 ms | all |
+| Shader permutations (12, §3.6) | `renderer.compile()` on a hidden scene, **behind the menu**, 1 per frame | GPU | 12 frames | all |
+
+**Total `ultra` bake: 22.4 s wall on machine A**, of which 20.6 s is overlapped with the menu.
+
+### 14.2 The cache
+
+`IndexedDB`, one object store, keyed:
+
+```
+key = `${ART_VERSION}:${SEED}:${TIER}:${assetId}`
+ART_VERSION = a build-time constant bumped by CI whenever any file under src/gen/ changes
+```
+
+- Everything in §14.1 that costs > 10 ms is cached as a raw `ArrayBuffer` (compressed textures where
+  the browser exposes them; otherwise raw RGBA).
+- **Night 2 onward is a cache hit by construction** — same seed, same tier. Gate: 0.6 s.
+- Cache is versioned, never migrated: a version bump evicts everything for that seed. Total
+  footprint capped at **180 MB**, LRU-evicted, and we `estimate()` quota first and fall back to
+  in-memory if the browser refuses.
+- A cold first-run and a warm second-run are both tested in CI, with wall-clock assertions.
+
+### 14.3 What the player sees while this happens
+
+Not a spinner. **The menu is the manual.** A single bone `#f2efe6` page on a black field, showing a
+dimetric exploded view of the finished cabin, drawn stroke-by-stroke at 1 400 px/s as the bake
+progresses — so the loading bar *is* a diagram assembling itself, and the game's thesis is stated
+before the player has pressed anything. The last stroke lands when the bake completes. If the bake
+finishes early the drawing finishes at its own pace and the button appears after it, because a
+diagram that stops mid-stroke is worse than a two-second wait.
+
 <!--CURSOR-->
+
 
 
 

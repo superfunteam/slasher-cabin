@@ -1393,3 +1393,90 @@ both times, because he does not run *at* people. He runs to get somewhere before
 cutting them off. He has read ahead.
 
 ---
+
+## 7. THE CAMPERS
+
+Six people who arrived a week early to open a summer camp, which is a genuinely nice thing to
+volunteer for. **None of them are stupid. None of them are cruel.** Two of them are in love in a
+low-stakes, slightly embarrassing way. All of them are good at their jobs. The player should be
+actively annoyed when the game requires them to be hurt.
+
+`AUDIO_DIRECTION.md` §7.4's global direction stands and is the most important note in the VO
+brief: **they are not in a horror movie and must never sound like they are. No screaming until
+Night Six. The horror is that they are relaxed.**
+
+### 7.1 Character ↔ voice-profile mapping (resolves collision C4)
+
+`AUDIO_DIRECTION.md` §7.4 currently names six people who do not exist in the fiction. The profile
+*slots* and their parameter columns are the Audio agent's; the *people* are this document's. This
+table is the join, and it is what `tools/generate-voices.mjs` should be keyed on.
+
+| Slot | Was | **Is** | Voice direction | stability | sim | style | boost |
+|---|---|---|---|---|---|---|---|
+| 1 | DENISE, 22 | **BEVERLY "BEV" RANCZAK, 58** | Female, low alto, dry, unhurried, institutionally calm. Speaks in fragments with the articles removed. Thirty years of Winstons but no rasp performance | 0.62 | 0.82 | 0.18 | true |
+| 2 | RANDY, 19 | **COOPER "COOP" VANCE, 20** | Male, bright tenor, fast, laughs at his own jokes and then apologises for them | 0.34 | 0.72 | 0.55 | true |
+| 3 | TAMMY, 18 | **MARGUERITE "MARG" TOTH, 21** | Female, dry, low energy, deadpan, narrates her own logistics because it is how she thinks | 0.55 | 0.78 | 0.30 | true |
+| 4 | KEVIN "SPUD", 17 | **TEDDY NAKAGAWA, 16** | Male, unsettled register, cracks upward under stress, over-polite | 0.28 | 0.68 | 0.62 | true |
+| 5 | MARCIA, 20 | **ROBIN OSEI-HALL, 19** | Female, mid, **precise, not breathy** — she is technical, not sweet. Restarts her own sentences | **0.48** | 0.80 | **0.28** | true |
+| 6 | BUD DIETZ, 46 | **DALE PRUITT, 27** | Male, mid-baritone, slow, flat. **Tired, not gravel** — he is twenty-seven, not sixty. Keep the low end un-enhanced | **0.62** | **0.84** | **0.18** | **false** |
+
+**Two profiles change materially and the Audio agent must regenerate them:** slot 5 (Robin is not
+warm and breathy; she is exact, and her exactness is her whole character) and slot 6 (Dale is
+twenty-seven).
+
+**Per-line overrides.** The table above is the default for every line by that speaker. §8's tables
+carry a `Δ` column and it is almost always empty; where it is not, it overrides one field only.
+This is deliberately the opposite of v1.0, which restated three voice parameters on every one of
+ninety rows and therefore had three sources of truth for the same fact.
+
+### 7.2 The six
+
+**ROBIN OSEI-HALL — 19 — Arts & Crafts.** Second summer. Grew up in her father's boatyard in
+Duluth. She has heard ten thousand hours of tools and she knows the difference between a
+woodpecker and a mallet the way you know your own name. **That is her tragedy: she is right for a
+technical reason nobody else on site can evaluate.**
+*Verbal tic:* restarts her own sentences — "Okay so — okay, no, listen." Never finishes the first
+attempt.
+*Relationship:* older-sister energy toward Teddy; she checks he has eaten.
+She is the one who notices on Night Two and is not believed on Night Three. She is the only one who
+gets inside the house and understands what it is. **Her expertise is the only thing in the script
+that lets a character say something the audience cannot already say** — which is why every line
+where she stated the theme instead of a fact has been cut (§8.2).
+
+**DALE PRUITT — 27 — Maintenance.** Sixth summer. Fixes everything, resents nothing, drinks a
+little more than he'd like you to know. Calls everyone *chief* or *champ* and trails off mid-thought
+with "…anyway." Kind in a way that costs him something. He could corroborate Robin on Night Three
+and doesn't, because corroborating means a report, and a report means the county, and the county
+means his job.
+*Relationship:* Robin's reluctant almost-ally. Their unfinished conversation is the saddest thing
+in the bank.
+*Dies Night Four, politely, mid-sentence, having knocked first.*
+
+**MARGUERITE "MARG" TOTH — 21 — Waterfront Director.** Third summer. Runs the dock like a small
+navy. Counts out loud — "one, two, and — okay" — and narrates her own logistics because it is how
+she thinks. Competent, warm, a little bossy, and the one who organises a proper search in pairs on
+Night Five instead of a panic. **The forest gets harder because she is good at her job.**
+*Relationship:* with Coop, three months, hasn't told her mother.
+
+**COOPER "COOP" VANCE — 20 — Sports & Rec.** Second summer. Loud, plays four chords badly, turns
+everything into a bit and then apologises for the bit thirty seconds later. **Write him kind.** His
+bits are how he checks whether people are okay. On Night Six he stops doing bits and it is
+genuinely alarming.
+*Relationship:* Marg; and he has appointed himself Teddy's guy.
+
+**TEDDY NAKAGAWA — 16 — Counselor-in-Training.** First summer away from home. Says *sorry* as
+punctuation. Asks permission to do things he has already been told to do. Homesick in the specific
+sixteen-year-old way where you would rather die than mention it, and he mentions it exactly once,
+to Robin, at 2 a.m., and then changes the subject.
+*Relationship:* orbits Coop; is looked after by Robin.
+
+**BEVERLY "BEV" RANCZAK — 58 — Camp Director.** **Here since 1971 — thirteen summers.** Chain-smokes
+Winstons. Speaks in fragments with the articles removed: "Get the tarps. Both of 'em. Now." Loves
+this place with a fierceness she would never say out loud, and is currently annoyed about a land
+survey because it means paperwork.
+*Relationship:* everyone's boss; Dale's oldest friend on site.
+**She is the living link.** She bought into a camp that came with a burned foundation and a story
+she never asked about. She inherited the land's twenty-two years and has been here for thirteen of
+them, and the nine-year gap is exactly the size of the thing nobody has looked at.
+
+---
