@@ -63,7 +63,17 @@
  *    we set the uv scale to repeats-per-metre from it. A 2.4 m stud wants uv.y running 0..2.4,
  *    not 0..1. (Foliage cards are the exception — those map once across their quad.)
  *  - Tiling is applied IN THE SHADER, never via `texture.repeat`. Textures.js hands out
- *    shared, render-target-backed textures; nothing here mutates them.
+ *    shared, FROZEN, render-target-backed textures; nothing here mutates them. If you ever
+ *    do need a distinct uv transform, ask for a view: `Textures.get(name, { repeat })`.
+ *  - Textures.js bakes ABSOLUTE roughness/metalness/AO/cavity into one ORM
+ *    (r = AO, g = roughness, b = metalness, a = cavity) and three MULTIPLIES map by factor.
+ *    So whenever such a map is bound we force `material.roughness/metalness = 1.0` and let
+ *    the map through unscaled. The ART_DIRECTION §5 numbers are the source of truth for the
+ *    BAKE; they are not a second multiplier here. Materials that fall back to the local
+ *    bakery (or to flat colour) DO still use the authored scalar — that map is a range
+ *    multiplier by construction. `set.roughAbsolute` / `set.metalAbsolute` is the switch.
+ *  - `roughnessMap === metalnessMap === aoMap === ormMap` by identity. That is intended:
+ *    one texture, three slots, no extra memory. Do not "fix" it.
  *  - Foliage ships with a low `alphaTest` AND `alphaToCoverage` on high/ultra. If
  *    Postprocessing renders into a multisampled target, call `setAlphaToCoverage(true)` and
  *    the hard cutout drops away (ART_DIRECTION trap 10).
@@ -292,7 +302,8 @@ uniform vec3  uWaterColor;    // puddle / film colour (linear)
 uniform vec2  uBreakup;       // x amount, y scale in metres
 uniform vec4  uDetailParams;  // x tiling, y strength, z fadeStart, w fadeEnd
 uniform vec4  uCavityParams;  // x contrast, y bias, z channel, w invert
-uniform float uAo;            // ambient-occlusion strength from the cavity map
+uniform vec2  uAoParams;      // x channel of the SAME fetch that holds baked AO, y invert
+uniform float uAo;            // ambient-occlusion strength from the baked AO channel
 uniform float uInstVar;       // per-instance albedo variation (±)
 uniform vec4  uTranslucency;  // x strength, y distortion, z power, w wrap
 uniform vec3  uTransColor;    // subsurface tint (linear)
@@ -450,7 +461,16 @@ vec3 scTriP = vScWorldPos * uTriParams.x;
 #endif
 
 // --- cavity / height. Water pools in here; it does not coat uniformly.
+//
+// TWO DIFFERENT QUANTITIES, ONE FETCH. Textures.js packs its ORM as
+// r = AO, g = roughness, b = metalness, a = CAVITY (1 - height).
+//   scCavity  = RECESS-NESS. 1 = deep crevice. Drives pooling, grime and rust.
+//   scBakedAO = the bakery's horizon occlusion. 1 = open sky, 0 = occluded.
+// They are not each other's complement (AO also sees broad recesses the height field
+// alone cannot express), and confusing them puts puddles on the ridges. Both channels
+// come out of the same texture2D, so reading both is free.
 float scCavity = 0.5;
+float scBakedAO = 1.0;
 #ifdef SC_CAVITY
   #ifdef SC_TRIPLANAR
     vec4 scCavTex = scTriSample(uCavityMap, scTriP, scTriW);
@@ -458,8 +478,14 @@ float scCavity = 0.5;
     vec4 scCavTex = texture2D(uCavityMap, vScUv);
   #endif
   scCavity = scChannel4(scCavTex, uCavityParams.z);
-  scCavity = saturate((scCavity - 0.5 + uCavityParams.y) * uCavityParams.x + 0.5);
+  // Invert FIRST: contrast and bias are authored about true cavity, so a provider that
+  // only hands us a height field must be flipped before the curve is applied.
   if (uCavityParams.w > 0.5) scCavity = 1.0 - scCavity;
+  scCavity = saturate((scCavity - 0.5 + uCavityParams.y) * uCavityParams.x + 0.5);
+
+  scBakedAO = scChannel4(scCavTex, uAoParams.x);
+  if (uAoParams.y > 0.5) scBakedAO = 1.0 - scBakedAO;
+  scBakedAO = saturate(scBakedAO);
 #endif
 
 // --- sky exposure. Under a tree it is measurably drier (FAILURE MODE #5).
@@ -521,9 +547,18 @@ const GLSL_ROUGHNESS = /* glsl */`
 float roughnessFactor = roughness;
 
 #ifdef SC_TRIPLANAR
-  roughnessFactor *= mix(1.0 - uTriParams.w, 1.0 + uTriParams.w,
-                         scTriSample(uTriRough, scTriP, scTriW).g);
+  float scTriRough = scTriSample(uTriRough, scTriP, scTriW).g;
+  #ifdef SC_ABS_ROUGH
+    // Textures.js bakes an ABSOLUTE roughness into ORM.g, so take it as authored. Folding
+    // the material scalar in as well would be the same double-multiply Three does with
+    // roughnessMap, only hidden inside our own triplanar path.
+    roughnessFactor = scTriRough;
+  #else
+    roughnessFactor *= mix(1.0 - uTriParams.w, 1.0 + uTriParams.w, scTriRough);
+  #endif
 #elif defined( USE_ROUGHNESSMAP )
+  // material.roughness is forced to 1.0 whenever this map is an absolute ORM, so this
+  // multiply is a pass-through rather than authored * baked. See _buildMaterial.
   roughnessFactor *= texture2D(roughnessMap, vScUv).g;
 #endif
 
@@ -555,6 +590,8 @@ const GLSL_METALNESS = /* glsl */`
 float metalnessFactor = metalness;
 
 #ifdef USE_METALNESSMAP
+  // Same contract as roughness: material.metalness is 1.0 when this map is an absolute ORM,
+  // so ORM.b lands unscaled. Every bracket, hanger and nail is a conductor because of this.
   metalnessFactor *= texture2D(metalnessMap, vScUv).b;
 #endif
 
@@ -687,7 +724,9 @@ const GLSL_TRANSLUCENCY = /* glsl */`
 const GLSL_AO = /* glsl */`
 #ifdef SC_CAVITY
 {
-  float scAO = mix(1.0, scCavity, uAo);
+  // AO, not cavity. These are opposite polarities: occlusion darkens the recesses, cavity
+  // IS the recess. Reading scCavity here would light the crevices and shade the ridges.
+  float scAO = mix(1.0, scBakedAO, uAo);
   reflectedLight.indirectDiffuse *= scAO;
   #if defined( USE_CLEARCOAT )
     clearcoatSpecularIndirect *= scAO;
@@ -1788,6 +1827,9 @@ export class Materials {
       uCavityParams: new THREE.Uniform(new THREE.Vector4(
         cav.contrast ?? 1.4, cav.bias ?? 0, cav.channel ?? 0, cav.invert ? 1 : 0,
       )),
+      // Which channel of the cavity fetch carries the bakery's own AO, and whether it needs
+      // flipping. Overwritten from the resolved set in _buildMaterial (ORM: r, not inverted).
+      uAoParams: new THREE.Uniform(new THREE.Vector2(spec.aoChannel ?? 0, spec.aoInvert ? 1 : 0)),
       uAo: new THREE.Uniform(spec.ao ?? 0.7),
       uInstVar: new THREE.Uniform(spec.instVar ?? 0.09),
       uTranslucency: new THREE.Uniform(new THREE.Vector4(
@@ -1857,8 +1899,24 @@ export class Materials {
         material.normalMap = set.normal;
         material.normalScale = new THREE.Vector2(spec.normalScale ?? 1, spec.normalScale ?? 1);
       }
-      if (set.rough) material.roughnessMap = set.rough;
-      if (set.metal && (spec.metalness ?? 0) > 0) material.metalnessMap = set.metal;
+      // THREE MULTIPLIES. roughnessFactor = material.roughness * roughnessMap.g and
+      // metalnessFactor = material.metalness * metalnessMap.b. Textures.js bakes the
+      // ART_DIRECTION §5 values ABSOLUTELY into the ORM, so the authored scalar has already
+      // been spent — leaving it in place lands every surface at authored*baked (0.88 * 0.84
+      // = 0.74) and wrong by a different amount per material. Neutralise the scalar so the
+      // map passes through. §5 stays the source of truth for the BAKE, not for a second
+      // multiply here.
+      //
+      // The LOCAL fallback bakery is the opposite contract: its rough map is a 0..1 range
+      // multiplier by construction (TEX_FAMILY.rough), so there the authored scalar stays.
+      if (set.rough) {
+        material.roughnessMap = set.rough;
+        if (set.roughAbsolute) material.roughness = 1.0;
+      }
+      if (set.metal && (spec.metalness ?? 0) > 0) {
+        material.metalnessMap = set.metal;
+        if (set.metalAbsolute) material.metalness = 1.0;
+      }
     }
 
     if (usePhysical) {
@@ -1878,11 +1936,17 @@ export class Materials {
     const rec = {
       name, spec, material,
       tile: set.tile,
+      // True when the resolved rough/ORM map holds absolute values rather than a multiplier.
+      // The triplanar path never binds material.roughnessMap, so it needs its own flag.
+      absRough: !!set.roughAbsolute,
       uniforms: this._makeLocalUniforms(spec),
       textures: {
         cavity: spec.noCavity ? null : (set.cavity ?? null),
         // SC_WATER reads its flow normal through the detail sampler — hand it the animated
         // water normal when Textures baked one, otherwise the generic detail normal.
+        // NB 'water-normal' is RE-BAKED into this very texture object every frame by
+        // Textures.update(). We hold the live reference and sample it in the shader; never
+        // copy its pixels, never snapshot it, never swap it for a cached view.
         detail: (spec.water && set.normal) ? set.normal : this._detailNormal,
         alpha: set.alpha ?? null,
         triAlbedo: set.map ?? null,
@@ -1902,6 +1966,13 @@ export class Materials {
     if (Number.isFinite(set.cavityChannel)) {
       rec.uniforms.uCavityParams.value.z = set.cavityChannel;
     }
+    if (set.cavityInvert) {
+      // Composes with the spec's own `cavity.invert` rather than overwriting it: the spec
+      // says "this material reads better flipped", the set says "my channel is height".
+      const cp = rec.uniforms.uCavityParams.value;
+      cp.w = cp.w > 0.5 ? 0 : 1;
+    }
+    rec.uniforms.uAoParams.value.set(set.aoChannel ?? 0, set.aoInvert ? 1 : 0);
 
     this._applyPatch(rec);
     return rec;
@@ -1925,6 +1996,9 @@ export class Materials {
     if (hasCavity) defines.push('SC_CAVITY');
     if (textures.alpha) defines.push('SC_ALPHA_MAP');
     if (triplanar) defines.push('SC_TRIPLANAR');
+    // Only meaningful alongside SC_TRIPLANAR — that branch is the one place a Textures ORM
+    // is sampled without material.roughnessMap having neutralised the scalar for us.
+    if (triplanar && rec.absRough && textures.triRough) defines.push('SC_ABS_ROUGH');
     if (spec.wind && (spec.wind[0] ?? 0) > 0) defines.push('SC_WIND');
     if (spec.translucent && (spec.translucent[0] ?? 0) > 0 && tierIndex >= 1) defines.push('SC_TRANSLUCENT');
     if (spec.spangle && tierIndex >= 1) defines.push('SC_SPANGLE');
@@ -2061,7 +2135,10 @@ uniform sampler2D uAlphaMap;
   async _resolveTextures(name, spec) {
     const out = {
       map: null, normal: null, rough: null, metal: null, cavity: null, alpha: null,
-      cavityChannel: 0, tile: null,
+      cavityChannel: 0, cavityInvert: false,
+      aoChannel: 0, aoInvert: false,
+      roughAbsolute: false, metalAbsolute: false,
+      tile: null,
     };
 
     // Prefer the set that shares our own name (Textures.js bakes most of them under exactly
@@ -2080,16 +2157,49 @@ uniform sampler2D uAlphaMap;
           out.map = pickTex(got, ['map', 'albedo', 'diffuse', 'color', 'baseColor']);
           out.normal = pickTex(got, ['normalMap', 'normal', 'nrm']);
           out.rough = pickTex(got, ['roughnessMap', 'roughness', 'rough', 'ormMap', 'orm']);
-          out.metal = pickTex(got, ['metalnessMap', 'metalness', 'ormMap', 'orm']);
+          out.metal = pickTex(got, ['metalnessMap', 'metalness', 'metal', 'ormMap', 'orm']);
           out.alpha = pickTex(got, ['alphaMap', 'alpha', 'opacityMap']);
-          // Height (for puddle pooling) is packed into the normal map's alpha when the
-          // bakery says so; otherwise the ORM's R channel is ambient occlusion.
-          if (got.heightInNormalAlpha && out.normal) {
+          // A real bakery bakes ABSOLUTE PBR values. _buildMaterial neutralises the material
+          // scalar for these so Three's multiply becomes a pass-through.
+          out.roughAbsolute = !!out.rough;
+          out.metalAbsolute = !!out.metal;
+
+          // ---- cavity and AO, both out of ONE texture.
+          //
+          // Textures.js attachment 2 is glTF ORM plus a fourth channel:
+          //     r = AO,  g = roughness,  b = metalness,  a = CAVITY (1 - height)
+          // and the normal map's alpha is HEIGHT (for parallax), which is the OPPOSITE
+          // polarity. Cavity is what decides where water pools and where rust and dirt
+          // collect, so it has to be the ORM's alpha — .r is a different quantity and
+          // normal.a is upside down. Read AO from .r of the same fetch (see GLSL_PREPARE).
+          const orm = pickTex(got, ['ormMap', 'orm', 'aoMap', 'ao']);
+          const trueCavity = pickTex(got, ['cavityMap', 'cavity']);
+          if (orm) {
+            out.cavity = orm;
+            out.cavityChannel = 3;
+            out.cavityInvert = false;
+            out.aoChannel = 0;
+            out.aoInvert = false;
+          } else if (trueCavity) {
+            out.cavity = trueCavity;
+            out.cavityChannel = 0;
+            out.cavityInvert = false;
+            out.aoChannel = 0;
+            out.aoInvert = true;      // no AO channel: the complement is the best guess
+          } else if (got.heightInNormalAlpha && out.normal) {
+            // No ORM at all. The normal's alpha is height, so flip it to get cavity, and
+            // use it un-flipped as the AO stand-in (high ground is unoccluded).
             out.cavity = out.normal;
             out.cavityChannel = 3;
+            out.cavityInvert = true;
+            out.aoChannel = 3;
+            out.aoInvert = false;
           } else {
-            out.cavity = pickTex(got, ['aoMap', 'ao', 'ormMap', 'cavityMap', 'cavity', 'heightMap', 'displacementMap']);
+            out.cavity = pickTex(got, ['heightMap', 'displacementMap']);
             out.cavityChannel = 0;
+            out.cavityInvert = true;  // height, not cavity
+            out.aoChannel = 0;
+            out.aoInvert = false;
           }
           // `tile` is the physical size in metres the tile was authored for.
           if (Number.isFinite(got.tile) && got.tile > 0.001) out.tile = got.tile;
@@ -2104,8 +2214,17 @@ uniform sampler2D uAlphaMap;
       if (fb) {
         out.map = out.map ?? fb.map;
         out.normal = out.normal ?? fb.normal;
+        // fb.rough is a RANGE MULTIPLIER (TEX_FAMILY.rough), not an absolute value, so the
+        // authored scalar must keep multiplying it — leave roughAbsolute false.
         out.rough = out.rough ?? fb.rough;
-        out.cavity = out.cavity ?? fb.cavity;
+        if (!out.cavity && fb.cavity) {
+          // The local bakery writes the HEIGHT field here, greyscale, high on the ridges.
+          out.cavity = fb.cavity;
+          out.cavityChannel = 0;
+          out.cavityInvert = true;   // -> recess-ness
+          out.aoChannel = 0;
+          out.aoInvert = false;      // -> height doubles as the occlusion stand-in
+        }
       }
     }
 

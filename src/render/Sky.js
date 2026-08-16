@@ -24,10 +24,33 @@
  *                                        crossing the moon is a gameplay darkness event.
  *   this.hemiLight       HemisphereLight sky bounce.
  *   this.lightningLight  DirectionalLight the flash key (intensity 0 unless flashing).
+ *   this.moonPosition    THREE.Vector3   world point of the moon on the dome, refreshed every
+ *                                        frame — project it for a lens flare / god-ray origin.
+ *   this.moonPhase       number 0..1     illuminated fraction (waxing gibbous -> near full).
+ *   this.moonVisibility  number 0..1     getter: (1 - occlusion), zero when the moon is down.
+ *   this.lightningLevel  number 0..1     the current flash envelope value.
+ *   this.cloudCover      number 0..1     current coverage; setCloudCover(v, immediate) to force.
  *   this.flash(i)        method          fire a ~120 ms 3-stage lightning spike that lights the
  *                                        whole scene and writes Materials uLightning.
  *
+ * What it OWNS that is not obviously Sky's
+ * ----------------------------------------
+ *   `scene.fog`. Materials.js only compiles its analytic height-fog upgrade when someone has
+ *   set scene.fog (USE_FOG), so without this there is no aerial perspective anywhere in the
+ *   game. Sky claims it only if it is still null at init(), so VolumetricFog can take it
+ *   instead simply by setting it first; dispose() hands it back.
+ *
+ * Coupling to Postprocessing
+ * --------------------------
+ *   Postprocessing owns the output transform (renderer.toneMapping = NoToneMapping, AgX once
+ *   in the composite). Both materials here are toneMapped:false and write LINEAR HDR. If you
+ *   ever run this module without Postprocessing the sky will look flat and crushed — that is
+ *   the missing tone curve, not a bug in the dome.
+ *
  * GLSL LIVES IN TEMPLATE LITERALS. Never put a backtick in a shader comment — use 'quotes'.
+ * And never '#include' a chunk WebGLProgram already injects into the fragment prefix
+ * (colorspace_pars_fragment always; tonemapping_pars_fragment when toneMapped is true) —
+ * that is a duplicate-function-body link error a JS syntax check cannot see.
  */
 import * as THREE from 'three';
 import { Log } from '../core/Log.js';
@@ -91,7 +114,6 @@ const _v1 = new THREE.Vector3();
 const _v2 = new THREE.Vector3();
 const _v3 = new THREE.Vector3();
 const _v4 = new THREE.Vector3();
-const _v5 = new THREE.Vector3();
 const _up = new THREE.Vector3(0, 1, 0);
 const _fallbackAxis = new THREE.Vector3(1, 0, 0);
 const _col = new THREE.Color();
@@ -406,9 +428,11 @@ void main() {
   col += uSkyHorizon * rDepth * uHaze * 1.35;
 
   // Moon aureole — three nested exponentials read as a real atmospheric halo.
-  float halo = exp(-ang * 30.0) * 0.90
-             + exp(-ang * 6.0) * 0.20
-             + exp(-ang * 1.7) * 0.045;
+  // Three nested exponentials: the tight pearl right off the limb, the aureole, and the
+  // broad wash that lifts a third of the sky. A single exp() reads as a fake radial gradient.
+  float halo = exp(-ang * 38.0) * 1.05
+             + exp(-ang * 7.5) * 0.16
+             + exp(-ang * 1.9) * 0.032;
   halo += mPhase * mDepth * 0.06;
   col += uMoonGlow * halo * uMoonBright * uHaloGain * (1.0 + uHaze * 1.6);
 
@@ -433,12 +457,18 @@ void main() {
     if (d > 0.002) {
       // Transmittance through the slab; thin edges glow, thick cores go to slate.
       float trans = exp(-thick * 3.6);
+      // 'edge' is high where the detail layer has cloud but the low-frequency body does
+      // not — i.e. the wispy fringe. That fringe is where a backlit deck goes silver.
       float edge = scSat(d - thick) * 1.6;
-      float moonNear = pow(scSat(mu), 5.0);
+      // Broad forward-scatter lobe, not a spotlight: real backlit cloud silvers across a
+      // quarter of the sky, and a tight power here reads as a lens artifact instead.
+      float moonNear = pow(scSat(mu * 0.5 + 0.5), 3.4);
+      float moonCore = pow(scSat(mu), 9.0);
 
-      vec3 cc = mix(uCloudDark, uCloudLit, scSat(moonNear * 0.85 + 0.16 + uHaze * 0.35));
+      vec3 cc = mix(uCloudDark, uCloudLit, scSat(moonNear * 0.85 + 0.14 + uHaze * 0.35));
       // The silver rim: backlit thin cloud in front of the moon.
-      cc += uCloudSilver * (trans * moonNear * 1.35 + edge * moonNear * 1.9) * uMoonBright;
+      cc += uCloudSilver * (trans * moonNear * 0.55 + edge * moonNear * 1.05
+                            + edge * moonCore * 2.6) * uMoonBright;
       // Ambient top-lighting so cloud away from the moon is not a flat black shape.
       cc += uCloudLit * (0.10 + 0.22 * trans) * (0.35 + 0.65 * rDepth);
       cc += uLightningCol * uLightning * (0.55 + 0.85 * thick);
@@ -669,6 +699,8 @@ export class Sky {
     // ---- tunables --------------------------------------------------------------------
     this.cloudCover = 0.38;
     this.auroraStrength = 0;
+    /** Global multiplier on the aurora, for a director that wants it dialled back. */
+    this._auroraScale = 1;
     this.starGain = 1.0;
     this.haloGain = 1.0;
     this.milkyWayGain = 1.0;
@@ -698,6 +730,7 @@ export class Sky {
     this._disposed = false;
     this._ready = false;
 
+    this._occDt = 0;
     this._flashT = -1;
     this._flashAmp = 0;
     this._flashDir = 0;
@@ -1003,14 +1036,18 @@ export class Sky {
     this.moonPhase = (1 + Math.cos(pa)) * 0.5;
     if (this._uniforms) {
       this._uniforms.uMoonSunLocal.value.set(Math.sin(pa), 0.12, Math.cos(pa)).normalize();
-      this._uniforms.uMoonIntensity.value = lerp(2.3, 3.1, t);
+      // The disc is the one thing in the game allowed to clip the tone curve outright
+      // (ART §3.1: brightest 0.1%). Measured: below ~7.0 linear AgX rolls it off to a
+      // grey coin at 140/255 and the bloom has nothing to bite on.
+      this._uniforms.uMoonIntensity.value = lerp(8.0, 13.0, t);
     }
 
     // Weather.js owns the real schedule; this is the standalone fallback so a solo run of
     // any night still looks like that night (ART §3.1.1 weather table).
     const COVER = [0.28, 0.44, 0.40, 0.72, 0.85, 0.95, 0.22];
     if (!this._weatherSeen) this._cloudTarget = COVER[n - 1];
-    this.auroraStrength = n >= 5 ? lerp(0.55, 1.0, (n - 5) / 2) : 0;
+    // update() re-derives auroraStrength from state.night every frame; this only seeds it.
+    this.auroraStrength = n >= 5 ? lerp(0.55, 1.0, clamp01((n - 5) / 2)) * this._auroraScale : 0;
 
     // Storm nights get a standalone lightning schedule if Weather is not driving us.
     this._nextStrike = (n === 6) ? this._rand.range(4, 12) : 1e9;
@@ -1105,6 +1142,7 @@ export class Sky {
     u.uCloudDrift.value.set(this._driftX, this._driftY);
 
     // ---- moon occlusion: sample the same field at and around the moon (gameplay value)
+    this._occDt = d;
     this._updateOcclusion();
 
     // ---- brightness bookkeeping
@@ -1130,8 +1168,14 @@ export class Sky {
     }
 
     // ---- aurora (ART: night >= 5, faint, beautiful, slightly wrong)
+    //
+    // Derived from state.night EVERY FRAME rather than latched on 'night:begin'. NightManager
+    // may never fire that event (it is allowed to be missing entirely), and an aurora that
+    // only exists if another system remembered to announce itself is an aurora that never
+    // ships. The event handler still runs — it just sets the same value earlier.
     const night = Number.isFinite(state?.night) ? state.night : 1;
-    const aur = night >= 5 ? this.auroraStrength : 0;
+    const aur = night >= 5 ? lerp(0.55, 1.0, clamp01((night - 5) / 2)) * this._auroraScale : 0;
+    this.auroraStrength = aur;
     // Aurora dies as dawn comes up and is swallowed by heavy cloud.
     u.uAurora.value = aur * dawnFade * (1 - this.cloudCover * 0.55);
 
@@ -1150,10 +1194,12 @@ export class Sky {
     // ---- lights
     this._updateMoonLight(d);
     if (this.hemiLight) {
-      this.hemiLight.intensity = this._hemiBase
-        * (1 + this._haze * 0.9)
+      // Bounded: the sky bounce is fill, and fill that outruns the key turns the forest
+      // into flat grey mush (ART §1). Ceiling is 2.4x the base even at a dawn whiteout.
+      this.hemiLight.intensity = Math.min(this._hemiBase * 2.4, this._hemiBase
+        * (1 + this._haze * 0.55)
         * (1 - 0.42 * this.moonOcclusion)
-        * (1 + smoothstepJS(0.86, 1.0, ton) * 1.4);
+        * (1 + smoothstepJS(0.86, 1.0, ton) * 0.9));
     }
 
     // ---- scene fog: colour and density track weather and dawn
@@ -1229,8 +1275,11 @@ export class Sky {
       wsum += 1;
     }
     const target = clamp01(sum / wsum);
-    // Light low-pass so a single-frame noise spike never strobes the key light.
-    this.moonOcclusion += (target - this.moonOcclusion) * 0.25;
+    // Light low-pass so a single-frame noise spike never strobes the key light. Framerate
+    // independent: a fixed per-frame lerp would make the darkness event arrive twice as fast
+    // at 120 Hz as at 60.
+    const k = this._occDt > 0 ? 1 - Math.exp(-this._occDt * 6.0) : 1;
+    this.moonOcclusion += (target - this.moonOcclusion) * k;
   }
 
   _updateLightning(dt) {

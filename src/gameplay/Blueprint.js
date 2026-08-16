@@ -139,7 +139,7 @@ export const HANDS = Object.freeze({
  * STORY §3.1 — panels in Ansel's hand, by night. Exact counts, not percentages: he draws the
  * pages he needs it to say, and the count is the arc. Night 7 is one mark (the telephone inset).
  */
-const ANSEL_PANELS = [0, 0, 0, 1, 2, 5, 9, 13, 1];   // indexed by night (0 unused)
+const ANSEL_PANELS = [0, 0, 1, 2, 5, 9, 13, 1];      // indexed by night; index 0 unused
 const PANEL_COUNT = [0, 9, 11, 14, 16, 18, 17, 4];   // STORY §3.1; N7 is the blank + 3 marks
 
 /** STORY §3.6 — the seven-stage evolution, as drawing behaviour rather than adjectives. */
@@ -360,6 +360,24 @@ function transformPoly(poly, { pos = [0, 0, 0], yaw = 0, mirror = false, scale =
     out.push([x * c + z * s + pos[0], y + pos[1], -x * s + z * c + pos[2]]);
   }
   return out;
+}
+
+/**
+ * Screen-space bounds + near depth for a transformed solid, at unit scale. The HLR inner loop
+ * rejects almost every solid on these two comparisons instead of running the plane clip.
+ */
+function solidBounds(s) {
+  let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity, dMax = -Infinity;
+  const n = s.verts.length / 3;
+  for (let i = 0; i < n; i++) {
+    const x = s.verts[i * 3], y = s.verts[i * 3 + 1], z = s.verts[i * 3 + 2];
+    const px = projX(x, y, z, 1), py = projY(x, y, z, 1), d = depthOf(x, y, z);
+    if (px < x0) x0 = px; if (px > x1) x1 = px;
+    if (py < y0) y0 = py; if (py > y1) y1 = py;
+    if (d > dMax) dMax = d;
+  }
+  s.sx0 = x0; s.sy0 = y0; s.sx1 = x1; s.sy1 = y1; s.dMax = dMax;
+  return s;
 }
 
 /** Does the ray (p → viewer) enter this convex solid? If so the point is hidden behind it. */
@@ -1406,7 +1424,7 @@ function makeInstance(part, slot, offset, opt = {}) {
   };
   return {
     partId: part.id, part, slot, tr,
-    solids: geo.solids.map((s) => transformSolid(s, tr)),
+    solids: geo.solids.map((s) => solidBounds(transformSolid(s, tr))),
     details: geo.details.map((d) => transformPoly(d, tr)),
     occlude: opt.occlude !== false,
     dotted: !!opt.dotted,
@@ -1415,21 +1433,31 @@ function makeInstance(part, slot, offset, opt = {}) {
   };
 }
 
+/** Is this 3D point occluded by anything other than `skip`? */
+function pointHidden(occluders, skip, px, py, pz) {
+  const sx = projX(px, py, pz, 1), sy = projY(px, py, pz, 1), d = depthOf(px, py, pz);
+  for (let o = 0; o < occluders.length; o++) {
+    const inst = occluders[o];
+    if (inst === skip || !inst.occlude || inst.dotted) continue;
+    const sol = inst.solids;
+    for (let s = 0; s < sol.length; s++) {
+      const q = sol[s];
+      // Cheap rejects first: outside the silhouette box, or entirely behind the sample.
+      if (sx < q.sx0 || sx > q.sx1 || sy < q.sy0 || sy > q.sy1) continue;
+      if (q.dMax <= d + HLR_EPS) continue;
+      if (rayHitsConvex(q.planes, px, py, pz, HLR_EPS)) return true;
+    }
+  }
+  return false;
+}
+
 /** Visible sub-segments of a 3D segment, clipped against every occluding solid. */
 function hlrSegment(occluders, skip, ax, ay, az, bx, by, bz, out) {
   const vis = new Array(HLR_SAMPLES + 1);
   for (let i = 0; i <= HLR_SAMPLES; i++) {
     const t = i / HLR_SAMPLES;
-    const px = ax + (bx - ax) * t, py = ay + (by - ay) * t, pz = az + (bz - az) * t;
-    let hidden = false;
-    for (let o = 0; o < occluders.length && !hidden; o++) {
-      const inst = occluders[o];
-      if (inst === skip || !inst.occlude || inst.dotted) continue;
-      for (let s = 0; s < inst.solids.length; s++) {
-        if (rayHitsConvex(inst.solids[s].planes, px, py, pz, HLR_EPS)) { hidden = true; break; }
-      }
-    }
-    vis[i] = !hidden;
+    vis[i] = !pointHidden(occluders, skip,
+      ax + (bx - ax) * t, ay + (by - ay) * t, az + (bz - az) * t);
   }
   // Runs of visible samples become sub-segments; boundaries refined by bisection.
   let i = 0;
@@ -1453,15 +1481,8 @@ function hlrSegment(occluders, skip, ax, ay, az, bx, by, bz, out) {
     let lo = tHidden, hi = tVisible;
     for (let k = 0; k < 4; k++) {
       const m = (lo + hi) / 2;
-      const px = ax + (bx - ax) * m, py = ay + (by - ay) * m, pz = az + (bz - az) * m;
-      let hid = false;
-      for (let o = 0; o < occluders.length && !hid; o++) {
-        const inst = occluders[o];
-        if (inst === skip || !inst.occlude || inst.dotted) continue;
-        for (let s = 0; s < inst.solids.length; s++) {
-          if (rayHitsConvex(inst.solids[s].planes, px, py, pz, HLR_EPS)) { hid = true; break; }
-        }
-      }
+      const hid = pointHidden(occluders, skip,
+        ax + (bx - ax) * m, ay + (by - ay) * m, az + (bz - az) * m);
       if (hid) lo = m; else hi = m;
     }
     return hi;
@@ -1809,7 +1830,9 @@ export class Blueprint {
     return {
       slotId: slot.id,
       partId: slot.partId,
-      panelId: night === 6 ? '6.6' : '7.last',
+      // Night Seven's errata has no printed page. The last page is Marit's, from 1962, and
+      // nothing red is ever stamped on it. BuildSystem reads `slotId`, not `panelId`.
+      panelId: night === 6 ? '6.6' : null,
       nature: pick.nature,
       note: pick.note,
       printedTransform: { yaw: (slot.yaw ?? 0) + Math.PI, mirror: pick.nature === 'reversed' },
@@ -1900,7 +1923,10 @@ export class Blueprint {
       for (const p of panels) if (p.step === 14 && p !== nine) p.step = 15;
     }
 
-    panels.forEach((p, i) => { p.index = i; });
+    panels.forEach((p, i) => {
+      p.index = i;
+      if (!/^[0-9]+\.[0-9]+$/.test(p.displayId)) p.displayId = `${n}.${i}`;
+    });
     return panels;
   }
 
@@ -1910,6 +1936,9 @@ export class Blueprint {
       dashedStep: false, authorship: o.authorship ?? 'marit', articleNo: o.articleNo ?? null,
       glyphs: o.glyphs ?? [], red: !!o.red, hero: !!o.hero, generated: !!o.generated,
       grabWarning: false, figures: [], seed: (hashStr(`${def.night}:${o.id}`) * 1e6) | 0,
+      // The number printed in the corner. Script ids like '7.errata_a' are engineering handles,
+      // not something a 1962 manual would print, so non-numeric ids get a plain sheet number.
+      displayId: /^[0-9]+\.[0-9]+$/.test(String(o.id)) ? String(o.id) : `${def.night}.${o.sheetNo ?? 0}`,
     };
     if (p.kind === 'exploded') p.figures = this._buildFigures(def, p);
     return p;
@@ -1918,21 +1947,53 @@ export class Blueprint {
   /** Exploded axonometric figures for one stage. This is the puzzle. */
   _buildFigures(def, panel) {
     const stage = panel.stage;
-    const install = def.slots.filter((s) => s.stage === stage);
-    if (!install.length) return [];
-    const context = def.slots.filter((s) => s.stage < stage).slice(-8);
+    const stageSlots = def.slots.filter((s) => s.stage === stage);
+    if (!stageSlots.length) return [];
     const partOf = (id) => def.parts.find((p) => p.id === id);
+    const mirrored = def.grammars.includes('G2') && def.night === 2;
+
+    /*
+     * A flat-pack panel draws a SUB-ASSEMBLY, not the building. Six identical piers spread over
+     * 11.6 m would put every part at 20 px and turn the page into confetti, so the figure draws
+     * two or three representatives and states the real count with a ×N call-out — which is also
+     * exactly what STORY §3.6 says the manual starts doing out loud on Night Three.
+     */
+    const groups = new Map();
+    for (const s of stageSlots) {
+      if (mirrored && s.mirror) continue;
+      const p = partOf(s.partId);
+      if (!p) continue;
+      const g = groups.get(p.type) ?? [];
+      g.push(s);
+      groups.set(p.type, g);
+    }
+    const MAX_REP = 3;
+    const install = [];
+    const counts = [];
+    for (const [type, list] of groups) {
+      const take = Math.min(MAX_REP, list.length);
+      for (let i = 0; i < take; i++) install.push(list[Math.floor(i * list.length / take)]);
+      counts.push({ type, total: list.length, shown: take });
+    }
+
+    // Context: the already-placed parts nearest the sub-assembly, so the join reads in situ.
+    let cx0 = 0, cy0 = 0, cz0 = 0;
+    for (const s of install) { cx0 += s.position.x; cy0 += s.position.y; cz0 += s.position.z; }
+    cx0 /= install.length; cy0 /= install.length; cz0 /= install.length;
+    const context = def.slots.filter((s) => s.stage < stage)
+      .sort((a, b) => (
+        Math.hypot(a.position.x - cx0, a.position.y - cy0, a.position.z - cz0)
+        - Math.hypot(b.position.x - cx0, b.position.y - cy0, b.position.z - cz0)))
+      .slice(0, 4);
 
     const instances = [];
     for (const s of context) {
       const p = partOf(s.partId);
       if (p) instances.push(makeInstance(p, s, null, { occlude: true }));
     }
-    const mirrored = def.grammars.includes('G2') && def.night === 2;
-    const installVisible = mirrored ? install.filter((s) => !s.mirror) : install;
 
     const exploded = [];
-    for (const s of installVisible) {
+    for (const s of install) {
       const p = partOf(s.partId);
       if (!p) continue;
       const nrm = s.normal ?? [0, 1, 0];
@@ -1973,25 +2034,80 @@ export class Blueprint {
       ]);
     }
 
-    // BJØRN at the figure's origin, 1.7 m in the same projection: scale reference AND viewpoint.
-    const mascot = {
-      x: projX(-FOOT.hx - 1.6, 0, FOOT.hz + 1.0, NOMINAL_SCALE),
-      y: projY(-FOOT.hx - 1.6, 0, FOOT.hz + 1.0, NOMINAL_SCALE),
+    /*
+     * BJØRN, 1.7 m in the same projection, standing on the ground at the assembly's near-left
+     * corner. He is the scale reference AND the "you are here" indicator: he always faces the
+     * −Z screen axis, so matching your own view of the plot to his is G1.
+     * He is omitted from panels of small hardware, where a 1.7 m man beside a 0.14 m hinge would
+     * shrink the hinge rather than explain it — real manuals do the same.
+     */
+    let mx = Infinity, mz = -Infinity, spanX = 0, spanY = 0;
+    for (const inst of instances) {
+      for (const s of inst.solids) {
+        for (let i = 0; i < s.verts.length / 3; i++) {
+          mx = Math.min(mx, s.verts[i * 3]);
+          mz = Math.max(mz, s.verts[i * 3 + 2]);
+        }
+      }
+    }
+    spanX = (bbox.x1 - bbox.x0) / NOMINAL_SCALE;
+    spanY = (bbox.y1 - bbox.y0) / NOMINAL_SCALE;
+    const showMascot = Math.max(spanX, spanY) >= 1.2 && isFinite(mx);
+    const mascot = showMascot ? {
+      x: projX(mx - 1.1, 0, mz + 0.7, NOMINAL_SCALE),
+      y: projY(mx - 1.1, 0, mz + 0.7, NOMINAL_SCALE),
       h: 1.7 * NOMINAL_SCALE,
-    };
-    const b = {
+    } : null;
+    const b = mascot ? {
       x0: Math.min(bbox.x0, mascot.x - 40), y0: Math.min(bbox.y0, mascot.y - mascot.h - 10),
       x1: Math.max(bbox.x1, mascot.x + 40), y1: Math.max(bbox.y1, mascot.y + 10),
-    };
+    } : { ...bbox };
 
+    /*
+     * THE LEGIBILITY INVARIANT (GAME_DESIGN §8.4). A part whose silhouette would land under
+     * 40 px at the page's fit scale does not get shrunk and it does not get dropped: it is
+     * promoted to a magnified detail call-out with a leader back to where it goes. That is what
+     * a real flat-pack sheet does with a hinge, and it is the only answer that keeps both the
+     * invariant and the assembly view.
+     */
+    const natural = { w: (b.x1 - b.x0) + 46, h: (b.y1 - b.y0) + 52 };
+    const cellW = PAGE.W - PAGE.margin * 2, cellH = PAGE.H - PAGE.margin * 2 - PAGE.footer;
+    // Assume the call-out column is present when deciding what to promote into it, so a
+    // borderline part cannot be demoted by the very column it created.
+    const fit = Math.min(1, (cellW - MIN_SILHOUETTE * 2.6) / natural.w, cellH / natural.h);
+    const insets = [];
     let minSil = Infinity;
-    for (const d of drawn) if (d.inst.isInstall) minSil = Math.min(minSil, partExtent(d));
-    if (!isFinite(minSil)) minSil = MIN_SILHOUETTE;
+    for (const d of drawn) {
+      if (!d.inst.isInstall) continue;
+      const ext = partExtent(d);
+      if (ext * fit < MIN_SILHOUETTE) {
+        const s = d.inst.slot;
+        const type = d.inst.part.type;
+        if (!insets.some((q) => q.type === type)) {
+          insets.push({
+            type,
+            count: (counts.find((q) => q.type === type)?.total) ?? 1,
+            at: [projX(s.position.x, s.position.y, s.position.z, NOMINAL_SCALE),
+              projY(s.position.x, s.position.y, s.position.z, NOMINAL_SCALE)],
+            articleNo: d.inst.part.articleNo,
+          });
+        }
+        d.inset = true;
+      } else {
+        minSil = Math.min(minSil, ext);
+      }
+    }
+    if (!isFinite(minSil)) {
+      // Every part in this stage is small hardware: the figure IS the detail. Scale to the floor.
+      minSil = MIN_SILHOUETTE / Math.max(fit, 1e-3);
+      natural.w = Math.min(cellW, natural.w);
+      natural.h = Math.min(cellH, natural.h);
+    }
 
     const fig = {
-      id: `${panel.id}-f1`, kind: 'exploded', stage, drawn, leaders, mascot, bbox: b, minSil,
-      mirrored, hiddenCount: install.filter((s) => s.hidden).length,
-      natural: { w: (b.x1 - b.x0) + 46, h: (b.y1 - b.y0) + 52 },
+      id: `${panel.id}-f1`, kind: 'exploded', stage, drawn, leaders, mascot, bbox: b, minSil, insets,
+      counts, mirrored, hiddenCount: install.filter((s) => s.hidden).length,
+      natural,
       stepNumber: panel.step, dashed: panel.dashedStep,
     };
     return [fig];
@@ -2060,11 +2176,13 @@ export class Blueprint {
   checkLegibility(n) {
     const d = (this.def && this.def.night === n) ? this.def : this.forNight(n ?? this.def?.night ?? 1);
     const fails = [];
+    const cellW = PAGE.W - PAGE.margin * 2, cellH = PAGE.H - PAGE.margin * 2 - PAGE.footer;
     for (const p of d.panels) {
       for (const f of p.figures) {
-        const scale = Math.min(1, (PAGE.W - PAGE.margin * 2) / f.natural.w, (PAGE.H - PAGE.margin * 2 - PAGE.footer) / f.natural.h);
+        const col = f.insets && f.insets.length ? MIN_SILHOUETTE * 2.6 : 0;
+        const scale = Math.min(1, (cellW - col) / f.natural.w, cellH / f.natural.h);
         const px = f.minSil * scale;
-        if (px < MIN_SILHOUETTE) fails.push({ panel: p.id, figure: f.id, px: Math.round(px) });
+        if (px < MIN_SILHOUETTE - 0.5) fails.push({ panel: p.id, figure: f.id, px: Math.round(px) });
       }
     }
     this.stats.legibilityFails = fails.length;
@@ -2187,7 +2305,7 @@ export class Blueprint {
     const y = PAGE.H - PAGE.margin - 6;
     const seed = panel.seed + 3001;
     if (panel.kind !== 'cover') {
-      drawText(c, String(panel.id).toUpperCase(), PAGE.margin, y - 13, 15,
+      drawText(c, panel.displayId, PAGE.margin, y - 13, 15,
         { hand, weight: WEIGHTS.thin, seed, color: PALETTE.inkSoft });
     }
     // VIK & SØN, corner, every page. On Night Six it is traced and the Ø leans the wrong way.
@@ -2237,12 +2355,18 @@ export class Blueprint {
   /** Draw a built exploded figure into a rect. Uniform scale, never below the legibility floor. */
   _drawFigure(c, fig, rect, env) {
     const { hand, panel } = env;
-    const sw = rect.w / fig.natural.w, sh = rect.h / fig.natural.h;
-    const s = Math.max(0.18, Math.min(sw, sh));
+    // Reserve a column for magnified detail call-outs, so the assembly view never shrinks to
+    // make room for them (GAME_DESIGN §8.4).
+    const nIns = fig.insets ? Math.min(3, fig.insets.length) : 0;
+    const col = nIns ? Math.min(rect.w * 0.34, MIN_SILHOUETTE * 2.6) : 0;
+    const inner = { x: rect.x, y: rect.y, w: Math.max(60, rect.w - col), h: rect.h };
+    const s = Math.max(0.18, Math.min(inner.w / fig.natural.w, inner.h / fig.natural.h));
+    const fcx = (fig.bbox.x0 + fig.bbox.x1) / 2, fcy = (fig.bbox.y0 + fig.bbox.y1) / 2;
+    const toPage = (fx, fy) => [inner.x + inner.w / 2 + (fx - fcx) * s, inner.y + inner.h / 2 + (fy - fcy) * s];
     c.save();
-    c.translate(rect.x + rect.w / 2, rect.y + rect.h / 2);
+    c.translate(inner.x + inner.w / 2, inner.y + inner.h / 2);
     c.scale(s, s);
-    c.translate(-(fig.bbox.x0 + fig.bbox.x1) / 2, -(fig.bbox.y0 + fig.bbox.y1) / 2);
+    c.translate(-fcx, -fcy);
     const ws = 1 / s;   // keep line weights constant on the page regardless of figure scale
 
     // Leader lines first, under everything.
@@ -2285,10 +2409,27 @@ export class Blueprint {
 
     // BJØRN: 1.7 m, in the same projection, facing the −Z screen axis. Match him and you are
     // standing where the drawing is standing. That is G1.
-    drawMascot(c, fig.mascot.x, fig.mascot.y, fig.mascot.h, {
-      hand, pose: env.night >= 6 ? 'arms-at-sides' : (env.night >= 3 ? 'standing-neutral' : 'hammer'),
-      seed: panel.seed + 800, weight: WEIGHTS.figure * ws,
-    });
+    if (fig.mascot) {
+      drawMascot(c, fig.mascot.x, fig.mascot.y, fig.mascot.h, {
+        hand, pose: env.night >= 6 ? 'arms-at-sides' : (env.night >= 3 ? 'standing-neutral' : 'hammer'),
+        seed: panel.seed + 800, weight: WEIGHTS.figure * ws,
+      });
+    }
+
+    /*
+     * The figure shows two or three of a run of identical parts; the call-out says how many
+     * there actually are. On Night Three the manual gives up on drawing them at all and this
+     * becomes the whole step: one arrow and ×6.
+     */
+    if (fig.counts) {
+      let k = 0;
+      for (const g of fig.counts) {
+        if (g.total <= g.shown || fig.insets.some((q) => q.type === g.type)) continue;
+        hardwareCallout(c, fig.bbox.x1 - 18 * ws, fig.bbox.y0 + (20 + k * 46) * ws, g.total,
+          { hand, seed: panel.seed + 840 + k, r: 18 * ws, weight: WEIGHTS.medium * ws });
+        k++;
+      }
+    }
 
     if (fig.mirrored) {
       // G2: the axis is dashed and the right half is simply not drawn.
@@ -2301,6 +2442,27 @@ export class Blueprint {
       bagIcon(c, fig.bbox.x0 + 22, fig.bbox.y0 + 6, 40 * ws, 8, { hand, seed: panel.seed + 903 });
     }
     c.restore();
+
+    /*
+     * Magnified detail call-outs, drawn in page units in their reserved column: a circle, the
+     * part at a size that clears the legibility floor, a dashed leader back to the join it
+     * belongs to, and a ×N count. No words. A real flat-pack sheet does exactly this with a
+     * hinge, and it is the only answer that keeps both the invariant and the assembly view.
+     */
+    for (let i = 0; i < nIns; i++) {
+      const ins = fig.insets[i];
+      const R = MIN_SILHOUETTE * 0.72;
+      const cx = rect.x + rect.w - col / 2;
+      const cy = rect.y + R * 1.3 + i * R * 2.6;
+      const a = toPage(ins.at[0], ins.at[1]);
+      strokePath(c, [cx - R * 0.72, cy + R * 0.72, a[0], a[1]], {
+        hand, weight: WEIGHTS.hairline, color: PALETTE.inkSoft, dash: [6, 5],
+        seed: panel.seed + 960 + i, step: 9,
+      });
+      strokePath(c, circlePts(cx, cy, R, 28), { hand, weight: WEIGHTS.medium, seed: panel.seed + 950 + i, step: 6 });
+      this._part(c, ins.type, cx, cy, R * 1.42, { hand, seed: panel.seed + 970 + i, fitH: R * 1.42 });
+      hardwareCallout(c, cx + R * 0.86, cy + R * 0.86, ins.count, { hand, seed: panel.seed + 980 + i, r: 13 });
+    }
     return s;
   }
 

@@ -694,7 +694,8 @@ export class BuildSystem {
     // --- creaks
     this.creakDebt = 0;
     this.creakRisk = 0;
-    this.lambdaSum = 0;
+    this.lambdaSum = 0;       // creaks/min after CABIN_CAP — what the cabin will actually do
+    this.lambdaRawSum = 0;    // before the cap, for diagnostics
     this._creakCursor = 0;
     this._cascadeCooldown = 0;
     this._cascadeQueue = [];
@@ -2282,7 +2283,7 @@ export class BuildSystem {
     this._drainCascade(dt);
 
     const n = this._joinList.length;
-    if (!n) { this.lambdaSum = 0; this.creakRisk = 0; return; }
+    if (!n) { this.lambdaSum = 0; this.lambdaRawSum = 0; this.creakRisk = 0; return; }
 
     const wind = this._weather.wind, rain = this._weather.rain;
     const ton = clamp01(this.ctx?.state?.timeOfNight ?? 0);
@@ -2300,11 +2301,11 @@ export class BuildSystem {
       j.lambda = this._lambdaFor(j, env);
       sum += j.lambda;
     }
-    this.lambdaSum = sum;
-
     // CABIN_CAP: when the sum exceeds 4.0/min every join is scaled down. A bad cabin is a WORSE
     // cabin, not a continuous alarm — and this is what guarantees the 3-voice creak cap holds.
     const scale = sum > TUNING.cabinCap ? TUNING.cabinCap / sum : 1;
+    this.lambdaRawSum = sum;
+    this.lambdaSum = sum * scale;      // creaks/min this cabin will ACTUALLY produce, <= 4.0
 
     let evaluated = 0;
     for (let i = 0; i < n && evaluated < TUNING.creakJoinsPerFrame; i++) {
@@ -2320,7 +2321,8 @@ export class BuildSystem {
       if (this._rand.next() < P) this._fireCreak(j, -1);
     }
 
-    this.creakRisk = clamp01(0.65 * (sum / TUNING.cabinCap) + 0.35 * (this.creakDebt / TUNING.cascadeThreshold));
+    this.creakRisk = clamp01(0.65 * (this.lambdaSum / TUNING.cabinCap)
+      + 0.35 * (this.creakDebt / TUNING.cascadeThreshold));
 
     if (this.creakDebt > TUNING.cascadeThreshold && this._cascadeCooldown <= 0) this._cascade();
   }

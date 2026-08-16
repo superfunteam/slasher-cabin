@@ -68,16 +68,32 @@ function noiseDbFor(intensity) {
   return -4;
 }
 
-/** kind → the sfx id that must accompany it (§1.3). */
+/**
+ * kind → the sfx id that must accompany it (§1.3). Covers both the kinds NoiseSystem ships
+ * (`footstep, brush, drag, drop, impact, hammer, wrench, saw, creak, whistle, voice,
+ * thunder`) and the finer-grained names from the loudness table.
+ *
+ * `null` means "audible elsewhere or deliberately silent" — never a missing sound.
+ */
 const NOISE_SFX = {
-  'footstep-crouch': 'step', 'footstep-walk': 'step', 'footstep-run': 'step', footstep: 'step',
-  drag: 'lumber.drag', 'drop-light': 'bracket.drop.rock', 'drop-heavy': 'lumber.drop',
-  'hammer-wood': 'hammer.wood', 'hammer-steel': 'hammer.steel',
+  footstep: 'step', 'footstep-crouch': 'step', 'footstep-walk': 'step', 'footstep-run': 'step',
+  brush: 'step.grass',
+  drag: 'lumber.drag',
+  drop: 'lumber.drop', 'drop-light': 'bracket.drop.rock', 'drop-heavy': 'lumber.drop',
+  impact: 'impact.earth',
+  hammer: 'hammer.wood', 'hammer-wood': 'hammer.wood', 'hammer-steel': 'hammer.steel',
+  wrench: 'screw.torque',
+  saw: 'tool.saw',
   split: 'wood.split', twig: 'twig.snap', branch: 'branch.snap',
   zipper: 'zipper', click: 'click.flashlight.on', knock: 'lumber.knock',
-  // creak is dispatched through build:creak so it carries its severity tier
-  creak: null, animal: null, voice: null, generic: null,
+  whistle: 'whistle',
+  // creak carries its tier on build:creak; thunder is scheduled by Weather's own audio:sfx;
+  // voice belongs to VoiceBank; an animal is a false positive we only ever *hear* as leaves.
+  creak: null, thunder: null, voice: null, animal: null, generic: null,
 };
+
+/** Kinds that are emitted continuously while an action lasts — do not stack them. */
+const SUSTAINED_KINDS = { drag: 1.1, wrench: 1.4, saw: 1.5 };
 
 const SURFACE_SFX = {
   pine: 'step.pine', needles: 'step.pine', forest: 'step.pine', duff: 'step.pine',
@@ -1091,8 +1107,10 @@ export class AudioEngine {
     _tmp.copy(e.position);
     const dist = _tmp.distanceTo(_lis);
 
-    // The player's own footfall already sounded through player:footstep.
-    if (this._playedRecently(resolved, e.position, 0.14, 2.5)) return;
+    // The player's own footfall already sounded through player:footstep, and a sustained
+    // action re-emits every frame — neither may double-trigger.
+    const window = SUSTAINED_KINDS[kind] ?? 0.14;
+    if (this._playedRecently(resolved, e.position, window, window > 0.5 ? 6 : 2.5)) return;
     if (dist < 1.6 && resolved.startsWith('step.')) return;
 
     const mix = this._noiseMix(e, dist);
@@ -1260,6 +1278,7 @@ export class AudioEngine {
       refDistance: 1.0,
       reverb: 0.16,
       priority: 3,
+      occ: false,          // his own boots are not behind a tree from him
     });
     this._remember(resolveId(id), e?.position);
 
@@ -1307,7 +1326,9 @@ export class AudioEngine {
     _v.copy(_lis);
     const cam = this.ctx?.camera;
     if (cam) { cam.getWorldDirection(_fwd); _v.addScaledVector(_fwd, 1.1).setY(_lis.y - 0.3); }
-    return this.play(id, { position: _v, rolloff: ROLLOFF.flat, refDistance: 1.0, volume, ...opts });
+    return this.play(id, {
+      position: _v, rolloff: ROLLOFF.flat, refDistance: 1.0, volume, occ: false, ...opts,
+    });
   }
 
   // --------------------------------------------------------------- build
@@ -1804,7 +1825,9 @@ export class AudioEngine {
       if (!dead && this._wind > 0.75 && this.rand.chance(0.10)) {
         this._listenerPosition(_lis);
         _v.set(_lis.x + this.rand.range(-14, 14), _lis.y + 6, _lis.z + this.rand.range(-14, 14));
-        this.play('wind.whistle', { position: _v, volume: dbToGain(-10), bus: 'ambience', priority: 1, reverb: 0.4 });
+        this.play('wind.whistle', {
+          position: _v, volume: dbToGain(-10), bus: 'ambience', priority: 1, reverb: 0.4, occ: false,
+        });
       }
     }
 
@@ -1890,6 +1913,7 @@ export class AudioEngine {
       this.play('cricket.chirp', {
         position: inst.pos,
         bus: 'cricket',
+        occ: false,
         volume: dbToGain(-38 + 12),
         rate: this.rand.range(0.94, 1.07),
         priority: 0,
@@ -1905,13 +1929,13 @@ export class AudioEngine {
       _v.set(_lis.x + this.rand.range(-90, 90), _lis.y + 1, _lis.z - 110);
       this.play(this.rand.chance(0.2) ? 'loon.tremolo' : 'loon.wail', {
         position: _v, bus: 'ambience', volume: dbToGain(-16), priority: 1, reverb: 0.85,
-        rolloff: ROLLOFF.landmark, family: 'wildlife',
+        rolloff: ROLLOFF.landmark, family: 'wildlife', occ: false,
       });
     } else if (this.rand.next() < 0.0009) {
       _v.set(_lis.x + this.rand.range(-20, 20), _lis.y + 9, _lis.z + this.rand.range(-20, 20));
       this.play('owl.hoot', {
         position: _v, bus: 'ambience', volume: dbToGain(-18), priority: 1, reverb: 0.5,
-        family: 'wildlife',
+        family: 'wildlife', occ: false,
       });
     }
   }

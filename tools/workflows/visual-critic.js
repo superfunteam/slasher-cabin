@@ -9,7 +9,7 @@ export const meta = {
 }
 
 const ROOT = '/Users/clark/Downloads/Source/slasher-cabin/.claude/worktrees/slasher-cabin-game-8bdb8b'
-const URL = 'http://localhost:5173'
+const URL = 'http://127.0.0.1:5173'
 
 /** Which shots to review this round, and which files own what they show. */
 const SHOTS = args?.shots ?? [

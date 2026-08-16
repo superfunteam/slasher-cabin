@@ -27,6 +27,17 @@
  *      windows. They are the reason the camp reads as people setting up for a season rather
  *      than guards on rails. Some of them come near the build plot. None of them stop on it.
  *
+ * THE CROSSING AT THE DRAW — the one thing here that is load-bearing for the whole map.
+ *   Terrain's stream is a wall in a sampled grid: every cell in the channel is water or scarp,
+ *   so the west half of the map (the plot, the ridge, the grave) is cut off from the east half
+ *   (the camp, the dock, everyone in it). Terrain publishes exactly one way across —
+ *   `logCrossing`, the fallen trunk at the draw — and a grid that samples the ground beneath it
+ *   cannot see it. `_bakeCrossings()` stamps it in. Measured: without it the walk from the camp
+ *   to the draw is 392 m around the headwaters and costs 22 365 node expansions; with it, it is
+ *   225 m along the trail Terrain carved for it, 88.5% of it on that trail, in 162 expansions.
+ *   The log is therefore a real chokepoint that every camper coming west must use, which is
+ *   worth knowing if you are writing ambushes. `addBridge()` is public for the same reason.
+ *
  * COORDINATE FRAME — read this before you place anything.
  *   STORY §4.2 is doc-canon for landmark positions and puts the build plot at the origin.
  *   `Terrain.js` as shipped generates a different, larger site: build pad at (-140, 128), camp at
@@ -86,7 +97,7 @@ export const NAV_TUNING = {
   routeExpandPerFrame: 600,    // idle budget for pre-computing route legs
   asyncMsPerFrame: 0.65,       // wall-clock guard — expansions alone do not bound the frame
   routeMsPerFrame: 0.30,
-  expandSlice: 512,            // re-check the clock this often, so the tail stays bounded
+  expandSlice: 256,            // re-check the clock this often, so the tail stays bounded
   heapCapacity: 1 << 15,
   maxPathNodes: 4096,
   smoothLookahead: 28,         // string-pull window, in nodes
@@ -578,12 +589,29 @@ export class Navmesh {
 
   // -------------------------------------------------------------------------------- grid geometry
 
+  /**
+   * `Terrain.bounds` is a THREE.Box3 (min/max Vector3) that also carries flat `minX/maxX/minZ/maxZ`
+   * aliases for the callers that predate the Box3. Read the Box3 first and the aliases second: the
+   * aliases are a compatibility shim and the day they are dropped, falling through to STORY §4.1's
+   * 448 x 384 would silently size the grid to 87% of the world Terrain generated — the ridge, the
+   * west shoreline and half the trail network would sit outside the grid, every anchor out there
+   * would fail to snap, and the routes that depend on them would quietly disable themselves.
+   */
   _resolveBounds() {
     const t = this._terrain;
-    let minX = -224, maxX = 224, minZ = -192, maxZ = 192;   // STORY §4.1, 448 x 384
-    if (t?.bounds && Number.isFinite(t.bounds.minX)) {
-      minX = t.bounds.minX; maxX = t.bounds.maxX;
-      minZ = t.bounds.minZ; maxZ = t.bounds.maxZ;
+    let minX = -224, maxX = 224, minZ = -192, maxZ = 192;   // STORY §4.1, 448 x 384 — last resort
+    const b = t?.bounds;
+    if (b?.min && b?.max && Number.isFinite(b.min.x) && Number.isFinite(b.max.x)) {
+      minX = b.min.x; maxX = b.max.x;
+      minZ = b.min.z; maxZ = b.max.z;
+    } else if (b && Number.isFinite(b.minX) && Number.isFinite(b.maxX)) {
+      minX = b.minX; maxX = b.maxX;
+      minZ = b.minZ; maxZ = b.maxZ;
+    }
+    // A degenerate or inverted box would produce a 2 x 2 grid and an AI that never leaves one cell.
+    if (!(maxX - minX > this.cell * 4) || !(maxZ - minZ > this.cell * 4)) {
+      Log.once('nav:bounds', 'Navmesh: Terrain.bounds is degenerate — using STORY §4.1 extents.');
+      minX = -224; maxX = 224; minZ = -192; maxZ = 192;
     }
     this.bounds = { minX, maxX, minZ, maxZ };
     this.cell = NAV_TUNING.cellSize;

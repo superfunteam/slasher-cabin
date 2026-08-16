@@ -266,6 +266,24 @@ have already cost real time in this repo:
 Run `node tools/check.mjs` after writing any file. It catches both of these, plus truncation
 (a file that parses but is missing the API its contract promises).
 
+## 11c. Inspecting the running game — use 127.0.0.1, never localhost
+
+The dev server is at **http://127.0.0.1:5173**. Do NOT use `http://localhost:5173`.
+
+On this machine another application is listening on the IPv6 loopback `[::1]:5173`. `localhost`
+resolves to IPv4 or IPv6 depending on the client, so `localhost:5173` reaches *a different app*
+some of the time. A verification agent screenshotted that other app and reported on it before
+noticing. `127.0.0.1` is unambiguous.
+
+Engine exposes `window.__ENGINE__` and `window.__CTX__` from its **constructor**, so both are
+reachable even when a system throws during `init()` and `boot()` never finishes — which is
+exactly when you need them.
+
+Boot takes ~8s (procedural texture baking, terrain generation). Poll
+`document.documentElement.dataset.booted` or `dataset.shotReady`; never judge a mid-boot frame.
+Other agents editing files triggers a Vite hot reload that restarts boot underneath you — if a
+probe returns nothing, poll again rather than concluding the system is broken.
+
 ## 12. Performance guardrails
 
 - No allocations in `update()`. Reuse scratch vectors (`const _v = new THREE.Vector3()` at

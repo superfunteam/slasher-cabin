@@ -36,8 +36,11 @@
  *                                   Composite is:  colour = scene * fog.a + fog.rgb
  *                                   Stable across frames — safe to grab the texture once.
  *   fog.texture            THREE.Texture | null      convenience for target.texture
- *   fog.render()                    integrate one frame into fog.target.  Postprocessing should
- *                                   call this once per frame BEFORE its composite.
+ *   fog.render()                    integrate one frame into fog.target.  Postprocessing SHOULD
+ *                                   call this once per frame immediately before it samples the
+ *                                   target — that gives same-frame depth.  It is deduped per
+ *                                   update tick, so calling it is free if we already did.  If
+ *                                   nothing external calls it, update() drives it itself.
  *   fog.resize(w, h)                CSS px; the fog buffer is derived from the drawing buffer.
  *   fog.update(dt, elapsed)         per-frame bookkeeping; also drives render() when there is no
  *                                   Postprocessing system to drive it.
@@ -56,9 +59,10 @@
  *   prepass entirely.  Give it a non-linear device-depth `THREE.DepthTexture` at the main
  *   render resolution and you save a whole scene pass.
  * - If `Postprocessing` exposes `render()`, this module assumes Postprocessing composites the
- *   target and it removes its own fullscreen quad from the scene.  If Postprocessing then fails
- *   to call `fog.render()` for 45 frames, this module falls back to compositing itself so the
- *   game is never silently fog-less.
+ *   target (`colour = scene * fog.a + fog.rgb`) and removes its own fullscreen quad from the
+ *   scene, so the fog is never applied twice.  Driving is decided separately: if nothing calls
+ *   `fog.render()`, `update()` calls it, so a Postprocessing that binds the texture but forgets
+ *   the call still gets real fog rather than an empty buffer.
  * - `Sky` may expose `moonLight` / `moon` / `light` (a DirectionalLight).  Otherwise the
  *   brightest shadow-casting DirectionalLight in the scene is used.
  * - `Flashlight.light` (SpotLight) and `Props.lights` (array of lights, or of objects with a
@@ -78,7 +82,6 @@ import { Log } from '../core/Log.js';
 const _v2 = new THREE.Vector2();
 const _v3a = new THREE.Vector3();
 const _v3b = new THREE.Vector3();
-const _v3c = new THREE.Vector3();
 const _col = new THREE.Color();
 const _colB = new THREE.Color();
 
@@ -161,8 +164,17 @@ uniform sampler2D tNoise;
 uniform sampler2D tBlue;
 uniform sampler2D tTerrain;
 uniform sampler2D tHistory;
-uniform sampler2D tMoonShadow;
-uniform sampler2D tLampShadow;
+
+// three.js binds shadow maps as comparison samplers under PCFShadowMap and as plain depth
+// textures under Basic / PCFSoft / VSM.  Sampling a comparison texture through a sampler2D is
+// undefined, so the sampler TYPE is a compile-time variant driven by renderer.shadowMap.type.
+#if SHADOW_COMPARE
+  #define SHADOWMAP_T sampler2DShadow
+#else
+  #define SHADOWMAP_T sampler2D
+#endif
+uniform SHADOWMAP_T tMoonShadow;
+uniform SHADOWMAP_T tLampShadow;
 
 uniform mat4  uInvProj;
 uniform mat4  uCamWorld;
@@ -226,18 +238,23 @@ float phaseHG(float c, float g) {
   return ((1.0 - g2) / max(pow(max(d, 1e-4), 1.5), 1e-4)) * 0.88 + 0.12;
 }
 
-// One unfiltered tap against a three.js shadow map.  The maps are plain depth textures with
-// compareFunction disabled under PCFSoftShadowMap, so a straight fetch is legal.
-float shadowTap(sampler2D smap, mat4 mtx, vec3 p, float bias) {
+// One tap against a three.js shadow map.  Under SHADOW_COMPARE the hardware does the compare
+// (and, with the linear filter three sets, a free 2x2 PCF).
+float shadowTap(SHADOWMAP_T smap, mat4 mtx, vec3 p, float bias) {
   vec4 sc = mtx * vec4(p, 1.0);
   if (sc.w <= 0.0) return 1.0;
   vec3 s = sc.xyz / sc.w;
   if (s.x < 0.002 || s.x > 0.998 || s.y < 0.002 || s.y > 0.998) return 1.0;
   if (s.z <= 0.0 || s.z >= 1.0) return 1.0;
+#if SHADOW_COMPARE
+  float ref = s.z - bias * (1.0 - 2.0 * uRevDepth);
+  return texture2D(smap, vec3(s.xy, ref));
+#else
   float d = texture2D(smap, s.xy).x;
   float fwd = step(s.z - bias, d);
   float rev = step(d, s.z + bias);
   return mix(fwd, rev, uRevDepth);
+#endif
 }
 
 // R = mist floor height (terrain, flattened to the waterline over water)
@@ -520,14 +537,17 @@ export class VolumetricFog {
     this._rw = 1; this._rh = 1;
 
     this._frame = 0;
-    this._renderedFrame = -1;
+    /** Monotonic per-update tick; render() dedupes against it so a double drive is free. */
+    this._tick = 0;
+    this._renderTick = -1;
+    /** Ticks since something OUTSIDE update() called render().  Large => we drive ourselves. */
+    this._extDriveAge = 999;
     this._ownsDepth = true;
     this._blitScene = null;
     this._terrCenterPending = null;
     this._cand = [];
     this._time = 0;
     this._standalone = true;
-    this._extAge = 0;
     this._inUpdate = false;
     this._disposed = false;
     this._ready = false;
@@ -550,6 +570,9 @@ export class VolumetricFog {
     this._blueOwned = false;
     this._terrainTex = null;
     this._whiteTex = null;
+    /** 4x4 depth target cleared to far, bound whenever a light has no usable shadow map. */
+    this._shadowFallbackRT = null;
+    this._shadowCompare = -1;
 
     // terrain window bake
     this._terrData = null;
@@ -616,10 +639,11 @@ export class VolumetricFog {
       this.bus.on('settings:changed', this._onSettings);
     }
 
-    // Decide who composites.  If Postprocessing exists with a render(), assume it drives us.
+    // Decide who composites.  Driving is decided per tick in update().
     const post = ctx.systems?.get?.('Postprocessing');
     this._standalone = !(post && typeof post.render === 'function');
-    this._extAge = this._standalone ? 999 : 0;
+    this._extDriveAge = 999;
+    this.stats.standalone = this._standalone;
     this._syncComposite();
 
     this._ready = true;
@@ -635,22 +659,29 @@ export class VolumetricFog {
 
     this._time = Number.isFinite(elapsed) ? elapsed : this._time + (dt || 0);
     const step = Math.min(Math.max(dt || 0, 0), 0.1);
+    this._tick++;
+    this._extDriveAge++;
 
-    // who composites?
+    // WHO COMPOSITES is a separate question from WHO DRIVES.
+    //   composite: Postprocessing owns the frame whenever it has a render(); otherwise us.
+    //   drive:     whoever calls render() first this tick.  If nothing external has called it
+    //              for a few ticks we drive it ourselves, so the target is never stale — a
+    //              Postprocessing that binds our texture but forgets to call render() still
+    //              gets real fog instead of an empty buffer.
     const post = this.ctx.systems?.get?.('Postprocessing');
-    const postDrives = !!(post && !post.__failed && typeof post.render === 'function');
-    this._extAge++;
-    const wantStandalone = !(postDrives && this._extAge < 45);
+    const postComposites = !!(post && !post.__failed && typeof post.render === 'function');
+    const wantStandalone = !postComposites;
     if (wantStandalone !== this._standalone) {
       this._standalone = wantStandalone;
       this._syncComposite();
-      Log.debug(`VolumetricFog: composite mode -> ${wantStandalone ? 'standalone' : 'external'}`);
+      Log.debug(`VolumetricFog: composite -> ${wantStandalone ? 'standalone' : 'Postprocessing'}`);
     }
+    this.stats.standalone = this._standalone;
 
     this._tickWeather(step);
     this._tickTerrain(step);
 
-    if (this._standalone) this.render();
+    if (this._extDriveAge > 2) this.render();
 
     this._inUpdate = false;
     this.stats.cpuMs = performance.now() - t0;
@@ -663,9 +694,12 @@ export class VolumetricFog {
    */
   render() {
     if (this._disposed || !this._ready) return;
-    if (!this._inUpdate) this._extAge = 0;
+    if (!this._inUpdate) this._extDriveAge = 0;
     if (!this.enabled) return;
-    if (this._renderedFrame === this._frame && this._frame !== 0) return;
+    // Our own self-drive stands down if something external already integrated this tick.  An
+    // external call is never blocked (the engine can render while paused, when _tick is frozen).
+    if (this._inUpdate && this._renderTick === this._tick) return;
+    this._renderTick = this._tick;
 
     const ctx = this.ctx;
     const renderer = ctx.renderer;
@@ -696,7 +730,6 @@ export class VolumetricFog {
       renderer.setRenderTarget(prevRT);
       renderer.autoClear = prevAutoClear;
 
-      this._renderedFrame = this._frame;
       this._frame++;
       this._captureHistoryMatrices();
     } catch (e) {
@@ -801,6 +834,7 @@ export class VolumetricFog {
     kill(this.target); this.target = null;
     kill(this._history); this._history = null;
     kill(this._depthRT); this._depthRT = null;
+    kill(this._shadowFallbackRT); this._shadowFallbackRT = null;
 
     this._quadGeo?.dispose?.(); this._quadGeo = null;
     this._marchMat?.dispose?.(); this._marchMat = null;
@@ -1116,7 +1150,7 @@ export class VolumetricFog {
 
     this._marchMat = new THREE.ShaderMaterial({
       name: 'VolumetricFog.march',
-      defines: { STEPS: this._steps, LOCALS: n },
+      defines: { STEPS: this._steps, LOCALS: n, SHADOW_COMPARE: 0 },
       uniforms: u,
       vertexShader: FULLSCREEN_VERT,
       fragmentShader: MARCH_FRAG,
@@ -1517,6 +1551,7 @@ export class VolumetricFog {
     // ---- lights
     this._lightScanAge++;
     if (this._lightScanAge > 20) { this._findMoon(); this._lightScanAge = 0; }
+    this._syncShadowMode();
     this._updateMoon(u, g);
     this._updateLantern(u);
     this._updateLocals(u);
@@ -1550,6 +1585,57 @@ export class VolumetricFog {
     this._prevViewProj.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse);
     this._prevCamPos.setFromMatrixPosition(camera.matrixWorld);
     camera.getWorldDirection(this._prevCamDir);
+  }
+
+  /**
+   * Keep the sampler variant in step with whatever shadow-map type the renderer is using.
+   * Another module may change `renderer.shadowMap.type` at any time; a mismatch here is a
+   * silently black shadow term, not a crash, so it is checked every frame (it is two reads).
+   */
+  _syncShadowMode() {
+    const renderer = this.ctx.renderer;
+    if (!renderer || !this._marchMat) return;
+
+    let compare = renderer.shadowMap?.type === THREE.PCFShadowMap ? 1 : 0;
+    const probe = this._moon?.shadow?.map?.depthTexture
+      ?? this.ctx.systems?.get?.('Flashlight')?.light?.shadow?.map?.depthTexture ?? null;
+    if (probe) compare = probe.compareFunction ? 1 : 0;
+
+    if (compare === this._shadowCompare) return;
+    this._shadowCompare = compare;
+    this._marchMat.defines.SHADOW_COMPARE = compare;
+    this._marchMat.needsUpdate = true;
+
+    // Rebuild the "no shadow map" stand-in so its sampler type matches the variant.
+    if (this._shadowFallbackRT) {
+      this._shadowFallbackRT.depthTexture?.dispose?.();
+      this._shadowFallbackRT.dispose();
+    }
+    const rt = new THREE.WebGLRenderTarget(4, 4, {
+      depthBuffer: true, stencilBuffer: false, generateMipmaps: false,
+    });
+    rt.depthTexture = new THREE.DepthTexture(4, 4, THREE.UnsignedIntType);
+    rt.depthTexture.format = THREE.DepthFormat;
+    rt.depthTexture.compareFunction = compare ? THREE.LessEqualCompare : null;
+    rt.depthTexture.minFilter = THREE.NearestFilter;
+    rt.depthTexture.magFilter = THREE.NearestFilter;
+    rt.texture.name = 'VolumetricFog.shadowFallback';
+    this._shadowFallbackRT = rt;
+
+    // Clear it to the far plane so every tap reads as "lit".
+    try {
+      const prev = renderer.getRenderTarget();
+      renderer.setRenderTarget(rt);
+      renderer.clear(true, true, false);
+      renderer.setRenderTarget(prev);
+    } catch { /* a cleared-on-first-use target is still valid */ }
+
+    Log.debug(`VolumetricFog: shadow sampler variant -> ${compare ? 'compare' : 'depth'}`);
+  }
+
+  /** The stand-in bound whenever a light has no usable map. */
+  get _noShadow() {
+    return this._shadowFallbackRT ? this._shadowFallbackRT.depthTexture : this._whiteTex;
   }
 
   _findMoon() {
@@ -1588,15 +1674,15 @@ export class VolumetricFog {
       u.uMoonColor.value.set(moon.color.r * s, moon.color.g * s, moon.color.b * s);
 
       const sm = moon.shadow;
-      const map = sm && sm.map;
-      const dtex = map && map.depthTexture;
-      const usable = !!(moon.castShadow && dtex && !dtex.compareFunction);
+      const dtex = sm && sm.map && sm.map.depthTexture;
+      const usable = !!(moon.castShadow && dtex
+        && (!!dtex.compareFunction) === (this._shadowCompare === 1));
       if (usable) {
         u.tMoonShadow.value = dtex;
         u.uMoonShadowMat.value.copy(sm.matrix);
         u.uMoonShadowCfg.value.set(1, Math.abs(sm.bias || 0) + 0.0009);
       } else {
-        u.tMoonShadow.value = this._whiteTex;
+        u.tMoonShadow.value = this._noShadow;
         u.uMoonShadowCfg.value.set(0, 0.001);
       }
     } else {
@@ -1604,7 +1690,7 @@ export class VolumetricFog {
       const md = g?.uMoonDir?.value;
       if (md && Number.isFinite(md.x)) u.uMoonDir.value.copy(md);
       u.uMoonColor.value.set(0, 0, 0);
-      u.tMoonShadow.value = this._whiteTex;
+      u.tMoonShadow.value = this._noShadow;
       u.uMoonShadowCfg.value.set(0, 0.001);
     }
   }
@@ -1634,21 +1720,21 @@ export class VolumetricFog {
       u.uLampCone.value.set(cosOuter, Math.max(cosInner, cosOuter + 1e-4), range, 0);
 
       const sm = light.shadow;
-      const map = sm && sm.map;
-      const dtex = map && map.depthTexture;
-      const usable = !!(light.castShadow && dtex && !dtex.compareFunction);
+      const dtex = sm && sm.map && sm.map.depthTexture;
+      const usable = !!(light.castShadow && dtex
+        && (!!dtex.compareFunction) === (this._shadowCompare === 1));
       if (usable) {
         u.tLampShadow.value = dtex;
         u.uLampShadowMat.value.copy(sm.matrix);
         u.uLampShadowCfg.value.set(1, Math.abs(sm.bias || 0) + 0.0016);
       } else {
-        u.tLampShadow.value = this._whiteTex;
+        u.tLampShadow.value = this._noShadow;
         u.uLampShadowCfg.value.set(0, 0.002);
       }
     } else {
       u.uLampColor.value.set(0, 0, 0);
       u.uLampCone.value.set(1, 1, 0, 0);
-      u.tLampShadow.value = this._whiteTex;
+      u.tLampShadow.value = this._noShadow;
       u.uLampShadowCfg.value.set(0, 0.002);
     }
   }

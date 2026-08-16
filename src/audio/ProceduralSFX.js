@@ -1777,6 +1777,112 @@ function buildUiDeny(R, dest) {
   ], dest, T0);
 }
 
+function buildDrip(R, dest) {
+  // One droplet off a wet needle. The rising pitch is what makes it read as water.
+  const f0 = 1100 * R.rand.range(0.6, 1.9);
+  const o = R.ctx.createOscillator();
+  o.type = 'sine';
+  o.frequency.setValueAtTime(fclamp(R, f0), T0);
+  o.frequency.exponentialRampToValueAtTime(fclamp(R, f0 * 1.2), T0 + 0.009);
+  const g = gain(R, 0);
+  o.connect(g); g.connect(dest);
+  g.gain.setValueAtTime(0, T0);
+  g.gain.linearRampToValueAtTime(1, T0 + 0.0015);
+  g.gain.exponentialRampToValueAtTime(MIN_GAIN, T0 + 0.05);
+  g.gain.setValueAtTime(0, T0 + 0.052);
+  o.start(T0); o.stop(T0 + 0.07);
+  pingGrain(R, dest, T0, { f: 3600 * R.rand.range(0.8, 1.3), Q: 3, dur: 0.001, decay: 0.006, level: 0.3 });
+}
+
+function buildImpactEarth(R, dest) {
+  // Something heavy meeting wet ground. Almost no top: dirt does not ring.
+  const lp = biquad(R, 'lowpass', 260, 1.1);
+  lp.frequency.setValueAtTime(320, T0);
+  lp.frequency.exponentialRampToValueAtTime(120, T0 + 0.08);
+  const g = gain(R, 0);
+  burst(R, T0, 0.09, 1, 'brown').connect(lp);
+  lp.connect(g); g.connect(dest);
+  g.gain.setValueAtTime(0, T0);
+  g.gain.linearRampToValueAtTime(1, T0 + 0.004);
+  g.gain.exponentialRampToValueAtTime(MIN_GAIN, T0 + 0.09);
+  g.gain.setValueAtTime(0, T0 + 0.092);
+  tone(R, dest, T0, 0.12, 78, 52, dbToGain(-8), { attack: 0.003 });
+  // A little grit thrown clear.
+  const grit = gain(R, dbToGain(-18)); grit.connect(dest);
+  grainTrain(R, {
+    t0: T0 + 0.01, dur: 0.12, rate: 90, jitter: 1.0, max: 12,
+    spawn: (t) => pingGrain(R, grit, t, { f: 1800 * R.rand.range(0.6, 1.8), Q: 4, dur: 0.003, decay: 0.014, level: 0.6 }),
+  });
+}
+
+function buildSaw(R, dest) {
+  // A handsaw in pine: push, pull, push. The tooth train reverses direction and the blade
+  // rings a little at the end of each stroke. Radius 90 m — this is a decision, not a noise.
+  const strokes = 3;
+  const out = gain(R, 1); out.connect(dest);
+  const body = gain(R, dbToGain(-10)); body.connect(dest);
+  let t = T0;
+  for (let i = 0; i < strokes; i++) {
+    const dur = R.rand.range(0.34, 0.46);
+    const push = i % 2 === 0;
+    const bp = biquad(R, 'bandpass', push ? 1800 : 1400, 1.6);
+    bp.frequency.setValueAtTime(push ? 1500 : 2100, t);
+    bp.frequency.linearRampToValueAtTime(push ? 2400 : 1200, t + dur);
+    const g = gain(R, 0);
+    bp.connect(g); g.connect(out);
+    g.gain.setValueAtTime(0, t);
+    g.gain.linearRampToValueAtTime(0.7, t + 0.05);
+    g.gain.setValueAtTime(0.7, t + dur * 0.75);
+    g.gain.exponentialRampToValueAtTime(MIN_GAIN, t + dur);
+    g.gain.setValueAtTime(0, t + dur + 0.001);
+    // The teeth.
+    grainTrain(R, {
+      t0: t, dur, rate: 190, rateEnd: 150, jitter: 0.35, max: 90,
+      spawn: (tt) => pingGrain(R, bp, tt, {
+        f: 2600 * R.rand.range(0.8, 1.25), Q: 7, dur: 0.0015, decay: 0.008, level: 0.8,
+      }),
+    });
+    // The kerf: the plank itself, excited continuously.
+    modal(R, burst(R, t, 0.0015, 0.5, 'white'), SAWN_WOOD, body, t, { qScale: 0.7, decayScale: 0.5 });
+    t += dur + R.rand.range(0.05, 0.11);
+  }
+}
+
+function buildWhistleHuman(R, dest) {
+  // A person whistling for someone across the camp. Two notes, breathy, unhurried.
+  const notes = [[0, 0.42, 1180, 1180], [0.5, 0.55, 1560, 1420]];
+  for (const [dt, dur, fa, fb] of notes) {
+    const t = T0 + dt;
+    const o = R.ctx.createOscillator();
+    o.type = 'sine';
+    o.frequency.setValueAtTime(fclamp(R, fa * R.rand.range(0.98, 1.02)), t);
+    o.frequency.exponentialRampToValueAtTime(fclamp(R, fb), t + dur);
+    const vib = R.ctx.createOscillator();
+    vib.type = 'sine';
+    vib.frequency.value = 5.5;
+    const vd = gain(R, fa * 0.006);
+    vib.connect(vd); vd.connect(o.frequency);
+    vib.start(t); vib.stop(t + dur + 0.02);
+    const g = gain(R, 0);
+    o.connect(g); g.connect(dest);
+    g.gain.setValueAtTime(0, t);
+    g.gain.linearRampToValueAtTime(0.5, t + 0.06);
+    g.gain.setValueAtTime(0.5, t + dur * 0.8);
+    g.gain.exponentialRampToValueAtTime(MIN_GAIN, t + dur);
+    g.gain.setValueAtTime(0, t + dur + 0.001);
+    o.start(t); o.stop(t + dur + 0.03);
+    // The air that does not become tone.
+    const bp = biquad(R, 'bandpass', fa * 1.02, 2.5);
+    const bg = gain(R, 0);
+    noiseSrc(R, 'pink', t, dur).connect(bp);
+    bp.connect(bg); bg.connect(dest);
+    bg.gain.setValueAtTime(0, t);
+    bg.gain.linearRampToValueAtTime(dbToGain(-22), t + 0.06);
+    bg.gain.exponentialRampToValueAtTime(MIN_GAIN, t + dur);
+    bg.gain.setValueAtTime(0, t + dur + 0.001);
+  }
+}
+
 // ================================================================ THE RECIPE REGISTRY
 //
 // phase 0 = rendered during init() and awaited (the sounds a player can trigger in the
@@ -1911,6 +2017,12 @@ export const RECIPES = creakRecipes(breathRecipes({
   'owl.hoot': { dur: 1.9, v: 2, family: 'wildlife', priority: 1, peakDb: -12, phase: 1, build: buildOwlHoot },
   'dawn.bird': { dur: 0.9, v: 2, family: 'wildlife', priority: 1, peakDb: -14, phase: 1, build: buildDawnBird },
 
+  // ---- ids other systems emit by name
+  'drip': { dur: 0.18, v: 4, family: 'world', priority: 0, peakDb: -26, phase: 1, build: buildDrip },
+  'impact.earth': { dur: 0.3, v: 3, family: 'world', priority: 2, peakDb: -14, phase: 1, build: buildImpactEarth },
+  'tool.saw': { dur: 1.9, v: 3, family: 'build', priority: 2, peakDb: -12, phase: 1, build: buildSaw },
+  'whistle': { dur: 1.3, v: 2, family: 'camper', priority: 2, peakDb: -12, phase: 1, build: buildWhistleHuman },
+
   // ---- the body
   'heart.thump': { dur: 0.2, v: 2, family: 'body', priority: 3, peakDb: -6, half: true, phase: 0, build: buildHeartThump },
 
@@ -1936,6 +2048,11 @@ export const ALIASES = {
   'thunder': 'thunder.mid', 'rain': 'rain.leaves', 'wind': 'wind.pines',
   'twig': 'twig.snap', 'branch': 'branch.snap',
   'ui.confirm': 'ui.chime', 'ui.error': 'ui.deny', 'ui.turn': 'ui.page',
+  // ids other systems emit by name (BuildSystem, Physics, Weather, Script)
+  'hardware_chime': 'ui.chime', 'join_seat': 'screw.seat', 'join_split': 'wood.split',
+  'creak_groan': 'creak.t3.s1', 'creak_tick': 'creak.t1.s1',
+  'impact_wood': 'lumber.knock', 'impact_earth': 'impact.earth', 'crate_settle': 'lumber.drop',
+  'saw': 'tool.saw', 'brush': 'step.grass', 'wrench': 'screw.torque',
   'build.complete': 'ui.chime', 'tool.missing': 'ui.deny',
 };
 

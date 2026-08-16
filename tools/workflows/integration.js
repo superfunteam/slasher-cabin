@@ -9,7 +9,7 @@ export const meta = {
 }
 
 const ROOT = '/Users/clark/Downloads/Source/slasher-cabin/.claude/worktrees/slasher-cabin-game-8bdb8b'
-const URL = 'http://localhost:5173'
+const URL = 'http://127.0.0.1:5173'
 
 const BOOT = `
 HOW TO INSPECT THE RUNNING GAME (the dev server is already up at ${URL}):

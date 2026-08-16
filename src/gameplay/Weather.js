@@ -297,7 +297,7 @@ void main() {
 
   float nearFade = smoothstep(0.30, 1.10, dist);
   float fogFade = exp(-dist * uFogD0 * 0.85);
-  float a = alive * edge * nearFade * fogFade * mix(0.78, 0.44, shell);
+  float a = alive * edge * nearFade * fogFade * mix(0.56, 0.30, shell);
 
   #ifndef DRIP
     a *= smoothstep(0.02, 0.22, uRain);
@@ -312,7 +312,7 @@ void main() {
   // ART §5.4: a streak inside a light cone is lit at 2.2x ambient rain brightness. The ambient
   // term has to be high enough that the 2.2x actually reads as the classic image and not as a
   // slightly less invisible drop.
-  vLit = 0.52 + 0.52 * uMoon + 2.20 * cone * uLanternParams.z + 2.60 * uLightning;
+  vLit = 0.44 + 0.44 * uMoon + 2.20 * cone * uLanternParams.z + 2.60 * uLightning;
 
   vAlpha = a;
   if (a < 0.002) {
@@ -552,6 +552,18 @@ export class Weather {
     }
 
     this._resolveGlobalUniforms();
+    if (!this._gu) {
+      // Materials.js may exist as a module while failing to register as a system. The uniform
+      // block is module-scope there, so the world can still be driven.
+      try {
+        const m = await import('../render/Materials.js');
+        const gu = m?.Materials?.globalUniforms ?? null;
+        if (gu?.uRain) {
+          this._gu = gu;
+          Log.debug('Weather: driving Materials.globalUniforms directly (no Materials system).');
+        }
+      } catch { /* no Materials at all — rain still renders, the world just will not react */ }
+    }
     this.setNight(this.ctx?.state?.night ?? 1);
 
     try { this._buildRain(); } catch (e) { Log.warn('Weather: rain build failed, running without particles.', e); }
@@ -1599,7 +1611,7 @@ export class Weather {
     const tier = this.ctx?.settings?.tier?.bind(this.ctx.settings)
       ?? ((a, b, c, d) => d);
 
-    const streakCount = tier(700, 1600, 3000, 4800);
+    const streakCount = tier(1200, 2600, 4600, 7000);
     const rippleCount = tier(24, 48, 96, 160);
     const dripCount = tier(12, 24, 40, 56);
 
@@ -1618,7 +1630,7 @@ export class Weather {
       uRain: new THREE.Uniform(0),
       uShutter: new THREE.Uniform(0.030),
       uPxWidth: new THREE.Uniform(0.0022),
-      uShellSize: new THREE.Uniform(new THREE.Vector2(16, 62)),
+      uShellSize: new THREE.Uniform(new THREE.Vector2(11, 48)),
       uFallSpeed: new THREE.Uniform(9.0),
       uLightning: new THREE.Uniform(0),
       uMoon: new THREE.Uniform(0.35),
@@ -1649,9 +1661,11 @@ export class Weather {
       off[i * 3 + 0] = r.next();
       off[i * 3 + 1] = r.next();
       off[i * 3 + 2] = r.next();
-      // 62% of the drops live in the near 16 m box: ~50x the volumetric density of the far
-      // shell, for a third of the instances. That is the whole trick.
-      const shell = i < streakCount * 0.62 ? 0 : 1;
+      // 72% of the drops live in the near 11 m box: ~130x the volumetric density of the far
+      // shell, for a quarter of the instances. That is the whole trick — rain reads because
+      // it is dense in the two metres you can actually resolve, not because there is a lot
+      // of it at forty.
+      const shell = i < streakCount * 0.72 ? 0 : 1;
       par[i * 4 + 0] = shell;
       par[i * 4 + 1] = r.range(0.7, 1.5) * (shell ? 1.5 : 1.0);
       par[i * 4 + 2] = r.range(0.7, 1.4) * (shell ? 1.8 : 1.0);

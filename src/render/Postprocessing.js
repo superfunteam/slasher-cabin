@@ -496,6 +496,12 @@ void main() {
   // --- volumetrics. Contract with VolumetricFog: rgb = in-scattered radiance (pre-multiplied),
   // a = transmittance. The fallback texture is (0,0,0,1) so this is a no-op when fog is absent.
   vec4 fog = texture2D( tFog, vUv );
+  // Degenerate-buffer guard. A live fog buffer only drives transmittance toward 0 while its
+  // in-scatter rises, so a texel that is zero in BOTH carries no information -- it is a cleared
+  // or never-written target (a fog shader that failed to compile, a resize mid-frame). Without
+  // this the multiply annihilates the entire frame to black. Treat it as 'no fog' instead.
+  float fogValid = step( 1e-5, fog.a + fog.r + fog.g + fog.b );
+  fog = mix( vec4( 0.0, 0.0, 0.0, 1.0 ), fog, fogValid );
   col = col * fog.a + fog.rgb;
 
   gl_FragColor = vec4( col, 1.0 );
@@ -1476,11 +1482,14 @@ export class Postprocessing {
   }
 
   _mkMaterial(name, frag, uniforms, defines) {
-    const mat = new THREE.ShaderMaterial({
+    // Note: an explicit `defines: undefined` makes ShaderMaterial warn, so only pass the key
+    // when there is something in it.
+    const params = {
       name, uniforms, vertexShader: VERT, fragmentShader: frag,
-      defines: defines ? { ...defines } : undefined,
       depthTest: false, depthWrite: false, blending: THREE.NoBlending,
-    });
+    };
+    if (defines) params.defines = { ...defines };
+    const mat = new THREE.ShaderMaterial(params);
     this._materials.push(mat);
     return mat;
   }
@@ -1921,10 +1930,13 @@ export class Postprocessing {
         1.0,
       );
 
-      // Chromatic aberration: static lens property, +18% for the 60 ms of a lightning flash.
+      // Chromatic aberration: a static property of a 21 mm lens, +18% for the 60 ms of a
+      // lightning flash (§12.5). Held at a constant ~1.4 px of R/B separation at the corner and
+      // literally 0 px across the middle 40% of the frame, at ANY resolution — a UV-constant
+      // strength would double the fringing on a 1440p screen.
       const caOn = (this._settings?.get?.('chromaticAberration') ?? true) ? 1 : 0;
       u.uLens.value.set(
-        0.0016 * caOn * (1 + 0.18 * (this._flash ?? 0)),
+        0.00073 * (1080 / Math.max(360, this._ph)) * caOn * (1 + 0.18 * (this._flash ?? 0)),
         this._panic * 0.020,
         this._panic,
         this._flash ?? 0,
