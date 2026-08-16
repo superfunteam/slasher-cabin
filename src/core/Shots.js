@@ -128,6 +128,9 @@ export class Shots {
     this.ready = new Promise((resolve) => { this._resolveReady = resolve; });
     globalThis.__SHOT_READY__ = this.ready;
     globalThis.__SHOTS__ = SHOTS;
+    // Bound here so a reviewer can call it from the console without reaching through ctx.
+    globalThis.__CAPTURE__ = (name, w, h) => this.capture(name, w, h);
+    globalThis.__CAPTURE_ALL__ = (w, h) => this.captureAll(w, h);
   }
 
   async init() {
