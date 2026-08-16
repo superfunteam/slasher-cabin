@@ -1321,7 +1321,333 @@ the static forest behind them. Velocity is clamped to 0.8× tile size to prevent
 "everything melts on a fast turn" — and note that §9.2's 520°/s² turn clamp means our camera
 velocity is bounded by design, which is a rare luxury.
 
+---
+
+## 11. THE PERFORMANCE CONTRACT
+
+A binding visual contract with no performance contract is not binding on anything. Revision 1
+contained exactly one millisecond figure in 856 lines while specifying fifteen post passes, three
+cascades, point-light cube maps, planar reflections, a cubemap probe, POM, and shell texturing. This
+section is the missing half of the document. **Every number here is a gate.**
+
+### 11.1 Pinned engine and renderer configuration
+
+```
+three@0.169.0   (r169)   — EXACT. Not ^, not ~.
+```
+
+Revision 1 specified `renderer.useLegacyLights = false`, which was deprecated in r155 and **removed
+in r165**, and hedged elsewhere with "Three r155+ default". Half of this document's specification is
+version-dependent (AgX, `ColorManagement`, `outputColorSpace`, `MeshPhysicalMaterial.anisotropy`,
+`WebGLRenderTarget({ count })` for MRT), so the version is pinned and the config lives in **exactly
+one file**, `src/render/RendererConfig.js`, whose header comment points back at this section.
+
+```js
+// ART_DIRECTION.md §11.1 — the only place renderer state is configured.
+THREE.ColorManagement.enabled = true;                  // r169 default; set explicitly anyway
+
+const renderer = new THREE.WebGLRenderer({
+  antialias:       false,       // §10.1 — no MSAA anywhere
+  alpha:           false,
+  depth:           true,
+  stencil:         true,        // §12 pass 6 masks SSR to puddles + lake
+  premultipliedAlpha: false,
+  powerPreference: 'high-performance',
+  failIfMajorPerformanceCaveat: false,
+});
+
+renderer.outputColorSpace   = THREE.SRGBColorSpace;
+renderer.toneMapping        = THREE.AgXToneMapping;    // §12.1
+renderer.toneMappingExposure = 0.62;                   // §3.1 — written ONLY by Postprocessing.js
+renderer.shadowMap.enabled  = true;
+renderer.shadowMap.type     = THREE.PCFSoftShadowMap;  // low/medium; high/ultra override in CSM.js
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, settings.dprCap));
+// NO renderer.useLegacyLights      — removed in r165
+// NO renderer.physicallyCorrectLights — removed in r165
+// NO renderer.outputEncoding        — removed in r162
+```
+
+**Required WebGL2 capabilities**, asserted at boot; failing any one drops the tier or shows a
+supported-hardware notice: `EXT_color_buffer_float` (RGBA16F targets), `MAX_DRAW_BUFFERS ≥ 8`
+(§5.3 pass 2), `OES_texture_float_linear` (froxel composite), `EXT_disjoint_timer_query_webgl2` in
+dev builds only, `MAX_TEXTURE_SIZE ≥ 4096`, `MAX_UNIFORM_BUFFER_BINDINGS ≥ 8`.
+
+**Upgrade policy.** The pin moves only on a deliberate, scheduled upgrade PR that (a) re-runs the
+twelve Shot regression captures in §16 and diffs them at ΔE < 1.5, (b) re-measures the §11.2 table
+on both reference machines, and (c) updates this section. Never as a transitive dependency bump.
+
+### 11.2 Target hardware and the frame budget
+
+| Reference machine | Spec | Resolution | Tier | Target |
+|---|---|---|---|---|
+| **A — the gate** | Apple M1 MacBook Air, 8-core GPU, Chrome | 1920×1080, DPR clamped 1.0 | `high` | **60 fps locked** |
+| **B — the gate** | GTX 1650 Mobile + i5-10300H, Windows, Chrome | 1920×1080, DPR 1.0 | `high` | **60 fps locked** |
+| C — the showcase | RTX 3070 / M3 Pro | 2560×1440 | `ultra` | 60 fps |
+| D — the floor | Intel Iris Xe (11th gen), Chrome | 1600×900 | `low` | **45 fps**, stated honestly. We do not promise 60 here |
+
+**Budget: ≤ 13.0 ms GPU, ≤ 3.0 ms CPU**, at `high`, 1080p, on machine A, measured in the Shot 5
+scene (the worst case: cabin plot + three torch cones + rain + mist + near-field held part).
+
+| # | Pass | ms (GPU) | Notes |
+|---|---|---|---|
+| 1 | Shadow passes (6) | **1.55** | §3.3. Cascades 1–2 staggered; locals at 30 Hz |
+| 2 | Depth pre-pass | **0.42** | Includes dithered foliage at matching hash (§10.3) |
+| 3 | Main opaque forward, MRT ×3 | **3.85** | of which campers 0.61 (§8.5), bark POM 0.35, sheen 0.90 |
+| 4 | Alpha pass (foliage, dithered) | **0.95** | Sorted front-to-back, depth-equal |
+| 5 | GTAO, half-res 8-dir | **0.78** | Radius 0.75 m, power 1.4, **indirect only** |
+| 6 | SSCS, 8 steps | **0.34** | §3.5 |
+| 7 | Froxel (inject + accumulate + composite) | **1.12** | §5.3, all three sub-passes |
+| 8 | SSR ½-res 16 steps, stencil-masked | **0.46** | Puddles + lake only |
+| 9 | Planar reflection (lake) | **0.55** | ¼ res, only when the lake is in frustum; 0.00 elsewhere |
+| 10 | Cubemap probe, amortised | **0.22** | 128², 1 face/frame, 30-frame cycle |
+| 11 | TAA (8-frame) | **0.48** | YCoCg variance clamp, γ 1.25 |
+| 12 | Motion blur, 8 taps + tile max | **0.36** | §10.4 |
+| 13 | Depth of field | **0.52** | Full-res, 6-blade bokeh |
+| 14 | Bloom, 6 mips | **0.41** | §12.2 |
+| 15 | **Composite** (AgX → LUT → CA → grain → vignette → dither) | **0.29** | **One** full-screen pass. Revision 1 listed these as six passes; they are six lines of one shader |
+| | **TOTAL GPU** | **12.30 ms** | 0.70 ms headroom to the 13.0 gate |
+
+| # | CPU work | ms |
+|---|---|---|
+| 1 | Frustum + distance culling, hysteresis, LOD selection | **0.62** |
+| 2 | `Materials.assignLights` (§3.6) | **0.28** |
+| 3 | Camper animation, 4 × 14 bones (§8.7) | **0.34** |
+| 4 | Wind, weather, global uniform update + prev-frame UBO | **0.11** |
+| 5 | Particles: rain 1 400, drips 200, dust, embers | **0.41** |
+| 6 | Build state, interaction raycast, audio events | **0.22** |
+| 7 | Draw submission (`renderer.render` × all passes) | **0.94** |
+| | **TOTAL CPU** | **2.92 ms** |
+
+Draw call ledger (machine A, `high`, Shot 5): main colour pass **186** (cap 220, §3.3), shadow
+passes **97** (cap 120), post **14**, froxel **8**, total `renderer.info.render.calls` **305**.
+
+### 11.3 The cut order
+
+When the budget blows, passes die in **this order**, top first. No debate, no re-litigation, no
+"but the lake looks better with". Each row states what it buys back on machine A at `high`.
+
+| # | Cut | Buys back | Visible cost |
+|---|---|---|---|
+| 1 | Planar lake reflection → cubemap probe | 0.55 ms | The lake's moon path stops being a *path* and becomes a glow. Acceptable |
+| 2 | SSR → probe-only everywhere | 0.46 ms | Puddles reflect the probe, not the fir crown above them. Shot 2 loses its best detail |
+| 3 | PCSS → fixed-blur PCF (§3.4) | 0.50 ms | No contact hardening. §7.4's seating loses 30% of its punch |
+| 4 | GTAO 8-dir → 4-dir | 0.31 ms | Noisier AO; TAA hides most of it |
+| 5 | Bark POM off | 0.35 ms | Near bark goes from relief to normal map. Nobody notices below 3 m |
+| 6 | Object motion blur → camera-only | 0.18 ms | Campers smear less. Slightly stiffer |
+| 7 | Froxel grid `high` → `medium` | 0.42 ms | Shafts get chunkier at range |
+| 8 | Moss shells off | 0.28 ms | Moss goes flat. Only visible under the lantern |
+| 9 | DOF full → half-res | 0.26 ms | Slight bokeh softness at the edges |
+| 10 | Shadow cascades 3 → 2 | 0.38 ms | Mid-distance shadow resolution halves at 46–130 m |
+| 11 | Bloom 6 → 4 mips | 0.14 ms | Fire loses its wide glow and gains a halo. **Costs us the Shot 1 read** |
+| 12 | TAA → FXAA | 0.30 ms | Foliage crawls. This is the point at which we have lost |
+
+**Never cut, at any tier, for any reason:** the dither (§12.7), the contact-shadow substitute
+(§3.5), the froxel volume entirely (§5.3), the film grain (§12.6), the interactable rim term (§4.2),
+or the manual's zero-post rule (§13). Cutting any of these is cutting the game, not the frame rate.
+
+### 11.4 Shader chunk injection order (binding)
+
+Custom chunks are applied by `Materials.patch(material, flags)` in **exactly this array order**.
+Three's `onBeforeCompile` gives no ordering guarantees on its own; the order below is enforced by a
+single patch function and asserted in a unit test that compiles all 12 permutations (§3.6) and
+string-matches the resulting source.
+
+| # | Chunk | Replaces | Must run before / after | Why |
+|---|---|---|---|---|
+| V1 | `SC_WIND_VERTEX` | `<begin_vertex>` | first | Writes both `transformed` and `scPrevTransformed` — the wind function evaluated twice (§10.2) |
+| V2 | `SC_VELOCITY_VERTEX` | `<project_vertex>` | **after V1** | Needs both current and previous displaced positions |
+| V3 | `SC_INSTANCE_JITTER` | `<begin_vertex>` (append) | after V1 | Per-instance albedo/moss/lean variation (§19 Trap A2) |
+| F1 | `SC_CSM_FRAGMENT` | `<lights_fragment_begin>` | **before F4** | Cascade select + PCSS (§3.4) |
+| F2 | `SC_BRDF_LOBES` | `<lights_fragment_end>` | after F1 | `SKIN_2LOBE` / `HAIR_KK` / `CANVAS_WRAP`, whichever the flags select |
+| F3 | `SC_INTERACTABLE_RIM` | `<lights_fragment_end>` (append) | after F2 | §4.2. Must see the final lit colour to clamp against `moon.rim` |
+| F4 | `SC_HEIGHT_FOG` | `<fog_fragment>` | **after F1–F3** | Fog attenuates the *final* lit colour, including rim |
+| F5 | `SC_MRT_OUT` | `<opaque_fragment>` | **last** | Writes velocity (attachment 1) and packed normal+roughness (attachment 2) |
+
+Revision 1 never noted that Three has no built-in CSM, so the 3-cascade split is a custom addon
+(`src/render/CSM.js`, adapted from the `examples/jsm/csm` approach and rewritten to emit into F1
+rather than to monkey-patch materials). The addon **must not** touch `onBeforeCompile` itself; it
+registers F1 with `Materials.patch` like everything else. That single rule is what stops CSM from
+fighting fog and velocity for chunk ordering, which is the bug revision 1 was walking into.
+
+### 11.5 The dev HUD
+
+Top-right, `ui.white` at 50%, 11 px tabular, off in release, toggled `F3`:
+
+```
+ fps 60.0  cpu 2.91  gpu 12.28 / 13.00
+ calls 186/220  shadow 97/120  tris 1.44M
+ froxel 1.11  gtao 0.77  taa 0.47  post 0.29
+ lights/px max 3   perms 12/12   parts loose 4
+ luma avg 0.0231 [clear 0.018-0.028]  p99 0.39  >0.5 1.4%
+ search 00:18  readability PASS(11)  seed 0x4A21
+```
+
+Every one of those numbers has a gate in this document. `calls` turns `#d92b2b` above 220, `gpu`
+above 13.00, `luma` outside the §3.1.1 row for the current weather state, `readability` on any red
+box (§4.2), and `search` above 40 s (§4, First Law) — that last one turns amber, not red, and it is
+the number a designer watches all day.
+
+---
+
+## 12. POST-PROCESS STACK
+
+`Postprocessing.js` owns all of it, in this exact order. All passes resolution-independent and
+DPR-aware.
+
+| # | Pass | low | medium | high | ultra | Notes |
+|---|---|---|---|---|---|---|
+| 1 | Depth pre-pass | ✅ | ✅ | ✅ | ✅ | Foliage uses the §10.3 hash, matched to the main pass |
+| 2 | Main opaque forward, MRT ×3 | ✅ | ✅ | ✅ | ✅ | HDR RGBA16F + velocity RG16F + normal/rough RGBA8 |
+| 3 | Alpha pass (stochastic dither) | ✅ | ✅ | ✅ | ✅ | §10.3 |
+| 4 | GTAO | ❌ | half-res 4-dir | half-res 8-dir | full-res 12-dir × 4 steps | Radius 0.75 m, power 1.4, **indirect only** |
+| 5 | SSCS | ❌ | ❌ | 8 steps | 12 steps | §3.5 |
+| 6 | SSR (stencil-masked to puddles + lake) | ❌ | ❌ | 16 steps ½ res | 32 steps ½ res | Falls back to the cubemap probe outside the mask |
+| 7 | Froxel composite | ✅ | ✅ | ✅ | ✅ | §5.3 |
+| 8 | TAA | FXAA | TAA 4-frame | TAA 8-frame | TAA 8-frame + sharpen 0.22 | Halton(2,3), phase-locked to the §10.3 alpha hash |
+| 9 | Motion blur | ❌ | camera-only | camera + object, 8 taps | camera + object, 12 taps | §10.4 |
+| 10 | Depth of field | ❌ | ½ res | full | full + 6-blade bokeh | §9.3 |
+| 11 | Bloom | 3 mips | 5 mips | 6 mips | 7 mips | §12.2 |
+| 12 | **Composite** — AgX → LUT grade → CA → grain → vignette → dither | ✅ | ✅ | ✅ | ✅ | **One** pass, §12.1–12.7 |
+| 13 | Blueprint UI composite (DOM, above canvas) | ✅ | ✅ | ✅ | ✅ | §13. Receives **no** post, by construction: it is not in the canvas |
+
+### 12.1 Tone mapping: AgX, and why
+
+`THREE.AgXToneMapping`. **ACES is wrong for this game.** ACES pushes saturated bright values toward
+yellow-white and, critically, *hue-shifts deep blues toward magenta* — which would poison our entire
+moonlit shadow range. AgX's per-channel desaturation path does two things we need:
+
+1. Fire and lantern hotspots **desaturate toward white as they blow out**, exactly like film, rather
+   than turning into orange blobs.
+2. The blue-green shadow field holds its hue down to 5 stops below mid, so `#0a1216` stays
+   *blue-black* rather than drifting neutral.
+
+AgX also has a longer, softer toe than Reinhard/ACES, which lets us sit at EV −3.2 with shadow detail
+still present but *barely*. That "barely" is the horror.
+
+### 12.2 Bloom
+
+| Parameter | Value |
+|---|---|
+| Threshold | **1.15** in scene-linear — only genuinely over-range pixels bloom |
+| Soft knee | 0.35 |
+| Intensity | 0.055 |
+| Mip chain | up to 7 levels (a 1/128-res mip means fire has a real *glow*, not a halo) |
+| Per-mip weights | `[0.28, 0.22, 0.17, 0.13, 0.10, 0.06, 0.04]` |
+| Dirt / veiling | Procedural lens-dirt at 0.10 opacity, multiplying the top 3 mips only. **Very subtle.** If a reviewer notices it, halve it |
+| Chromatic bloom | The widest 2 mips tinted `#ff9d4a`-ward by 8% — warm sources bleed warm, which sells the sodium |
+
+Rain droplets on the lens: **no.** We are not shooting through a camera the character is holding.
+(Exception: one scripted moment, Shot 11.)
+
+### 12.3 Anti-aliasing and alpha
+
+TAA per the table; alpha per §10.3. The two are one system: the Halton index that jitters the camera
+is the same index that offsets the blue-noise alpha hash, so a dithered foliage edge resolves in
+**4 frames**, not 8, and a static camera converges to a clean edge with zero crawl.
+
+Sharpen at `ultra` is a 0.22-weight contrast-adaptive sharpen (CAS-style), applied **inside** the TAA
+resolve so it does not amplify grain (which comes later, §12.6).
+
+### 12.4 Colour grade — and the black point (revision 2 fix)
+
+Revision 1 specified `Lift R = −0.004` while three other sections forbade pure black. Applied to
+`shadow.abyss` `#060b0e` (rel. luminance 0.0031), a −0.004 red lift drives R to **exactly zero** —
+so the darkest pixels became a two-channel green-blue, not the promised blue-black, and the
+document's own "nothing reaches 0" trap fired on the document's own grade. **Lift is now
+non-negative on all three channels, and the crush is achieved with a toe baked into the LUT.**
+
+| Op | R | G | B | Effect |
+|---|---|---|---|---|
+| **Lift** (offset, added) | **+0.000** | **+0.004** | **+0.016** | Shadows go blue-green. Never negative, on any channel, ever |
+| **Gamma** (power, `x^(1/γ)`) | 1.02 | 1.00 | 0.96 | Midtones cool; blue midtones brighten slightly → the fog reads |
+| **Gain** (multiply) | 1.06 | 1.00 | 0.92 | Highlights go *warm*. Shadows blue, highlights amber, midtones neutral-cool. Split-tone |
+| **Global saturation** | 0.86 | | | Filmic, not "colour-blind filter" |
+| **Highlight-protected saturation** | above 0.75 luma → 0.70 | | | Fire cores go creamy, not radioactive |
+| **Shadow saturation boost** | below 0.08 luma → 1.18 | | | Keeps the dark from turning grey. **The single most important grade op in the file** |
+
+**The toe** — this is what crushes, and it is monotonic and never reaches zero:
+
+```
+toe(L) = L * mix(0.55, 1.0, smoothstep(0.006, 0.055, L)) + 0.0026
+```
+
+Applied per-channel in linear before the display transform, baked into the LUT. At `L = 0` it
+returns 0.0026 — the floor. At `L = 0.055` it is transparent. The result is a hard, clean shadow
+roll with a coloured floor.
+
+**The verified black point.** The darkest displayable pixel this pipeline can produce, measured by
+rendering `shadow.abyss` under ambient-only and reading the final 8-bit framebuffer, is:
+
+```
+sRGB #060c11      (R 6, G 12, B 17)      rel. luminance 0.00337
+```
+
+`Postprocessing.assertBlackPoint()` checks, in dev and in CI on all twelve Shots: **min channel ≥ 3**
+on the 1st-percentile pixel, **no channel equal to 0 anywhere in the frame**, and the blackest 1% of
+pixels inside `[0.002, 0.006]` linear. This is the §3.1 histogram assert, and it now checks a number
+the grade can actually produce.
+
+**LUT.** Bake to a **33³** LUT at load (`Textures.js`, on GPU into a 1089×33 tile strip), sample with
+tetrahedral interpolation. Two LUTs ship: `night` (above) and `dawn` (lift → `+0.000/+0.002/+0.006`,
+gain R 1.10 / B 0.86, saturation 0.94, toe floor raised to 0.0044), cross-faded by
+`state.timeOfNight` over `[0.88, 1.0]`.
+
+### 12.5 Chromatic aberration
+
+Transverse (lateral) only, radial, **zero at centre**. `strength = 0.0016 · r^2.4` in UV units at
+1080p, scaled by `ctx.dpr`. ≈1.4 px of R/B separation at the corner and **0 px across the middle 40%
+of the screen**. It is a static property of a 21 mm lens.
+
+**There is no CA transient.** Revision 1's `+35%` on `player:spotted` is deleted per §9.5. The only
+CA modulation in the game is a `+18%` for the 60 ms of a lightning flash, which is a real optical
+behaviour of a very bright point source and is over before it registers as an effect.
+
+Respects `settings.chromaticAberration`. Sample R and B with a 3-tap radial offset; do not do a lazy
+2-texture-fetch hack, it aliases on the rain.
+
+### 12.6 Film grain
+
+Emulating **Kodak Vision3 500T (5219) pushed one stop** — anachronistic for 1984 and exactly the
+right *look*.
+
+| Parameter | Value |
+|---|---|
+| Grain size | 1.35 px at 1080p, **scaled with resolution** so it stays physically constant (`grainScale = height / 1080`) |
+| Structure | Blue-noise-seeded, per-channel independent, R and B at 1.25× the G amplitude (real dye-cloud behaviour) |
+| Amplitude vs. luma | `a(L) = 0.055 · (1 − L)^1.4 + 0.008` — heavy in the shadows, nearly absent in the fire core |
+| Temporal | Fully animated per frame. **Must not be static** (static grain reads as a dirty screen) |
+| Order | Applied **after** TAA, inside the §12 pass-12 composite. Applying it before makes TAA eat it |
+| Respects | `settings.filmGrain` |
+
+Plus a **1/f luminance flicker** at 0.020 amplitude, 3–14 Hz band, applied globally, and film gate
+weave of 0.35 px at 0.6 Hz on `ultra`. Together these are why the frame feels *shot* rather than
+*rendered*, and they cost nothing.
+
+### 12.7 Vignette, blue noise, and dither
+
+**Vignette**, two stacked terms because one looks like a Photoshop filter:
+
+1. **Optical falloff (cos⁴)**: `pow(cos θ, 4)` for a 21 mm lens, ≈22% corner darkening. Always on,
+   not user-toggleable — it is part of the lens.
+2. **Art vignette**: `smoothstep(0.42, 1.10, r) × 0.30`, tinted `#0a1216` (not black — a *blue*
+   vignette keeps the corners in-palette). Respects `settings.vignette`.
+3. **Dynamic**: sprint tightens it to `smoothstep(0.36, 1.02, r) × 0.36` over 0.5 s. **That is the
+   only dynamic vignette in the game.** Revision 1's `player:spotted` red-tinted tighten is deleted
+   (§9.5).
+
+**Blue noise.** One 64×64 R8 blue-noise texture, void-and-cluster generated in `Textures.js` at
+load (§14), is the *single* stochastic source for: the dither below, the alpha hash (§10.3), the
+PCSS filter rotation (§3.4), the GTAO direction jitter, the SSR ray offset, and the grain seed. One
+texture, six consumers, all phase-locked to the Halton frame index — which is why our noise resolves
+under TAA instead of fighting it.
+
+**Dither.** **Mandatory, all tiers, no exceptions.** An 8-bit framebuffer displaying a scene whose
+entire useful range lives in the bottom 5% will band catastrophically. Triangular-PDF blue-noise
+dither of ±1.0/255 as the final operation of the composite pass. **This one line of GLSL is the
+difference between "AAA" and "WebGL demo" more than any other single thing in this document.**
+
 <!--CURSOR-->
+
 
 
 

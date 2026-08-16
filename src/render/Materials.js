@@ -536,8 +536,14 @@ roughnessFactor = mix(roughnessFactor, 0.02, scPuddle);
 roughnessFactor = clamp(roughnessFactor, 0.015, 1.0);
 `;
 
-/** Appended to <metalnessmap_fragment>. */
+/** Replaces <metalnessmap_fragment> (uv-scaled sampling, then corrosion). */
 const GLSL_METALNESS = /* glsl */`
+float metalnessFactor = metalness;
+
+#ifdef USE_METALNESSMAP
+  metalnessFactor *= texture2D(metalnessMap, vScUv).b;
+#endif
+
 #ifdef SC_RUST
   // corrosion eats the conductor: metalness 1.0 -> 0.15
   metalnessFactor = mix(metalnessFactor, 0.15, scRust);
@@ -1120,6 +1126,7 @@ function foliageCardCanvas(size, kind, seed) {
  */
 const SPECS = {
   'bark-pine': {
+    texKey: 'bark-pine',
     color: PAL.barkDry, roughness: 0.88, metalness: 0.0, normalScale: 1.6,
     porosity: 0.95, wetScale: 1.0, family: 'bark', uv: [1.0, 2.2],
     detail: [18, 0.85], breakup: [0.34, 26], ao: 0.85,
@@ -1129,6 +1136,7 @@ const SPECS = {
     physical: true,
   },
   'bark-birch': {
+    texKey: 'bark-birch',
     color: PAL.barkBirch, roughness: 0.62, metalness: 0.0, normalScale: 0.9,
     porosity: 0.80, wetScale: 0.9, family: 'bark', uv: [1.0, 1.6],
     detail: [22, 0.55], breakup: [0.26, 30], ao: 0.70,
@@ -1139,6 +1147,7 @@ const SPECS = {
     physical: true,
   },
   'foliage-pine': {
+    texKey: 'pine-needles',
     color: PAL.foliageWet, roughness: 0.42, metalness: 0.0, normalScale: 0.7,
     porosity: 0.9, wetScale: 1.0, family: 'organic', uv: [1, 1],
     detail: [14, 0.45], breakup: [0.30, 22], ao: 0.6,
@@ -1151,6 +1160,7 @@ const SPECS = {
     physical: true, depthVariant: true,
   },
   'foliage-fern': {
+    texKey: 'pine-needles',
     color: PAL.fern, roughness: 0.35, metalness: 0.0, normalScale: 0.8,
     porosity: 0.9, wetScale: 1.0, family: 'organic', uv: [1, 1],
     detail: [12, 0.40], breakup: [0.32, 18], ao: 0.55,
@@ -1164,6 +1174,7 @@ const SPECS = {
     physical: true, depthVariant: true,
   },
   'ground-needles': {
+    texKey: 'pine-needles',
     color: PAL.foliageDead, roughness: 0.62, metalness: 0.0, normalScale: 1.2,
     porosity: 1.0, wetScale: 0.92, family: 'ground', uv: [1, 1],
     detail: [14, 0.50], detailFade: [3.0, 18.0], breakup: [0.45, 34], ao: 0.95,
@@ -1171,6 +1182,7 @@ const SPECS = {
     triplanar: [0.42, 5.0, 0.85, 0.34],
   },
   'ground-mud': {
+    texKey: 'wet-earth',
     color: PAL.mudDeep, roughness: 0.16, metalness: 0.0, normalScale: 1.8,
     porosity: 1.0, wetScale: 1.25, family: 'ground', uv: [1, 1],
     detail: [16, 0.55], detailFade: [3.0, 16.0], breakup: [0.40, 28], ao: 1.0,
@@ -1178,6 +1190,7 @@ const SPECS = {
     triplanar: [0.55, 6.0, 1.05, 0.40],
   },
   'ground-moss': {
+    texKey: 'moss',
     color: PAL.moss, roughness: 0.72, metalness: 0.0, normalScale: 0.5,
     porosity: 0.85, wetScale: 1.05, family: 'organic', uv: [1, 1],
     detail: [18, 0.45], detailFade: [3.0, 16.0], breakup: [0.42, 24], ao: 0.9,
@@ -1187,6 +1200,7 @@ const SPECS = {
     sheen: [0.30, 0.55, PAL.moonRim], physical: true,
   },
   granite: {
+    texKey: 'granite',
     color: PAL.midStone, roughness: 0.55, metalness: 0.0, normalScale: 1.1,
     porosity: 0.55, wetScale: 1.0, family: 'stone', uv: [1, 1],
     // the sparkle survives at 20 m because the detail normal becomes roughness, not mush
@@ -1195,6 +1209,7 @@ const SPECS = {
     triplanar: [0.34, 6.0, 0.90, 0.42],
   },
   'sawn-lumber': {
+    texKey: 'sawn-lumber',
     // THE brightest large surface in the game. Do not weather it. ART §5.3.
     color: PAL.lumber, roughness: 0.68, metalness: 0.0, normalScale: 1.0,
     porosity: 1.0, wetScale: 0.85, family: 'wood', uv: [0.5, 2.0],
@@ -1204,6 +1219,7 @@ const SPECS = {
     physical: true,
   },
   'weathered-wood': {
+    texKey: 'weathered-wood',
     color: PAL.weathered, roughness: 0.82, metalness: 0.0, normalScale: 1.4,
     porosity: 1.0, wetScale: 1.0, family: 'wood', uv: [0.5, 2.0],
     detail: [22, 0.80], breakup: [0.30, 16], ao: 0.9,
@@ -1212,6 +1228,7 @@ const SPECS = {
     physical: true,
   },
   'galvanized-steel': {
+    texKey: 'galvanized',
     color: PAL.steelGalv, roughness: 0.34, metalness: 1.0, normalScale: 0.6,
     porosity: 0.05, wetScale: 0.9, family: 'metal', uv: [2, 2],
     detail: [28, 0.35], breakup: [0.10, 8], ao: 0.55,
@@ -1220,6 +1237,7 @@ const SPECS = {
     spangle: [9.0, 0.26, 0.14],
   },
   'rusted-steel': {
+    texKey: 'rusted-steel',
     color: PAL.steelGalv, roughness: 0.42, metalness: 1.0, normalScale: 1.5,
     porosity: 0.30, wetScale: 1.0, family: 'metal', uv: [2, 2],
     detail: [26, 0.75], breakup: [0.16, 6], ao: 0.85,
@@ -1227,6 +1245,7 @@ const SPECS = {
     rust: [7.0, 0.55, 0.42, 0.36], rustColor: PAL.rust,
   },
   canvas: {
+    texKey: 'canvas-tent',
     color: PAL.canvas, roughness: 0.86, metalness: 0.0, normalScale: 1.1,
     porosity: 0.90, wetScale: 1.0, family: 'fabric', uv: [3, 3],
     detail: [20, 0.65], breakup: [0.20, 10], ao: 0.7,
@@ -1237,6 +1256,7 @@ const SPECS = {
     sheen: [0.45, 0.60, 0xb8b49a], physical: true,
   },
   'corrugated-tin': {
+    texKey: 'corrugated-tin',
     color: PAL.tin, roughness: 0.44, metalness: 1.0, normalScale: 0.8,
     porosity: 0.05, wetScale: 1.1, family: 'metal', uv: [1.5, 1.5],
     detail: [24, 0.42], breakup: [0.14, 9], ao: 0.6,
@@ -1244,6 +1264,7 @@ const SPECS = {
     // rain runs in the valleys: heavy puddle response in the cavities
   },
   concrete: {
+    texKey: 'concrete',
     color: PAL.concrete, roughness: 0.88, metalness: 0.0, normalScale: 1.2,
     porosity: 0.80, wetScale: 1.0, family: 'stone', uv: [1, 1],
     detail: [18, 0.55], detailFade: [4.0, 20.0], breakup: [0.26, 20], ao: 0.9,
@@ -1251,6 +1272,7 @@ const SPECS = {
     triplanar: [0.55, 5.0, 0.80, 0.34],
   },
   'glass-dirty': {
+    texKey: 'concrete',   // grime film only; the glass itself is the material
     color: 0x141b1f, roughness: 0.18, metalness: 0.0, normalScale: 0.35,
     porosity: 0.02, wetScale: 1.2, family: 'stone', uv: [1.5, 1.5],
     detail: [18, 0.18], breakup: [0.35, 4], ao: 0.35,
@@ -1259,6 +1281,7 @@ const SPECS = {
     physical: true, ior: 1.52, specularIntensity: 1.0,
   },
   'water-lake': {
+    texKey: null,        // the surface is entirely shader-driven (SC_WATER)
     color: PAL.waterBody, roughness: 0.02, metalness: 0.0, normalScale: 1.0,
     porosity: 0.0, wetScale: 0.0, family: 'stone', uv: [1, 1],
     detail: [1, 0], breakup: [0.0, 30], ao: 0.0,
@@ -1267,6 +1290,7 @@ const SPECS = {
     noCavity: true, noMaps: true,
   },
   'skin-wet': {
+    texKey: null,        // no baked set; the local flesh bakery covers it
     color: PAL.skinWet, roughness: 0.36, metalness: 0.0, normalScale: 0.4,
     porosity: 0.35, wetScale: 0.85, family: 'flesh', uv: [1, 1],
     detail: [24, 0.30], breakup: [0.12, 3], ao: 0.6,
@@ -1276,6 +1300,7 @@ const SPECS = {
     specularIntensity: 0.72,
   },
   blood: {
+    texKey: null,
     color: PAL.bloodFresh, roughness: 0.10, metalness: 0.0, normalScale: 0.9,
     porosity: 0.10, wetScale: 0.45, family: 'flesh', uv: [2, 2],
     detail: [20, 0.28], breakup: [0.14, 2], ao: 0.5,
@@ -1285,12 +1310,14 @@ const SPECS = {
     physical: true, ior: 1.36, specularIntensity: 1.0,
   },
   'blood-dry': {
+    texKey: 'wet-earth',
     color: PAL.bloodDry, roughness: 0.74, metalness: 0.0, normalScale: 1.2,
     porosity: 0.75, wetScale: 0.7, family: 'ground', uv: [3, 3],
     detail: [22, 0.65], breakup: [0.22, 3], ao: 0.85,
     cavity: { contrast: 1.9, bias: 0.05 },
   },
   'tarp-plastic': {
+    texKey: 'canvas-tent',
     color: PAL.tarp, roughness: 0.28, metalness: 0.0, normalScale: 1.3,
     porosity: 0.06, wetScale: 1.35, family: 'fabric', uv: [1.5, 1.5],
     detail: [16, 0.55], breakup: [0.16, 8], ao: 0.8,
@@ -1300,6 +1327,7 @@ const SPECS = {
     translucent: [0.45, 0.30, 3.0, 0.35], transColor: 0x3d5b68,
   },
   rope: {
+    texKey: 'canvas-tent',
     color: PAL.rope, roughness: 0.90, metalness: 0.0, normalScale: 1.2,
     porosity: 0.95, wetScale: 1.0, family: 'fabric', uv: [1, 8],
     detail: [26, 0.85], breakup: [0.18, 4], ao: 0.9,
@@ -1790,6 +1818,7 @@ export class Materials {
         material.normalScale = new THREE.Vector2(spec.normalScale ?? 1, spec.normalScale ?? 1);
       }
       if (set.rough) material.roughnessMap = set.rough;
+      if (set.metal && (spec.metalness ?? 0) > 0) material.metalnessMap = set.metal;
     }
 
     if (usePhysical) {
@@ -1808,6 +1837,7 @@ export class Materials {
 
     const rec = {
       name, spec, material,
+      tile: set.tile,
       uniforms: this._makeLocalUniforms(spec),
       textures: {
         cavity: spec.noCavity ? null : (set.cavity ?? null),
@@ -1818,6 +1848,18 @@ export class Materials {
         triRough: set.rough ?? null,
       },
     };
+
+    // Textures.js authors each set for a physical tile size in metres. When it supplies one,
+    // it wins: uv scale becomes repeats-per-metre. GEOMETRY UVS SHOULD THEREFORE BE IN METRES.
+    // The spec's own `uv` is only the scale for the local fallback bakery.
+    // (Cards are the exception: a needle/frond card maps ONCE across its quad, never tiled.)
+    if (!spec.card && Number.isFinite(set.tile) && set.tile > 0.001) {
+      const s = 1 / set.tile;
+      rec.uniforms.uScUv.value.set(s, s, 0, 0);
+    }
+    if (Number.isFinite(set.cavityChannel)) {
+      rec.uniforms.uCavityParams.value.z = set.cavityChannel;
+    }
 
     this._applyPatch(rec);
     return rec;
@@ -1861,8 +1903,10 @@ export class Materials {
       local.uTriRough = new THREE.Uniform(textures.triRough ?? textures.triNormal);
       // NB the triplanar normal strength is authored directly — it is NOT multiplied by
       // spec.normalScale, which would double-count and turn wet ground into specular noise.
+      const triScale = (Number.isFinite(rec.tile) && rec.tile > 0.001)
+        ? 1 / rec.tile : spec.triplanar[0];
       local.uTriParams = new THREE.Uniform(new THREE.Vector4(
-        spec.triplanar[0], spec.triplanar[1], spec.triplanar[2], spec.triplanar[3],
+        triScale, spec.triplanar[1], spec.triplanar[2], spec.triplanar[3],
       ));
     }
 
@@ -1894,8 +1938,7 @@ export class Materials {
         `#include <clipping_planes_fragment>\n${GLSL_PREPARE}`, 'fragment');
       f = patchSrc(f, '#include <map_fragment>', GLSL_MAP, 'fragment');
       f = patchSrc(f, '#include <roughnessmap_fragment>', GLSL_ROUGHNESS, 'fragment');
-      f = patchSrc(f, '#include <metalnessmap_fragment>',
-        `#include <metalnessmap_fragment>\n${GLSL_METALNESS}`, 'fragment');
+      f = patchSrc(f, '#include <metalnessmap_fragment>', GLSL_METALNESS, 'fragment');
       f = patchSrc(f, '#include <normal_fragment_maps>', GLSL_NORMAL, 'fragment');
       f = patchSrc(f, '#include <lights_physical_fragment>',
         `#include <lights_physical_fragment>\n${GLSL_WET_SPEC}`, 'fragment');
@@ -1974,25 +2017,42 @@ uniform sampler2D uAlphaMap;
 
   /** Ask Textures first; fall back to the local bakery. Never throws. */
   async _resolveTextures(name, spec) {
-    const out = { map: null, normal: null, rough: null, cavity: null, alpha: null };
+    const out = {
+      map: null, normal: null, rough: null, metal: null, cavity: null, alpha: null,
+      cavityChannel: 0, tile: null,
+    };
 
-    if (this._textures) {
-      const size = this.ctx.settings?.tier
-        ? this.ctx.settings.tier(256, 512, 1024, 2048)
-        : 1024;
-      const got = await this._callTextures(name, { size, seed: hashStr(name) * 1e9 | 0, family: spec.family });
-      if (got) {
-        out.map = pickTex(got, ['map', 'albedo', 'diffuse', 'color', 'baseColor']);
-        out.normal = pickTex(got, ['normalMap', 'normal', 'nrm']);
-        out.rough = pickTex(got, ['roughnessMap', 'roughness', 'rough', 'orm', 'arm']);
-        out.cavity = pickTex(got, ['aoMap', 'ao', 'cavityMap', 'cavity', 'heightMap', 'height', 'displacementMap']);
-        out.alpha = pickTex(got, ['alphaMap', 'alpha', 'opacityMap']);
+    const texKey = spec.texKey ?? name;
+    if (this._textures && texKey) {
+      // Textures.get() logs and returns a flat grey fallback set for unknown names, so we
+      // only ask for sets it actually bakes — otherwise our own bakery would never run.
+      const known = typeof this._textures.has === 'function' ? this._textures.has(texKey) : true;
+      if (known) {
+        const got = await this._callTextures(texKey, undefined);
+        if (got) {
+          out.map = pickTex(got, ['map', 'albedo', 'diffuse', 'color', 'baseColor']);
+          out.normal = pickTex(got, ['normalMap', 'normal', 'nrm']);
+          out.rough = pickTex(got, ['roughnessMap', 'roughness', 'rough', 'ormMap', 'orm']);
+          out.metal = pickTex(got, ['metalnessMap', 'metalness', 'ormMap', 'orm']);
+          out.alpha = pickTex(got, ['alphaMap', 'alpha', 'opacityMap']);
+          // Height (for puddle pooling) is packed into the normal map's alpha when the
+          // bakery says so; otherwise the ORM's R channel is ambient occlusion.
+          if (got.heightInNormalAlpha && out.normal) {
+            out.cavity = out.normal;
+            out.cavityChannel = 3;
+          } else {
+            out.cavity = pickTex(got, ['aoMap', 'ao', 'ormMap', 'cavityMap', 'cavity', 'heightMap', 'displacementMap']);
+            out.cavityChannel = 0;
+          }
+          // `tile` is the physical size in metres the tile was authored for.
+          if (Number.isFinite(got.tile) && got.tile > 0.001) out.tile = got.tile;
+        }
       }
     }
 
     // ---- fill the gaps locally
     const fam = spec.family ?? 'stone';
-    if (!out.map || !out.normal || !out.rough || !out.cavity) {
+    if (!spec.noMaps && (!out.map || !out.normal || !out.rough || !out.cavity)) {
       const fb = this._getFallbackSet(fam);
       if (fb) {
         out.map = out.map ?? fb.map;
@@ -2013,7 +2073,12 @@ uniform sampler2D uAlphaMap;
       }
     }
 
-    for (const k in out) if (out[k]) this._configureTexture(out[k]);
+    // NB we only touch textures WE baked. Textures.js hands out shared, render-target-backed
+    // textures; setting needsUpdate or wrap on those would force a bogus re-upload.
+    for (const k of ['map', 'normal', 'rough', 'metal', 'cavity', 'alpha']) {
+      const t = out[k];
+      if (t && this._ownedTextures.has(t)) this._configureTexture(t);
+    }
     return out;
   }
 
@@ -2099,10 +2164,15 @@ uniform sampler2D uAlphaMap;
   }
 
   async _resolveDetailNormal() {
-    for (const key of ['detail-normal', 'detailNormal', 'detail', 'micro-normal']) {
-      const got = await this._callTextures(key, { size: 512, kind: 'detail-normal' });
+    // Textures exposes it as a getter; fall back to asking for the set by name.
+    try {
+      const dn = this._textures?.detailNormal;
+      if (dn && dn.isTexture) return dn;
+    } catch { /* getter threw — try the set */ }
+    if (this._textures && (typeof this._textures.has !== 'function' || this._textures.has('detail-normal'))) {
+      const got = await this._callTextures('detail-normal', undefined);
       const t = got && pickTex(got, ['normalMap', 'normal', 'map']);
-      if (t) { this._configureTexture(t); return t; }
+      if (t) return t;
     }
     try {
       const size = this.ctx.settings?.tier ? this.ctx.settings.tier(128, 192, 256, 256) : 256;

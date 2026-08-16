@@ -1074,3 +1074,322 @@ The other end is held up by a canoe full of stones.
 `IMPROVISATION — NOTED.`
 
 ---
+
+### NIGHT SIX — **VINDU & DØR** — *SOLD SEPARATELY*
+*Beats:* `n6_robin_inside`, `n6_bev_remembers` · *Flags:* `foundErrata`, `tookBoathouseHinges`,
+`installedSink`, `markedDoorframe`, `usedRuinAnchors`, `robinSaw`, `bevRemembered`
+
+**The twenty slots.** 11 glazing units `GL-01…11`, the doorframe `DF-01`, the door leaf `DR-01`,
+the hinge set `HG-01`, the **sink `SK-01`**, the stove flue `FL-01`, and **four pencil marks
+`PM-01…04`** (§10.3). Twenty slots in 1140 seconds — the only night in the game where the
+slots-per-minute curve goes *down* (§0.5). There is more time and less work and it is the worst
+night, and that is the design.
+
+**Weather: dead air.** Rain 0.00, wind 0.20 at gust amplitude 0.04 on a 90-second period, fog
+0.80, **zero lightning strikes** (§5). Effective mask: **0.00.** Every creak the player has ever
+built is audible tonight and there is nothing at all to hide behind.
+
+**Campers: two.** The camp has called the county. Five of them are at the road, 186 m south,
+waiting on headlights that take four hours (`BEV_LATE_01`). The woods are the emptiest they have
+been since Night One, and the emptiness is not relief.
+
+#### The manual is broken
+
+Not sinister-broken. *Wrong*-broken. G6, deliberate errata (`GAME_DESIGN.md` §2.4):
+
+- Panel 6.2 runs step 14 before step 9. **Step 9 does not appear anywhere on the sheet.**
+- The wall elevation contradicts the floor plan by 340 mm — the same 340 mm he sawed off on Night
+  Three, which means one of these two drawings was made before he cut it and one after, which means
+  he drew one of them.
+- Panel **6.5 (hero)** gives article **`0000-000`** with a confident straight-insert arrow into an
+  empty slot beside the kitchen table.
+
+#### `0000-000` — the part that does not exist, and the clock that does
+
+**It is not in the world. It has never been in the world.** v1.0 said "the game will let you look
+for it for as long as you like," which directly contradicts the premise of the game and
+`GAME_DESIGN.md` §1.1's `timeOfNight`. **The night has a clock. Looking for it costs you the
+night.** If the player insists, dawn arrives, `night:failed { reason: 'dawn' }` fires, and the
+unbuilt slots roll into Night Seven's budget (`GAME_DESIGN.md` §8.2). The doc is not going to lie
+about this to protect a joke.
+
+**The diegetic failsafe**, tied to `tool:missing { toolId: 'part_0000_000' }`:
+
+| t after `tool:missing` | What happens | Channel |
+|---|---|---|
+| 0 s | Manifest shows `0000-000` red-outlined with a contour inset. **The inset is blank.** There is no region, because there is no place | `BlueprintUI` |
+| **180 s** | Ground fog begins settling *into the old foundation trench.* The ruin's footprint starts drawing itself in white, 300 mm deep | `VolumetricFog`, `CabinSite.ruinAnchors` |
+| **240 s** | The trench line closes — a continuous luminous rectangle, 11.6 × 7.8 m, visible from anywhere on the plot. `BuildSystem` begins accepting placements validated against `CabinSite.ruinAnchors` instead of the diagram. Flag `usedRuinAnchors` | Build |
+| **300 s** | Fog fills to 600 mm. From the roof it is a floor plan. From the ground it is weather | Render |
+
+**To finish this night the player must stop reading and start remembering** — and the mechanic is
+also the thesis, and it costs nothing to implement because the anchors already exist.
+
+**Correction to v1.0:** the ruin stones are **not** "visible only when the lantern rakes across at
+a low angle." They are visible from Night One, always, in every light. He cleared this site weeks
+before the game starts; the stones sit proud of the duff, black at the edges, and
+`GAME_DESIGN.md` §11's chalked squares at t=0:14 **are chalked onto them.** The player places their
+first pier on a burned foundation stone in the first two minutes of the game. What Night Six
+reveals is not that the stones are *there*. It is what they are *for*.
+
+**Missing — three named parts, three named locations, one errand.**
+
+1. **The errata slip.** Tier 2, in the boathouse, in a **cardboard box under the canoe rack.**
+2. **The hinge set.** Off the boathouse door frame — the same frame he stripped the leaf from on
+   Night Four, which the camp propped with an oar and never fixed.
+3. **A fastener bag short by three.**
+
+#### The box
+
+The Land Company cleared the Vik house in 1962 and boxed its papers and the box went into the
+boathouse and has been under the canoe rack for twenty-two years, holding it level.
+
+Inside: a 1958 Land Company travel brochure with photographs of a lake in Otago (§9, prop 15). A
+plat sheet with a name overprinted. And a single loose page in Marit's hand, folded in three —
+**the real step 9.**
+
+The player does not know what any of it is. To the game, and to the manual, and to the man, it is a
+**red-outlined manifest item**, and when he picks it up the bell rings (`hardware_chime`,
+`GAME_DESIGN.md` §2.5) and the red outline redraws in black with a tick, and `BlueprintUI` stamps
+the correction over Panel 6.2, and Ansel puts his mother's handwriting in his coveralls and goes
+back to work.
+
+Flag `foundErrata`. If the player never finds it, building as printed produces a join that can never
+exceed `w = 0.35` (`GAME_DESIGN.md` §2.4) — the door hangs wrong for the rest of the game and it
+creaks in the last scene.
+
+**The comic beat: THE MANUAL IS CONFIDENTLY, SERENELY INCORRECT.** It is not lying. It is not
+taunting. It has an article number for a thing that does not exist and it is *sure* about it, and
+the arrow is drawn at exactly the same 4.0 px weight as every arrow that has ever been right. That
+is the single most accurate thing in this game about assembling furniture.
+
+#### Story beat one — `n6_robin_inside`
+
+Gated on `markedDoorframe` (§10.3) and `installedSink` (§10.1) — the player must have built both
+before this fires, because both are what she finds.
+
+**Where the player is: on the ladder at the gable, mid-hold on glazing unit `GL-11`.**
+
+Glazing is not a 2.2 s torque check. A glazing unit is bedded and pinned: **a committed hold of
+9.0 seconds** with both hands, on a ladder, 4.2 m up. `GAME_DESIGN.md` §2.1: a window unit is
+18 kg, class C, and its drop noise is **0.90 — the loudest drop in the entire table, because it is
+glass.**
+
+The player *can* let go. Nothing stops them. Eighteen kilograms of glass goes through the roof into
+the kitchen. The game does not warn them, because it does not need to: they have known what glass
+does since Night One.
+
+Robin comes in at **t = +1.2 s** into the hold.
+
+For **nine seconds the player physically cannot act**, and it is not a cutscene and control is
+never taken — it is bedding compound, and it is the same 9.0 s hold the player has performed ten
+times already tonight. In those nine seconds: her torch crosses the floor he laid. It stops on the
+sink. It stops on the window over the sink. It goes to the doorframe.
+
+Then the hold completes, and the player has **complete freedom for the remaining 104 seconds**, and
+there is exactly one way down off the gable, and it is the ladder, and the ladder comes down into
+the kitchen three metres from her.
+
+**The game measures nothing here and judges nothing.** If the player climbs down, Robin is in
+`Curious`, she sees him at 3 m, and it resolves through the ordinary FSM with no special case and
+no scripting. Most players will not climb down. The reason they don't is the reason he doesn't, and
+the game never says so.
+
+What she finds, in this order: `ROB_LATE_01` (pencil marks on the doorframe), `ROB_LATE_02`
+(reading four numbers aloud — she thinks they are measurements; they are years), `ROB_LATE_04`
+("There's no nails in this. There's no *nails* in it."). She puts her hand flat on the top mark.
+
+**It is above her head.**
+
+Flag `robinSaw`. She walks out. She is not attacked.
+
+#### Story beat two — `n6_bev_remembers`
+
+Bev, at the county road at 186 m, in the headlights of her own truck, says the thing she has been
+circling for three nights: `BEV_LATE_02`, `BEV_LATE_03`, `BEV_LATE_04`.
+
+> **"His name was—"**
+
+And she stops. Because saying it makes it a person, and she has spent thirteen years not doing
+that.
+
+**v1.0 had her say "His name was Ansel V—", fifteen lines after the doc claimed nobody says his
+name in the game.** The full first name was in the line. It is cut. She stops before the first
+syllable, and the only identification anywhere in the game is Robin's "he looks at you sideways,"
+and the name arrives once, wordless, on the last card, as a maker's mark. Flag `bevRemembered`.
+
+**Bev's arithmetic, corrected.** She says **"Thirteen summers"** (`BEV_IDLE_02`) and **"Thirteen
+years. Never. Not once"** (`BEV_FEAR_01`). She has been here since **1971**; 1984 − 1971 = 13.
+Twenty-two is the number of years since the fire and it belongs to the *land*, not to Bev — v1.0
+had pasted it into her mouth twice. The gap is the point: **she inherited a story that started nine
+years before she got here and she has never once gone and looked at it.** Panel 5.1's "both drawn
+twenty-two years ago" is correct and stays.
+
+**Emotional turn.** The audience knows everything. Ansel knows nothing. The gap is the horror.
+
+**Closing image.** Not "a shadow across the window that does not move" — that is a jump-scare
+composition with the scare deleted and it would waste the best night in the game.
+
+**The closing image is a sound.** He is on the gable. She walks out through the door he framed. And
+he hears her boots go across his floor, through his wall, muffled and clear, arriving late — and it
+is *exactly* how a correctly built wall carries sound, and he built it, and it works.
+
+Hold on his hands on the batten. Fifteen seconds. No music.
+
+That acoustic fact is planted here so that it can end the game at 06:15 on Night Seven.
+
+**Night-end card:** `VINDU & DØR`. `PARTS SUPPLIED: 19 OF 20.` `PLEASE CONTACT CUSTOMER SERVICE.`
+Figure posture: `head-tilt-confused`.
+
+---
+
+### NIGHT SEVEN — **HJEM** — *SOME ASSEMBLY REQUIRED*
+*Beat:* `n7_final` · *Flags:* `builtBothChairs`, `manualBlank`, `ending_a | ending_b | ending_c`
+
+**Build: twenty-eight slots, and the house is not finished when the night starts.** v1.0 said
+"nothing structural remains," which throws away the best night in the schedule and contradicts
+`GAME_DESIGN.md` §7. It is wrong. Night Seven is the biggest build in the game:
+
+| Slots | What |
+|---|---|
+| 1 | **The hearth stone.** 140 kg, **class E — the only part in the game that must be dragged** (`GAME_DESIGN.md` §2.1). Continuous `drag` noise, radius 22, every 0.5 s, 0.34× speed, from the shoreline at 34 m. It takes 100 seconds and every one of them is audible |
+| 6 | Chimney courses |
+| 8 | Porch: two posts, beam, four deck boards |
+| 9 | Roof cap and ridge flashing |
+| 2 | **The table, and the chair** — `CH-A`, adult |
+| **1** | **`CH-B` — the small chair** |
+| 1 | The deferred slot from Night Six (G7) |
+
+**All seven grammars, on one fold-out sheet** (`GAME_DESIGN.md` §7). Including **G7**: a slot was
+deliberately left open at the end of Night Six with the manual reading "see fig. 4b," and fig. 4b is
+on tonight's sheet, and **leaving it open across the night boundary was correct.** A player who
+tidily filled it on Night Six put a wrong part into the load-bearing ridge and has a permanent
+`w = 1.00` join over the kitchen.
+
+**Missing — three, per `GAME_DESIGN.md` §2.5: one Tier-3 item, one errata slip, one fastener bag
+short by three.** All three are ordinary. All three are findable. The player will get all three.
+
+**And the fourth thing, which is not on the manifest.**
+
+#### The fold-out — Panel 7.1 (hero)
+
+Every step of the house, ticked, in Marit's hand.
+
+In the parts bracket: **`1`**.
+
+Beside it, drawn in **Ansel's** hand — doubled lines, overshot corners, `ghostAlpha 0.14` — the
+**telephone icon**: the parody "if any parts are missing, contact customer service." And beneath it
+the camp payphone, drawn *in situ*, correct to the alcove and the wall lamp, **160 metres away**,
+with a dotted ghost-trail path leading from the front door to it.
+
+`GAME_DESIGN.md` §2.4 already establishes the telephone glyph and already says that learning it
+means the camp payphone is a Night Six story beat. This is the payoff: **the manual is telling him
+to go and get someone, and the manual is telling him in his own handwriting.**
+
+The horror is not that the manual has turned on him. The manual has not changed at all. **He wrote
+that panel.** He has been extrapolating from a dead woman's instructions for twenty-two years, and
+this is what the extrapolation produces, and it looks exactly like an instruction because he made
+it look exactly like an instruction.
+
+#### The comic beat, and it is the funniest in the game
+
+**Customer service.**
+
+A man has built a house from a flat-pack manual, he is one part short, and the manual tells him to
+contact customer service, and he goes.
+
+#### The house
+
+`timeOfNight 0.8` — **03:40.** The rain stops. Wind drops to 0.03. Dead calm, zero masking, for the
+last 20% of the night (`GAME_DESIGN.md` §7). It is the first time in the game the world is quiet.
+
+The player walks the interior with `hud:mode 'none'` (§14.1) — no reticle, no prompts, no objective,
+no creak feedback, no toast. `settings.subtitles` still works. Nothing speaks.
+
+**The floor does not creak anywhere.** The player has spent seven nights learning what a creak
+means, and the total absence of one is more frightening than any sound the game has made. If the
+player built badly, it *does* creak, and every wrong join is in the room with them, and the game
+does not comment. That is the seven-night payoff of `state.installed` persisting `correct` and
+`torque` (§6.8) — **the last scene of the game is a report card you spent a week writing.**
+
+Every surface is correct. A sink with a window over it. A stove flue. A doorframe with four pencil
+marks in his own hand at 91, 108, 124 and 141 cm. A table.
+
+**Two chairs.**
+
+**Night-end card:** there isn't one. See §12.3.
+
+The endings are §11.
+
+---
+
+### 6.8 Build errors persist — the record of your reading comprehension
+
+`GAME_DESIGN.md` §7 already states this and it is the best idea available to this premise, so this
+document leans on it hard rather than repeating v1.0's mistake of describing a wrong join on Night
+Two and then forgetting about it on Night Three.
+
+**`state.installed[slotId] = { partId, correct, torque }` persists for the whole game.** A Rotated
+joist from Night Two is still Rotated on Night Seven, still 6 mm proud, still ringing under the
+hammer, still creaking. `creakDebt` carries 40% overnight. The cabin is a record.
+
+**And later nights read earlier work.** Three specified back-references, each of which can send the
+player back into their own past at three in the morning:
+
+| Night | Reads | If it's wrong |
+|---|---|---|
+| **N3** | The sill beams (N1) must be within **2.0°** of level for the corner posts to reach their `requires` | Post ghosts refuse. Player must `build:remove` a sill beam (8 s, `wrench` noise 0.45) and re-seat it |
+| **N5** | The north corner posts (N3) must be within **1.5° of plumb** or truss T-01 cannot be held inside its ±2° window at all — the rig will not converge no matter how many stones go in the canoe | **The player must go back and re-plumb Night Three's work, in a storm, on Night Five.** The game's only backtrack is a man fixing his own mistakes |
+| **N6** | `DF-01`'s jamb must be within **1.0°** or the four pencil marks land at the wrong heights and the manual redraws them, in his hand, wrong | He copies the numbers anyway |
+
+**The positive-correctness channel exists and it is not the creak** (§13.3). The creak is negative,
+delayed, and gated on wind. The immediate, positive, every-single-tap signal is the **knock**: a
+fully seated join knocks dead and dry; a proud one **rings**.
+
+### 6.9 The seven collision panels — one per night, individually specified
+
+The reviewer was right that Panel 4.9 was the only place in v1.0 where both tones occupied the same
+frame. There are now seven. This is the index; the panels themselves are specified in §3.5/§3.6 and
+authored in `src/story/Panels.js`.
+
+| Night | Panel | The comedy | The horror | Same mark? |
+|---|---|---|---|---|
+| 1 | **1.9** | A flat-pack contents inset. Six piers, six beams, article numbers, dimetric, tidy | A child's boot, size 3, drawn to scale, in the contents, with no article number | Yes — it is *inventory* |
+| 2 | **2.7** | `THIS STEP REQUIRES TWO PERSONS`. Everyone has laughed at this icon | The second person has no tools and is drawn at 0.62× scale | Yes — the icon *is* the child |
+| 3 | **3.6** | Measuring a board against your own forearm — a real carpenter's trick, and charming | The same forearm, drawn again at 0.55×, carrying the same measurement | Yes — the measurement is the mark |
+| 4 | **4.9** | Nothing about this panel breaks form. It is a dimension | The dimensioned object has shoes and is 1.78 m | Yes — the dimension arrow |
+| 5 | **5.7** | A counterweight box with a tilde. Flat-pack vagueness, perfectly observed | The counterweight is a dotted human outline and the box is empty | Yes — the empty box |
+| 6 | **6.5** | `0000-000`. Every person who has ever assembled furniture knows this rage | The slot it points at is beside the kitchen table and it is chair-shaped | Yes — the arrow |
+| 7 | **7.1** | *Contact customer service.* | *Contact customer service.* | **It is one mark. It was always one mark.** |
+
+### 6.10 What being seen actually does — the story layer over `GAME_DESIGN.md` §8
+
+`GAME_DESIGN.md` §8.1 owns the escalation ladder, the suspicion arithmetic and the `night:failed`
+reasons. **Being seen is never a game over and never a reload.** What this document adds is what
+the *world* looks like afterwards, because the consequence must be visible on the house and not on
+a meter.
+
+| Rung | `GAME_DESIGN.md` §8.1 mechanical effect | **The world change this document specifies** |
+|---|---|---|
+| 1 | 3 investigations, campers pair up | Torches sweep wider. Nothing on the site changes |
+| 2 | `player:spotted` once, suspicion +0.25 | **A camp lantern is left burning on the fire road at 45 m, permanently, from the next night.** They have started lighting the dark *toward* the site. `lum` floor +0.09 within 30 m of it |
+| 3 | A report delivered, camp lights come on | **Orange ribbon appears on the four county stakes nearest the plot.** Somebody walked out here in daylight and flagged it |
+| 4 | 2 reports or a body found; kids recalled | The woods go silent. `Forest`'s bird layer stops for the rest of the game |
+| 5 | 3 reports; the Ranger's truck arrives | **The truck parks on the dock.** He fixed that dock in 1962 for nothing and it is the best-built thing at this camp and there is a county vehicle on it |
+| 6 | Radio call completes → `night:failed { reason:'reported' }`, next night at suspicion 0.45 and one fewer stage | **The plot is taped.** Four ribbons strung between the county stakes, and a printed county notice stapled to the pine at `(+6, −3)`. Every slot inside the tape is unsnappable until the player pulls the ribbons — **4 × 1.1 s, silent, no prompt** — which is the same input, at the same cost, as the very first thing they did in the game |
+
+**The notice is unreadable.** It renders as a form: a grey blur with a county seal, a legible date,
+and a legible number. **He cannot read it** (§0.6). The single most expensive consequence in the
+game arrives as a piece of paper that the man it is about cannot understand, and the player cannot
+either, because the player is him.
+
+Once taped, taped. Pulled ribbons stay pulled; a new report re-tapes.
+
+**And what a `phase: 'chase'` is.** `ARCHITECTURE.md` §8 allows the value and v1.0 never said what
+it meant. **Ansel does not chase.** `phase: 'chase'` means *a camper is moving toward the site and
+the player is deciding whether to intercept.* He has a 4.20 m/s sprint with a 1.9 s spin-up
+(`GAME_DESIGN.md` §5.1) and in an average playthrough he uses it **twice**, and it is horrifying
+both times, because he does not run *at* people. He runs to get somewhere before them. He is
+cutting them off. He has read ahead.
+
+---

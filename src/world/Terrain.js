@@ -729,8 +729,13 @@ export class Terrain {
     stream.push({ x: STREAM_NODES.at(-1)[0], z: STREAM_NODES.at(-1)[1], y: STREAM_NODES.at(-1)[2] });
     this.streamPath = stream.map((p) => new THREE.Vector3(p.x, p.y, p.z));
 
-    // spatial bucket for the stream so the per-cell query is O(1)-ish
-    const streamGrid = this._bucketPolyline(stream, 16);
+    // Spatial bucket for the stream. Cell size == query radius so a query touches 9 buckets,
+    // and a bbox so the other 80% of the map never runs the query at all.
+    const streamGrid = this._bucketPolyline(stream, 34);
+    const sBox = {
+      minX: this._minOf(stream, 'x') - 40, maxX: this._maxOf(stream, 'x') + 40,
+      minZ: this._minOf(stream, 'z') - 40, maxZ: this._maxOf(stream, 'z') + 40,
+    };
 
     // ---- write pass -------------------------------------------------------------------------
     for (let j = 0; j < n; j++) {
@@ -741,7 +746,8 @@ export class Terrain {
         let hv = h[idx];
 
         // --- stream valley + channel ---
-        const sp = this._nearestBucketed(streamGrid, x, z, 34);
+        const inStreamBox = x > sBox.minX && x < sBox.maxX && z > sBox.minZ && z < sBox.maxZ;
+        const sp = inStreamBox ? this._nearestBucketed(streamGrid, x, z, 34) : null;
         if (sp) {
           const d = Math.sqrt(sp.d2);
           const bedY = sp.p.y;
@@ -827,6 +833,16 @@ export class Terrain {
 
     // a light 1-cell smooth on carved regions kills the stair-stepping the carve introduces
     this._smoothMasked(pathMask, flatMask);
+
+    // Re-assert the build plot last: BuildSystem snaps parts to a grid on this pad and it must
+    // be dead flat, not "flat then smoothed by 7 cm".
+    const pi0 = Math.max(0, Math.floor((B.x - B.half - this.x0) * cellsPerM));
+    const pi1 = Math.min(n - 1, Math.ceil((B.x + B.half - this.x0) * cellsPerM));
+    const pj0 = Math.max(0, Math.floor((B.z - B.half - this.z0) * cellsPerM));
+    const pj1 = Math.min(n - 1, Math.ceil((B.z + B.half - this.z0) * cellsPerM));
+    for (let j = pj0; j <= pj1; j++) {
+      for (let i = pi0; i <= pi1; i++) h[j * n + i] = padLevel;
+    }
   }
 
   _minOf(pts, k) { let m = Infinity; for (const p of pts) if (p[k] < m) m = p[k]; return m; }
@@ -947,7 +963,9 @@ export class Terrain {
         let type;
         if (depth > 0.0) {
           type = S_WATER;
-        } else if (overWater < 1.15 + jitter * 0.8 && slope01 < 0.30) {
+        } else if (pathW > 0.62) {
+          type = S_MUD;                                      // a trodden trail beats the beach
+        } else if (overWater < 1.70 + jitter * 1.0 && slope01 < 0.34) {
           type = S_GRAVEL;                                   // the beach
         } else if (rockW > 0.55 + jitter * 0.35 || slope01 > 0.40 + jitter * 0.10) {
           type = S_GRANITE;                                  // scarps and outcrops
@@ -1029,7 +1047,7 @@ export class Terrain {
 
         // grow while the surrounding ring stays a shallow bowl rather than a hillside
         let radius = 0;
-        for (let r = 1; r <= 4; r++) {
+        for (let r = 1; r <= 6; r++) {
           let mean = 0, worst = -Infinity;
           for (let a = 0; a < 8; a++) {
             const ang = (a / 8) * Math.PI * 2;
@@ -1041,7 +1059,9 @@ export class Terrain {
           }
           mean /= 8;
           // a real depression: the ring is above us on average, and no wall is a cliff
-          if (mean > 0.004 * r && mean < P.depthWindow * r && worst < P.depthWindow * r * 3.2) radius = r;
+          // an absolute ceiling as well as a per-ring one, so broad flats do not all max out
+          if (mean > 0.004 * r && mean < P.depthWindow * r && mean < 0.20
+            && worst < P.depthWindow * r * 3.2) radius = r;
           else break;
         }
         if (radius < 1) continue;
@@ -1053,8 +1073,10 @@ export class Terrain {
         }
         if (tooClose) continue;
 
-        const rr = clamp(radius * 0.72 + flow[idx] * 1.4, P.minRadius, P.maxRadius);
-        found.push({ x, z, y: hv + 0.025, r: rr, score: flow[idx] + wet[idx] / 255 });
+        const jit = ihash(i, j, this._seed ^ 0x5ee);
+        const rr = clamp(0.42 + radius * 0.26 * (0.45 + jit * 1.45) + flow[idx] * 0.35,
+          P.minRadius, P.maxRadius);
+        found.push({ x, z, y: hv + 0.025, r: rr, score: flow[idx] + wet[idx] / 255 + jit * 1.7 });
       }
     }
 
@@ -2028,11 +2050,21 @@ diffuseColor.rgb = mix( diffuseColor.rgb, vec3( 0.070, 0.062, 0.036 ), smoothste
     let placed = 0, attempts = 0;
     while (placed < count && attempts < count * 40) {
       attempts++;
+      // Walk to the waterline for this x, then jitter into the shallow margin. Sampling the
+      // lake box uniformly wastes 95% of the tries in deep water.
       const x = rand.range(this.bounds.minX + 4, this.bounds.maxX - 4);
-      const z = rand.range(this.bounds.minZ + 4, -60);
+      let z = -46;
+      let found = false;
+      for (let k = 0; k < 400; k++) {
+        if (this.heightAt(x, z) < this.waterLevel) { found = true; break; }
+        z -= 0.75;
+        if (z < this.bounds.minZ + 4) break;
+      }
+      if (!found) continue;
+      z += rand.range(-5.5, 1.2);
       const d = this.waterLevel - this.heightAt(x, z);
-      if (d < 0.04 || d > 0.85) continue;
-      if (this.slopeAt(x, z) > 0.16) continue;
+      if (d < 0.02 || d > 1.05) continue;
+      if (this.slopeAt(x, z) > 0.30) continue;
       _quat.setFromAxisAngle(_fallbackNormal, rand.next() * Math.PI * 2);
       const sc = rand.range(0.65, 1.5);
       _scale.set(sc, sc * rand.range(0.8, 1.35), sc);

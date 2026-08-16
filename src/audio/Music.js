@@ -843,12 +843,14 @@ export class Music {
       // SILENCE CUE 3 — §8 S7 "The end." Hard-mute on the frame it fires. 900 ms of true
       // digital silence, then ONE string note at D1 allowed to ring, and then nothing.
       this._hold('failed', P.FAILED, 0, 1e6, 4, 30);
+      // Mute on THIS frame, not on the next parameter tick — then schedule the one note.
+      // (Order matters: _evalHolds cancels pending gate events, so it must run first.)
+      this._evalHolds(this.ac.currentTime);
       this.currentMood = 'dead';
       const t = this.ac.currentTime + 0.9;
-      this._gate.gain.cancelAndHoldAtTime?.(this.ac.currentTime);
       this._gate.gain.setTargetAtTime(1, t - 0.03, 0.006);
       this._strOut.gain.setTargetAtTime(db(-24), t - 0.05, 0.01);
-      this._playString(t, 1.0, 0, true);
+      this._playString(t, 1.0, 0, false);
       // ...and then the gate closes again behind it and stays closed until the next night.
       this._gate.gain.setTargetAtTime(0.0001, t + 11.5, 0.35);
     });
@@ -1006,7 +1008,7 @@ export class Music {
     }
 
     this._gateLevel = target;
-    const tau = target < (prev?.level ?? 1) ? (win?.attack ?? 0.01) : (prev?.release ?? 0.15);
+    const tau = (target < (prev?.level ?? 1) ? (win?.attack ?? 0.01) : (prev?.release ?? 0.15)) || 0.05;
     this._gate.gain.cancelAndHoldAtTime?.(now);
     this._gate.gain.setTargetAtTime(Math.max(0.0001, target), now, tau);
   }
@@ -1171,20 +1173,23 @@ export class Music {
   _computeDread(state) {
     const suspicion = clamp01(state?.suspicion ?? 0);
 
-    const campers = this.ctx?.systems?.get?.('Campers') ?? null;
+    // Another agent owns Campers; treat every property access as untrusted.
     let dist = Infinity;
-    if (campers) {
-      const nd = campers.nearestDistance;
-      if (typeof nd === 'number' && Number.isFinite(nd)) dist = nd;
-      else if (typeof campers.nearest?.distance === 'number') dist = campers.nearest.distance;
-    }
-    const proximity = Number.isFinite(dist) ? 1 - clamp01(dist / 30) : 0;
-
     let los = this._spotted ? 1 : 0;
-    if (!los && campers) {
-      if (campers.playerInCone === true || campers.hasLineOfSight === true) los = 1;
-      else if (typeof campers.visibility === 'number') los = clamp01(campers.visibility);
-    }
+    try {
+      const campers = this.ctx?.systems?.get?.('Campers') ?? null;
+      if (campers) {
+        const nd = campers.nearestDistance;
+        if (typeof nd === 'number' && Number.isFinite(nd)) dist = nd;
+        else if (typeof campers.nearest?.distance === 'number') dist = campers.nearest.distance;
+
+        if (!los) {
+          if (campers.playerInCone === true || campers.hasLineOfSight === true) los = 1;
+          else if (typeof campers.visibility === 'number') los = clamp01(campers.visibility);
+        }
+      }
+    } catch { /* a system mid-authoring must never break the score */ }
+    const proximity = Number.isFinite(dist) ? 1 - clamp01(dist / 30) : 0;
 
     const creaks = clamp01((state?.creaks ?? 0) / 6);
     const progress = this._buildProgress();
@@ -1310,6 +1315,8 @@ export class Music {
     // §8 S12 — a silence ends when something ARRIVES. If we are waiting for an arrival,
     // the next downbeat gets a struck string and the gate opens 30 ms ahead of it.
     if (this._awaitArrival) {
+      // A new rule took over while we were waiting — stay armed and stay gone.
+      if (this._gateLevel < 0.02) return;
       if (barPos !== 0) return;
       this._awaitArrival = false;
       this._gate.gain.cancelAndHoldAtTime?.(this.ac.currentTime);
@@ -1361,7 +1368,8 @@ export class Music {
     // ---- SUB — a slow swell every two bars. Under the work theme it is a breath; under
     // dread it is a floor tilting.
     if (this._isOn('sub') && t >= this._nextSubAt) {
-      const peak = this._workMode ? db(-30) : db(-18) * (0.5 + 0.5 * this.dread);
+      // §1.2 keeps the 20–80 Hz band nearly empty; this is the only sub the score owns.
+      const peak = this._workMode ? db(-34) : db(-24) * (0.5 + 0.5 * this.dread);
       const rise = this._workMode ? 5.5 : 3.0;
       this._subOut.gain.cancelAndHoldAtTime?.(t);
       this._subOut.gain.setTargetAtTime(peak, t, rise / 3);
@@ -1372,12 +1380,16 @@ export class Music {
 
   // ------------------------------------------------------------------------ instruments
 
-  /** THE STRING. A pre-rendered Karplus–Strong buffer; one source node, nothing else. */
-  _playString(t, vel = 0.8, cents = 0, ring = false, midi = N.D1, short = false) {
+  /**
+   * THE STRING. A pre-rendered Karplus–Strong buffer; one source node, nothing else.
+   * `strong` routes to the dry, louder path — the string being *struck* rather than sounded.
+   */
+  _playString(t, vel = 0.8, cents = 0, strong = false, midi = N.D1, short = false) {
     if (!this.ac || !this._bufString) return;
     const ac = this.ac;
     const when = Math.max(t, ac.currentTime + 0.02);
     const buf = short ? this._bufStringShort : this._bufString;
+    const dest = strong ? this._strDry : this._strLP;
     const src = ac.createBufferSource();
     src.buffer = buf;
     // Pitch by playbackRate — the buffer is D1, everything else is a small shift.
@@ -1386,9 +1398,9 @@ export class Music {
     src.detune?.setValueAtTime?.(cents, when);
     const g = ac.createGain();
     g.gain.setValueAtTime(0.0001, when);
-    g.gain.linearRampToValueAtTime(clamp(vel, 0, 1) * (ring ? 1.0 : 0.85), when + 0.006);
+    g.gain.linearRampToValueAtTime(clamp(vel, 0.0002, 1) * 0.9, when + 0.006);
     src.connect(g);
-    g.connect(this._strLP);
+    g.connect(dest);
     src.start(when);
     src.onended = () => { try { src.disconnect(); g.disconnect(); } catch { /* noop */ } };
 
@@ -1401,9 +1413,9 @@ export class Music {
       src2.detune?.setValueAtTime?.(cents + 11, when);
       const g2 = ac.createGain();
       g2.gain.setValueAtTime(0.0001, when);
-      g2.gain.linearRampToValueAtTime(clamp(vel, 0, 1) * 0.35, when + 0.008);
+      g2.gain.linearRampToValueAtTime(clamp(vel, 0.0002, 1) * 0.35, when + 0.008);
       src2.connect(g2);
-      g2.connect(this._strLP);
+      g2.connect(dest);
       src2.start(when + 0.004);
       src2.onended = () => { try { src2.disconnect(); g2.disconnect(); } catch { /* noop */ } };
     }
@@ -1446,11 +1458,11 @@ export class Music {
 
     for (let i = 0; i < this._pnoPart.length; i++) {
       const n = i + 1;
-      const bp = this._pnoPart[i].bp;
+      const f = Math.min(nyq, n * f0 * Math.sqrt(1 + PIANO_B * n * n));
       // Modal normalization: a bandpass at Q=900/n transfers almost none of a 1.5 ms
       // burst's energy (its impulse response peaks at ≈ sin(ω₀)/2Q), so each partial is
       // scaled by the inverse of that. Without this the whole instrument is 60 dB down.
-      const w0 = (2 * Math.PI * bp.frequency.value) / ac.sampleRate;
+      const w0 = (2 * Math.PI * f) / ac.sampleRate;
       const alpha = Math.max(1e-7, Math.sin(w0) / (2 * Math.max(2, 900 / n)));
       const gain = (0.9 / Math.pow(n, 1.1)) * (0.005 / alpha);
       const decay = (3200 / Math.pow(n, 0.8)) / 1000;
@@ -1472,7 +1484,7 @@ export class Music {
     const eg = this._pnoExcGain.gain;
     eg.cancelAndHoldAtTime?.(when - 0.004);
     eg.setValueAtTime(0.0001, when);
-    eg.linearRampToValueAtTime(0.5, when + 0.001);
+    eg.linearRampToValueAtTime(12, when + 0.001);
     eg.exponentialRampToValueAtTime(0.0001, when + 0.003);
     src.connect(this._pnoExcGain);
     src.start(when, this._rand.range(0, 0.15), 0.008);
@@ -1480,7 +1492,7 @@ export class Music {
     const p = this._damperEnv.gain;
     p.cancelAndHoldAtTime?.(when - 0.004);
     p.setValueAtTime(0.0001, when);
-    p.linearRampToValueAtTime(0.3, when + 0.005);
+    p.linearRampToValueAtTime(2.2, when + 0.005);   // modal normalization, as in _playPiano
     p.exponentialRampToValueAtTime(0.0001, when + 0.065);
   }
 
@@ -1552,7 +1564,7 @@ export class Music {
     o.frequency.exponentialRampToValueAtTime(29, at + 0.55);
     const g = ac.createGain();
     g.gain.setValueAtTime(0.0001, at);
-    g.gain.linearRampToValueAtTime(db(-8), at + 0.006);
+    g.gain.linearRampToValueAtTime(db(-12), at + 0.006);
     g.gain.exponentialRampToValueAtTime(0.0001, at + 0.62);
     o.connect(g);
     g.connect(this._sum);
@@ -1634,7 +1646,7 @@ export class Music {
     this._spotted = false;
     this._peakDread = 0;
     this._smoothed = Math.min(this._smoothed, 0.35);
-    this._playString(now + 3.4, 0.75, -4, true);
+    this._playString(now + 3.4, 0.75, -4, false);
     // SILENCE CUE 11 — the escape. 20–40 s of nothing after the last note has rung.
     this._holdAt('escape', P.ESCAPE, 0, now + 5.2, this._rand.range(20, 40), 900, 40);
   }
@@ -1722,13 +1734,19 @@ export class Music {
     this._radioDrift?.gain.setTargetAtTime(0.0001, now, Math.max(0.004, fadeMs / 3000));
     const kill = now + Math.max(0.1, fadeMs / 1000) + 0.2;
     try { this._radioHiss?.stop(kill); } catch { /* noop */ }
-    for (const n of this._radioNodes) {
-      try { if (n !== this._radioHiss) n.disconnect?.(); } catch { /* noop */ }
-    }
-    this._radioNodes.length = 0;
+
+    // Let the fade actually happen before tearing the chain down, or the "off" is a click
+    // instead of a decay. The timer is tracked so dispose() can cancel it.
+    const doomed = this._radioNodes;
+    this._radioNodes = [];
     this._radioHiss = null;
     this._radioIn = null;
     this._radioDrift = null;
+    if (this._radioKillTimer) globalThis.clearTimeout?.(this._radioKillTimer);
+    this._radioKillTimer = globalThis.setTimeout?.(() => {
+      this._radioKillTimer = 0;
+      for (const n of doomed) { try { n.disconnect?.(); } catch { /* noop */ } }
+    }, Math.max(120, fadeMs + 260));
   }
 
   _scheduleRadio(now) {

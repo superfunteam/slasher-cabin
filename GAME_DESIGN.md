@@ -2081,4 +2081,430 @@ It is the only grief the game shows you.
 | **Final interaction** | `place`, **with the player as the part** (§13.6, Ending C) |
 | The manual's comment | none. The manual does not editorialise here or anywhere (§15.3). |
 
+---
+
+## 13. FAIL STATES
+
+**Being seen is never a game over.** It is the start of a sequence.
+
+### 13.1 The escalation ladder
+
+| Rung | Trigger | Camp effect | Patrols | Player feels |
+|---|---|---|---|---|
+| 0 | — | `suspicion 0.00–0.15` | base | quiet |
+| 1 | 3 noise investigations in one night | +0.10, campers pair up | +0 | torches sweeping wider |
+| **1b** | **a structure report (§9.5)** | **+0.15** | **+0** | **`Navmesh` routes a patrol past the plot every ~110 s. Worse than the suspicion.** |
+| 2 | `player:spotted` once | +0.25 | +1 | a voice calling a name that isn't a name |
+| 3 | a short report delivered | +0.25, **camp lights come on** (2 point lights, `lum` floor +0.15 in camp) | +2 | the mess hall is lit; Tier-3 is now suicide |
+| 4 | **a body found (§13.5)**, or 2 reports | +0.35, `bev` spawns with the whistle, kids recalled to cabins (**fewer wanderers — the forest gets emptier and worse**) | +1 counselor, −2 kids | the woods go silent |
+| 5 | `night >= 6` **AND** `stats.reportsTotal >= 2` | **The Ranger's truck arrives** at `timeOfNight + 0.15`. Headlights sweep the treeline on a 40 s cycle: a moving 26 m cone at `lightF` 0.9. | +Ranger | a machine is looking for you |
+| 6 | **a long report completes** (payphone at 176 m, or the truck radio at 149 m) | **Night ends immediately.** `night:failed { reason: 'reported' }` | — | the run is wounded |
+
+`suspicion` is clamped [0, 1] and drives `Campers.patrolDensity = 2 + floor(suspicion × 6)`, capped
+at the night's maximum — **and floored at the night's minimum**, which is what protects Night 6's
+density of 2 from the escalation ladder (§12.7).
+
+Rung 5's single condition replaces v1.0's two contradictory ones (§0.2, C6).
+
+### 13.2 What actually ends a run
+
+| `reason` | Condition | Consequence |
+|---|---|---|
+| `'reported'` | rung 6 | Night ends. Next night starts at `suspicion` 0.45 floor and one fewer stage of buildable slots (the camp posts a watch on the ridge). **Not a game over.** |
+| `'dawn'` | `timeOfNight >= 1.0` with the stage incomplete | Night ends. Unbuilt slots roll into the next night's budget. **Not a game over.** |
+| `'exposed'` | fully lit within 8 m of 3+ Alerted campers | Forced retreat: a **45 s** escape window with the whole camp Searching. Survive it and the night continues. |
+| `'evacuated'` | **Game over.** Three `'reported'` nights, OR any `'reported'` on Night 6 or 7. | The camp buses out at dawn. The cabin is finished and empty. Credits over an unused cabin. Quiet, sad, correct. |
+| `'incomplete'` | **Game over.** Night 6 ends with the roof or the doorframe unbuilt. | Campers arrive to an unfinished structure. Different credits. |
+
+`state.phase = 'gameover'` only on `'evacuated'` and `'incomplete'`. **Both offer "Replay Night N",
+not "Restart Game"** (§14).
+
+**A long report cannot be intercepted, and that is deliberate** (§9.7). The payphone is 176 m from
+the plot; a player cannot cover that. Rung 6 is a consequence of letting someone reach Alerted with
+no witness within 45 m — not a coin flip at the end of a foot race. The game is honest about this:
+if a camper breaks for the camp rather than for a person, they are gone, and the correct play was
+three decisions ago.
+
+### 13.3 Essential characters
+
+`STORY.md` requires Dale to die on Night 4, Robin to survive to Night 6 and walk inside the house,
+and Bev to be alive at the road on Night 6. v1.0 handed the player a silent kill from Night 3 with
+no concept of an essential NPC, so a player could kill all six named characters before the story
+started.
+
+**The enforcement is behavioural, not a UI block** — because a refusal prompt would be the game
+winking at the player, which Pillar 1 forbids:
+
+> **The grab requires the target to be (a) unaware, (b) alone within 20 m of any other camper, and
+> (c) moving at < 0.6 m/s. Before their release night, essential characters are never all three at
+> once.** The `Scripted` state (§9.7) keeps them paired, moving, or facing you. They are not
+> protected; they are *busy*.
+
+`essentialUntilNight` (§9.1): `dale` 4, `robin` 7, `bev` 6, `marg`/`coop`/`teddy` 4.
+
+**The backstop.** If a player contrives the state anyway — through a rig, a physics edge case, a
+bug — the grab input is ignored with **zero feedback**. No prompt, no sound, no animation, no
+message. The hands simply do not come up. A player who notices will read it as having mistimed the
+approach, which is the only reading that does not break the fiction.
+
+### 13.4 The grab
+
+From **Night 4** (§12.5). 4.5 s of contact from behind an unaware camper, silent. Camera and audio
+spec: §4.5. It solves the immediate problem and creates three new ones:
+
+1. **A body** — class E, must be dragged (0.34× speed, 2.6× noise, tool belt locked) to a
+   concealment volume (§13.5).
+2. **Discovery** → escalation rung 4, immediately and permanently.
+3. **The manual notices.** From the next stage onward, `Blueprint` includes a small extra figure in
+   the corner: the masked man, standing, with a red slash-circle over a second small figure. **It
+   is a safety warning. It is not commented on.** Drawn in Ansel's hand (§8.5).
+
+`stats.kills` is tracked. It changes exactly two things: the safety panel above, and the ending
+stinger. **It does not appear on the night-end card** (§15.3) and no system ever remarks on it.
+The game never says killing is wrong. It just quietly adds a page to the manual.
+
+### 13.5 Body discovery — the check v1.0 never wrote
+
+v1.0 said to hide a body "at least 40 m from any patrol node or hidden under the boathouse / in the
+lake / under the build," and that "**Body found** → escalation rung 4" — by what test? There were
+no volume definitions and no discovery formula, in a document that gave creaks a five-term
+probability model. Here is the test.
+
+**A body is an `Object3D` with `concealment ∈ {'open', 'concealed', 'submerged'}`.**
+
+```
+// evaluated at 4 Hz per body, against campers in Idle | Curious | Searching | Noticing
+inRange   = d < discoveryRadius[concealment]
+lit       = illuminationAt(body) > lumThreshold[concealment]
+hasLOS    = one grid-occlusion test (§9.6), NOT a raycast
+discovered = inRange && lit && hasLOS && inCone
+```
+
+| `concealment` | `discoveryRadius` | `lumThreshold` | Where |
+|---|---|---|---|
+| `open` | **14 m** | 0.10 | anywhere not listed below. Moonlight alone exceeds 0.10. |
+| `concealed` | **1.5 m** | **0.45** | requires a torch aimed at it. See the volumes below. |
+| `submerged` | **0** | — | **never discovered.** The lake, past 1.4 m depth. |
+
+**The concealment volumes** are explicit named boxes, owned by `Props.js` and `CabinSite.js`, and
+this is the complete list:
+
+| Volume | Location | Capacity | Notes |
+|---|---|---|---|
+| Under the boathouse | (74, −61), the pile deck | 2 | 96 m from the plot; a long drag |
+| Under the build | (0, 0), between the piers | 3 | **available from Night 1** — 0 m of dragging, and it is under the thing you are being graded on |
+| The woodpile | (33, 32) | 1 | 46 m |
+| The deadfall belt | `x > 220` | 4 | 220+ m. Absurdly far. Listed because a player will try it. |
+| The lake | `z < −140`, depth > 1.4 m | ∞ | `submerged`. Requires wading to the depth limit (§3.2) while dragging at 0.34×. |
+
+**The patrol-node rule from v1.0 is deleted** and replaced by the radius test above, because "40 m
+from any patrol node" is unverifiable in a world with a published navmesh whose nodes move with
+`patrolDensity`. A radius, a light threshold and an occlusion test are checkable.
+
+**Bodies persist across nights.** A body concealed under the build on Night 4 is still there on
+Night 7, and if the player ever removes the parts above it, `concealment` flips to `open`.
+
+### 13.6 The endings
+
+`STORY.md §8` is canon. The house is finished at 03:40. The rain has stopped. It is the first time
+in the game the world is quiet. The player walks the interior with no HUD, opens the manual, the
+wipe plays, **the pages are blank**, and on the last page is the dotted outline of a small seated
+figure and an empty parts-list bracket.
+
+**The game gives the player exactly one verb: `place`.**
+
+| Ending | Flag | Trigger | What happens |
+|---|---|---|---|
+| **A — "RETURN TO STORE"** | `ending_a` | The player fetches Robin from the treeline (she has come back every night) and takes her inside. | No chase, no struggle scene, no cut away. `ROB_LATE_03`, unfinished. Then the player opens the manual to confirm the step and **the panel updates in real time in Ansel's hand — and the manual draws a red diagonal across it.** The only red mark ever aimed at the player. The only judgement the manual has ever passed. The mascot's arms are at its sides. Marit never told him to do this. Then the pages go blank. All of them. Including the ones he drew. |
+| **B — "DO NOT FORCE"** | `ending_b` | The player walks out and does not come back. | The camera holds on the house from the treeline for **90 s** while the sky greys. Nothing happens. Nothing has ever happened here. Buses at nine. Bleak, honest — and not the true one. |
+| **C — "SOME ASSEMBLY REQUIRED"** | `ending_c` | **The player sits in the small chair.** | Available from the moment the house is done. No prompt. Most players find it because seven nights have taught them to look for the slot that fits. |
+
+**Ending C, specified:**
+
+- The interaction is a `place` on the child-sized chair with **the player as the part**. `Player.js`
+  hands control to `NightManager`; `build:place { part: 'ANSEL', slot: 'CHAIR-SMALL', correct: true }`
+  fires. It is the last event the gameplay layer emits.
+- The mask comes off. **The camera does not show his face** — the mask simply enters frame and is
+  set down on the table: glazed, cracked, two holes too far apart. His hands are on the table and
+  they are ruined (`crackAmount = 1.0`, §4.4).
+- The manual is open beside it, blank, and it stays blank, because she died in 1962 and she never
+  drew what comes after the house is finished.
+- At **06:15**, the first bus turns off the county road, 240 m south (§3.3). You hear it *through
+  the wall*, because he built the wall correctly, and a correctly built wall carries sound from a
+  road exactly this way. `NoiseSystem`'s occlusion grid is what makes that literally true.
+- Kids. A lot of them. Screaming the good way.
+- **He does not get up.**
+- **Last panel**, over black: one final diagram in Marit's confident single-stroke hand — the
+  finished house in three-quarter elevation, **exactly as the player built it**, with a tick beside
+  it. `Blueprint` renders it from `state.installed`, so a player who left a joist rotated on Night 2
+  sees it rotated here, ticked anyway. And in the corner, where the maker's mark goes on every page:
+  **VIK & SØN**.
+- Achievement, in the flat-pack voice: **"NO PARTS REMAINING."**
+
+---
+
+## 14. SAVE, RETRY, AND REPLAY
+
+`ARCHITECTURE.md §8` calls `GameState` "the save file." Nights run 13–23 minutes in a browser tab,
+and §13.2 makes three bad nights a permanent game over. v1.0 said nothing at all about saving,
+which for a 2-hour browser game is the defect most likely to end a playtest early.
+
+### 14.1 Autosave
+
+| Trigger | What is written |
+|---|---|
+| `night:begin` | full `GameState` snapshot → slot `night-<n>-start` |
+| `build:stage-complete` | full snapshot → slot `checkpoint` (rolling, single) |
+| `night:complete` / `night:failed` | full snapshot → slot `night-<n>-end` |
+| every 60 s during `phase === 'build'` | `checkpoint` refresh |
+| tab `visibilitychange` → hidden | `checkpoint` refresh, synchronously |
+
+Storage: `localStorage` under `slashercabin.save`. A full `GameState` with 90 slots, 7 campers and
+the flag set is **< 24 KB** serialized, well inside quota. `Blueprint` output is **not** saved — it
+is regenerated from `(night, seed)`, which is what determinism (`ARCHITECTURE.md §6`) is for.
+
+### 14.2 What restoring does
+
+| Restored exactly | Reset on restore |
+|---|---|
+| `installed` (every slot, `torque`, `w`, `sawProgress`) | every camper → `Idle` at its nearest patrol node |
+| `inventory`, `toolsFound`, pocket fasteners | all detection meters → 0 |
+| `timeOfNight`, `suspicion`, `creaks`, `creakDebt` | `lastNoisePos` cleared |
+| `storyFlags`, `stats`, `structureKnowledge`, per-camper `familiarity` | weather re-derived from `(night, timeOfNight)` — deterministic, so the storm schedule is identical |
+| body positions and `concealment` | — |
+
+Campers reset to `Idle` because restoring a mid-chase FSM produces unfair, unreadable states. The
+cost is that a checkpoint reload can be used to shed a Searching camper. **That is an acceptable
+exploit** and we are not going to fight the player over it — the thing being protected is a
+two-hour playthrough in a tab that can be closed by a stray gesture.
+
+### 14.3 The player-facing options
+
+| Option | Where | Effect |
+|---|---|---|
+| **Resume** | title screen | loads `checkpoint` |
+| **Restart night** | pause menu, one keypress, **no confirmation shaming copy** | loads `night-<n>-start`. Prior nights' cabin is intact. |
+| **Replay any completed night** | night-end card, and a chapter list on the title screen | loads that night's `night-<n>-start`. Later nights' progress is preserved in a separate branch slot and restored if the player returns. |
+| **Continue after `'evacuated'` / `'incomplete'`** | game-over screen | offers **"Replay Night N"** as the default action. "New game" is the second option, not the first. |
+
+**Yes, you can replay Night 3.** That question had no answer in v1.0 and it needed one, because
+§13.2's game-over condition is otherwise a two-hour punishment for a bad twenty minutes.
+
+There is no permadeath mode, no ironman toggle, and no achievement gated on not reloading. The
+persistence that matters — the cabin remembering every mistake (§12.8) — is a fiction we impose on
+the *house*, not on the person holding the mouse (Pillar 5).
+
+---
+
+## 15. SCORING & THE NIGHT-END CARD
+
+Rendered by `Menu.js` on `night:complete { night, score }`. Flat, bright, clinical — white paper,
+thin black lines, one `#d92b2b` accent, Helvetica-alike (`ART_DIRECTION.md §8`). It should feel
+like a receipt printed by something that does not know what it is a receipt for.
+
+### 15.1 The score object
+
+```js
+Score = {
+  partsInstalled, partsTotal,
+  joinsCorrect, joinsUnderFastened, joinsRotated, joinsWrongSlot, joinsWrongPart,
+  perfectJoins, creaks, peakCreakDebt,
+  fastenersSupplied, fastenersRequired,
+  metresWalked, metresHauled,
+  campersEvaded, shortReports, longReports,
+  timeUsed, timeRemaining,
+  hardwareShortfalls, hardwareRecovered,
+  recuts, sawSeconds,
+  assemblyQuality   // 0..100
+}
+```
+
+```
+assemblyQuality = clamp(
+    100
+  -  5.0 * joinsUnderFastened
+  -  8.0 * joinsRotated
+  - 12.0 * joinsWrongSlot
+  - 24.0 * joinsWrongPart
+  -  0.8 * creaks
+  - 15.0 * shortReports
+  - 25.0 * longReports
+  +  2.5 * perfectJoins
+  +  8.0 * (timeRemaining > 0.12 ? 1 : 0),
+  0, 100)
+```
+
+`stats.kills` appears nowhere in `Score` and nowhere on the card. See §15.3.
+
+### 15.2 The card, and how it dies
+
+Twelve lines on Nights 1–3. From Night 4 the card **loses lines**, one group per night, until
+Night 7's card is one line. **Nothing announces the drop.** This is the same trick `STORY.md §9`
+pulls with the missing sub-lines on the Night Five and Night Seven title cards, which is the best
+joke in either document — and v1.0 never noticed it was there.
+
+| # | Line | Example | Dropped after |
+|---|---|---|---|
+| 1 | `ASSEMBLY REPORT — STEP n OF 7` | | N6 |
+| 2 | `PARTS INSTALLED` | `14 / 14` | N6 |
+| 3 | `JOINS, CORRECT` | `11` | N6 |
+| 4 | `JOINS, NOT AS ILLUSTRATED` | `2` | N6 |
+| 5 | `JOINS, REQUIRING REPLACEMENT` | `1` | N6 |
+| 6 | `FASTENERS, SUPPLIED` | `36` | **N4** |
+| 7 | `FASTENERS, REQUIRED` | `39` | **N4** |
+| 8 | `AUDIBLE FROM STRUCTURE` | `9` | **N5** |
+| 9 | `DISTANCE CARRIED` | `1,204 m` | **N5** |
+| 10 | `TIME REMAINING` | `00:41` | **N5** |
+| 11 | `ASSEMBLY QUALITY` | `62 / 100` | N6 |
+| 12 | `THANK YOU FOR CHOOSING SELF-ASSEMBLY.` | (always) | **N3** |
+
+**Lines per night: 12, 12, 12, 11, 9, 6, 1.**
+
+- **Night 4** drops line 12. The manual stops thanking you the night the comedy dies.
+- **Night 5** drops 6 and 7. It stops counting hardware — the night the missing part is a person.
+- **Night 6** drops 8, 9 and 10. It stops counting noise, distance and time.
+- **Night 7** is one line, centred, alone on the page:
+
+```
+ASSEMBLY COMPLETE.
+```
+
+At `assemblyQuality >= 95`, one extra line, Nights 1–6 only: `NO FURTHER ACTION REQUIRED.`
+At `assemblyQuality <= 20`, Nights 1–6 only: `RETAIN THIS DOCUMENT.`
+
+### 15.3 The register test, and what v1.0 got wrong
+
+v1.0's card was headed "**all of it deadpan, none of it acknowledging the murder**" and then read:
+
+```
+PERSONS WHO EXPRESSED CONCERN            3
+PERSONS WHO EXPRESSED CONCERN TO OTHERS  1
+JOINS, ORIENTED CREATIVELY               2
+JOINS, WHICH WE WILL NOT DISCUSS         1
+...and in red, at any kill count > 0:    PLEASE ASSEMBLE ALONE.
+```
+
+That last line is **a pun about killing people, aimed directly at the player, in red.** It is the
+camera-wink Pillar 1 forbids; it merely moved from the 3D scene to the UI layer, where nobody was
+checking. It also breaks `STORY.md`'s non-negotiable that the manual "stops being funny on Night
+Four" — v1.0 had it getting *funnier* the more people you killed. And `JOINS, ORIENTED CREATIVELY`
+and `JOINS, WHICH WE WILL NOT DISCUSS` are the same register: the manual being **arch**, not the
+manual being **serene**. All of it is deleted.
+
+**The register test, binding on every line of copy in this game:**
+
+> Read the line aloud in the voice of a document that does not know a person is reading it.
+> If it lands as a joke, it must land because the *situation* is absurd — never because the
+> document has noticed the situation is absurd. **The manual has no sense of humour. It has a
+> job.** `JOINS, NOT AS ILLUSTRATED` is a phrase a real assembly document would print. `JOINS,
+> ORIENTED CREATIVELY` is a comedian's phrase wearing a document's clothes.
+
+**Corollary: the card never mentions people.** No kill count, no "persons," no euphemism for a
+person. Not because the game is squeamish, but because a flat-pack assembly report has no field
+for it, and the moment it invents one, it has noticed — and the whole device is that it never
+notices. The player's kills are recorded in exactly one place in the entire game: a small safety
+panel in the corner of the manual (§13.4), drawn without comment.
+
+---
+
+## 16. ACCESSIBILITY & OPTIONS
+
+**Requested additions to `Settings`** (`ARCHITECTURE.md §7`) — Engine agent to add these exact
+keys; every other system reads them via `settings.get()`:
+
+```js
+difficulty: 'standard',            // 'story' | 'standard' | 'gristle'
+puzzleHints: 'standard',           // 'off' | 'standard' | 'generous'
+creakAssist: false,                // wrong joins get a persistent diegetic marker
+holdToCarry: true,                 // false = toggle instead of hold
+holdToCrouch: false,               // true = hold, false = toggle
+holdToToggle: false,               // ALL holds become tap-to-start progress bars (§4.2)
+photosensitive: false,             // §16.2
+lightningFlashes: 'full',          // 'full' | 'reduced' | 'off'   ← new in v2.0
+reducedGore: false,                // §4.5
+subtitleSize: 'medium',
+subtitleBackdrop: true,
+directionalAudioIndicator: false,
+reduceViewNoise: false,
+manualContrast: 1.0,               // 0.8 .. 1.6
+devTelemetry: false,               // §19 instrumentation, dev builds only
+```
+
+### 16.1 Difficulty modes
+
+| | `story` | `standard` | `gristle` |
+|---|---|---|---|
+| `diffMul` (detection accrual) | 0.62 | 1.00 | 1.35 |
+| Night duration × | 1.30 | 1.00 | 0.85 |
+| Creak `lambda` × | 0.60 | 1.00 | 1.25 |
+| **Seating band half-width `h`** | **0.150 (900 ms)** | **0.075 (450 ms)** | **0.055 (330 ms)** |
+| Shortfalls per night | −1 (min 1) | as §6.9 | +1 |
+| `'reported'` nights to `'evacuated'` | 5 | 3 | 2 |
+| G6 errata slip | always Tier 1 | as designed | may not exist |
+| Manual stays open while walking | yes | yes | **no** — you must stop to read |
+| Recut board cost | 0 | 1 | 2 |
+
+`gristle` is unlocked from the start. **Difficulty is changeable mid-run, no penalty, no shaming
+copy, and the night-end card does not mention it.**
+
+**On `gristle`'s 330 ms seating window:** with the 120 ms input-latency allowance (§4.1, §6.5) that
+is 210 ms of real margin — genuinely hard, deliberately so, and stated in milliseconds here so that
+nobody has to invert an exponent to discover it, which is what v1.0 required.
+
+### 16.2 Vision, motion, and the photosensitivity fix
+
+- **Colorblind** (`settings.colorblind`): the only load-bearing colour is the manual's `#d92b2b`.
+  In deuteranopia/protanopia it becomes `#0b57d0`; in tritanopia, `#c2185b`. **Every red mark is
+  redundantly encoded** with a 1.5 pt dashed stroke and a corner tick — colour is never the only
+  channel.
+- **`manualContrast`** raises the blueprint overlay's paper luminance and stroke weight
+  independently of the 3D scene's exposure. The §8.4 legibility invariant is asserted at the
+  *default* value, so raising it can only help.
+- `motionBlur`, `filmGrain`, `chromaticAberration`, `vignette`, `headBob` all disableable
+  (`ARCHITECTURE.md §7`). `reduceViewNoise` damps the handheld noise from ±0.35° to ±0.08° without
+  removing it (removing it entirely breaks the "big heavy man" read; the game asks first).
+
+**Photosensitivity — v1.0's accommodation was a no-op that also made the game easier.** It
+"capped lightning to 1 flash per 12 s" against a schedule of 6 strikes in 1020 s — one per 170 s,
+so the cap never engaged — while "compensating by lengthening thunder windows 1.4×," which made
+the mode strictly easier than `standard`. Both halves are replaced. With the real Night 6 schedule
+(~33 strikes, one per 25–60 s), this matters:
+
+| Setting | Flash | Timing information preserved? | Difficulty delta |
+|---|---|---|---|
+| `lightningFlashes: 'full'` | 40 ms spike, full luminance delta | yes | baseline |
+| `'reduced'` (auto-set by `photosensitive: true`) | **180 ms soft ramp**, luminance delta **≤ 25%**, no white frame | **yes** — the ramp peaks at a defined instant and the flash-to-thunder count is unchanged | **none** |
+| `'off'` | replaced by a **1.2 s sky-glow** with no transient — the horizon brightens and fades | **yes** — the glow's onset is the timing cue | **none** |
+
+**The strike schedule, the thunder delay and the envelope lengths are identical in all three
+modes.** The accommodation is perceptual, not mechanical. A photosensitive player counts the same
+seconds, gets the same windows, and plays the same game. Making the mode easier would have been a
+worse insult than the flash.
+
+### 16.3 Audio & puzzle
+
+- **Subtitles** cover all `ui:subtitle` events. Distant camper VO is subtitled with a **direction
+  and distance prefix**: `[NE, distant] "…did you hear that?"`. Mechanically relevant non-verbal
+  sounds are captioned too:
+  - `[creak — north, near]`
+  - `[thunder — 3 seconds]` ← **essential** for deaf players to use thunder masking (§7.5)
+  - `[saw — you, 90 m]` ← so a deaf player can budget the Night 3 cut
+  - `[breathing — you]` ← so a deaf player knows their stamina is emitting (§10.2)
+- `directionalAudioIndicator` draws a thin arc at the screen edge for any `noise:emit` **the player
+  produced** above intensity 0.3, and any camper `voice` within 40 m.
+- `puzzleHints`:
+  - `off` — no map inset, no audio cue, no rim light. The manual and nothing else.
+  - `standard` — the three-layer ladder in §6.9.
+  - `generous` — adds a persistent diegetic marker: the missing item is chalk-marked with an ✕ on
+    the manual's map inset, and a wrong join shows a small red thread tied to it in world space.
+    On Night 5, adds the counterweight panel (§6.7). **Nothing is highlighted through walls;
+    nothing pauses time.**
+- `creakAssist` — wrong joins get a permanent thin red chalk line on the timber at the join.
+  **Recommended for players who find the diagnostic layer frustrating.** It removes the *detective*
+  game, not the *stealth* game.
+
+**The design rule for accessibility here:** the horror lives in darkness, weight, and time
+pressure — none of which we relax. The frustration lives in *not knowing what you did wrong*,
+which we relax completely.
+
 <!--SECTION-BREAK-->

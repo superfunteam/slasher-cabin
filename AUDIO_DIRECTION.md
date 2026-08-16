@@ -698,4 +698,877 @@ over 2800 ms. Everything the player has heard for seven nights becomes 3.4 kHz b
 something.
 
 ---
+## 3. 3D Audio
+
+### 3.0 The world's actual extents
+
+v1.0 set `maxDistance: 140` and then made a series of claims that this clamp rendered literally
+inaudible: a hammer on steel "heard across the entire lake," a loon "at the far shore," a
+`thunder` radius of 400 m, a `whistle` radius of 90 m, and `GAME_DESIGN.md` §11's Night-1 camper
+laugh at exactly 140 m NE — sitting precisely on the clamp, where the inverse model's gain is
+already at its floor.
+
+Every number below is sourced. Audibility is controlled by `rolloffFactor` and the −60 dBFS voice
+kill (§9.3), **never** by a hard distance clamp.
+
+| Quantity | Value | Source |
+|---|---|---|
+| Playable bounds | 640 m (E–W) × 520 m (N–S) | derived from the rows below |
+| **World diagonal → `maxDistance`** | **825 m** | √(640² + 520²) = 824.6 |
+| Build plot ↔ camp centre | 140 m, bearing 042° (NE) | `GAME_DESIGN.md` §11 t=0:00 |
+| Tier-1 spawn ring | 20–45 m | `GAME_DESIGN.md` §2.5 |
+| Tier-2 spawn ring | 60–110 m | `GAME_DESIGN.md` §2.5 |
+| Tier-3 spawn ring | 120–190 m | `GAME_DESIGN.md` §2.5 |
+| Boathouse (inside the lit perimeter) | 90 m | `STORY.md` §4 Night Four |
+| **Cove width** (dock ↔ opposite bank) | **41 m** | the `LAKE_EDGE` 240 ms slap, §3.3: 0.240·343/2 = 41.2 m |
+| **Far shore** (the loon's fixed bearing) | **380 m, bearing 118°** | its own slap at 2.22 s, inside `LAKE_EDGE`'s 2.40 s RT60 |
+| Grave (Marit's) | 40 m uphill | `STORY.md` §7.17 |
+| Porcelain sink prop | 60 m | `STORY.md` §7.3 |
+| Dale's Night-1 station | 400 m, bearing 190° (S) | `STORY.md` §4 Night One: "four hundred metres off" |
+| `whistle` audible radius | 90 m | `GAME_DESIGN.md` §4.2 |
+| `thunder` noise radius | 400 m | `GAME_DESIGN.md` §4.2 |
+| Lightning strike distance | 0.4–4.2 km | `GAME_DESIGN.md` §3.3 |
+| State campground | 6 km | `STORY.md` §4 Night Three — **narrative only, never audible.** This is Bev's wrong explanation, and it has to stay wrong. |
+
+**The cove slap is now physically exact.** v1.0 asserted a "discrete slap at 240 ms" from the far
+shore and separately implied the far shore was distant. Both cannot be true: 240 ms of round trip
+is 41 m of water. So the 240 ms slap is the **cove**, which is genuinely 41 m across, and the far
+shore at 380 m produces its own slap at 2.22 s — which is why `LAKE_EDGE`'s RT60 is 2.40 s and not
+some rounder number. The reverb, the geography, and the loon's placement are now one consistent
+object.
+
+**Derived audible horizons** (inverse model, `refDistance 1.4`, source at its §1.3 level, killed
+at −60 dBFS):
+
+| Source | Rolloff | −60 dBFS at | Sanity check |
+|---|---|---|---|
+| Hammer on steel (−7 dBFS@1m) | 1.15 | **≈ 560 m** | covers the 380 m far shore and Dale's 400 m station. "A hammer on steel at night will be heard across the entire lake" is now a computed fact, not a boast. |
+| Hammer on wood (−13 dBFS@1m) | 1.15 | ≈ 280 m | reaches camp at 140 m comfortably — which is what makes `GAME_DESIGN.md` §11's t=1:12 beat work |
+| Tier-4 creak (−2 dBFS@1m) | 1.15 | ≈ 990 m (clipped to the world) | audible everywhere. Correct. |
+| Crouch footstep (−27 dBFS@1m) | 1.15 | ≈ 45 m | you can be heard further than you can be seen. Correct and important. |
+| Camper VO, ordinary take (−12 dBFS@1m) | 0.85 | ≈ 500 m | |
+| Dale singing, Night 1 (−6 dBFS@1m) | 0.85 | ≈ 980 m → arrives at 400 m at **−53.7 dBFS** | at the very edge of hearing: "drunk, singing half a song and giving up on it twice," exactly as `STORY.md` describes |
+
+### 3.1 Panner setup
+
+`AudioContext.listener` is driven from `ctx.camera` every frame using the modern
+`positionX/Y/Z`, `forwardX/Y/Z`, `upX/Y/Z` `AudioParam`s with `setTargetAtTime(v, now, 0.02)`.
+**Never `setPosition()`** (deprecated, and it jumps), and never an instantaneous value assignment,
+which causes zipper noise on HRTF convolution.
+
+```js
+panner.panningModel   = settings.tier('equalpower','equalpower','HRTF','HRTF');
+panner.distanceModel  = 'inverse';
+panner.refDistance    = 1.4;      // metres
+panner.maxDistance    = 825;      // §3.0 — the world diagonal, not a gameplay clamp
+panner.rolloffFactor  = 1.15;     // world SFX; see the class table below
+```
+
+| Class | `rolloffFactor` | Rationale |
+|---|---|---|
+| World SFX | 1.15 | the default |
+| Camper VO | 0.85 | carries further — you hear them before you understand them (§7.1) |
+| Campfire, lake, distant camp | 0.60 | landmarks must stay landmarks |
+| The chorus bed (§5.2) | 0.40 | it is the room, not an object in it |
+| Thunder | — | **not distance-panned at all.** A 2 km source has no parallax; it is a 2D stereo bed with a manual pan (§4.17) |
+
+**Cones** for directional emitters (a camper's mouth, the tin roof under rain):
+`coneInnerAngle 90, coneOuterAngle 240, coneOuterGain 0.35`. A camper facing away is quieter and
+darker, and that is a gameplay tell the player will learn without being told.
+
+#### 3.1.1 Elevation — continuous, because Night 5 lives on the boundary
+
+v1.0: "sources more than 2 m above the listener get `highshelf f=7000, gain=+3`; below, `−4`.
+Cheap and it works." It does not work. `GAME_DESIGN.md` §7 Night 5 is roof trusses, a ladder, and
+skyline exposure — the player spends that entire night crossing the 2 m boundary, and every
+camper, every cricket, and every raindrop would snap through a **7 dB** shelf on each crossing.
+
+```js
+// dy = source.y - listener.y, metres
+elevShelfDb = clamp(3.5 * Math.tanh(dy / 2.0), -4, +3);
+elevShelf.gain.setTargetAtTime(elevShelfDb, now, 0.15);
+```
+
+`tanh` rather than a clamped linear ramp so there is no derivative discontinuity at the clamp
+either: dy = 2 m → +2.67 dB, dy = 4 m → +3.00 dB (saturated), dy = −2 m → −2.67 dB. Smoothed at
+τ = 0.15 s, a ladder climb is a slow opening, not a switch.
+
+#### 3.1.2 Rolloff, occlusion, and the −60 dBFS kill are the only audibility controls
+
+Stated as a rule because it was violated once already: **no gameplay-relevant sound may be made
+inaudible by a distance clamp, a `maxDistance`, or a hard cutoff radius.** If something should not
+be heard at range, give it rolloff. The kill at −60 dBFS (§9.3) exists to save CPU on sounds that
+are already inaudible, not to enforce design intent.
+
+#### 3.1.3 Front/back — an explicit cue, on every tier
+
+This is the fix for the most consequential item in defect 25. §1.1 promises azimuth legibility.
+`panningModel: 'equalpower'` is a pure intensity pan: it provides **exactly zero** front/back
+discrimination. On `low` and `medium` — which is what a large fraction of players will run in a
+browser — a camper directly ahead and a camper directly behind are bit-identical. The game's
+stated core legibility requirement was not met on half the quality tiers, and no amount of HRTF
+on the other half fixes that.
+
+So front/back is carried by an explicit, cheap, tier-independent pair of cues, applied to **every
+3D source on every tier**:
+
+```js
+// az: 0 = directly ahead, π = directly behind
+const back = Math.max(0, -Math.cos(az));        // 0 ahead, 1 behind
+
+rearShelf.frequency.value = 4500;                        // pinna-shadow analogue
+rearShelf.gain.setTargetAtTime(-5.5 * back, now, 0.08);  // 0 dB ahead, −5.5 dB behind
+verbSend.gain.setTargetAtTime(baseSend + 0.08 * back, now, 0.12);  // rear sources are wetter
+```
+
+Two nodes per source: one `BiquadFilterNode` (persistent, in the voice slot, never constructed in
+`play()`) and one gain ramp on a send that already exists. Free.
+
+**Why this is the right mechanism and not a hack:** real human front/back discrimination is
+dominated by pinna filtering — a spectral notch and high-frequency shadow that varies with
+elevation and azimuth — plus the fact that rear sources reach the ear with a slightly higher
+direct-to-reverberant ratio penalty in enclosed spaces. A −5.5 dB shelf at 4.5 kHz plus +0.08 wet
+is a crude but *correct-signed* model of both. On HRTF tiers it reinforces the convolution rather
+than fighting it (the HRTF already darkens rear sources; this deepens it consistently). On
+`equalpower` it is the *only* front/back information in the graph, and it is enough.
+
+**Restated honestly, so §1.1 is a promise we keep:** azimuth to ±15° in the frontal hemisphere on
+`high`/`ultra`, ±25° on `low`/`medium`; ±30° behind on all tiers; **front/back unambiguous on all
+tiers.** That is what ships.
+
+### 3.2 Occlusion
+
+Owned by `AudioEngine`, informed by `NoiseSystem` where available (null-check
+`ctx.systems.get('NoiseSystem')`). Each 3D source has a two-path structure.
+
+#### 3.2.1 The graph — the bleed path must not be localized
+
+```
+                ┌─▶[directLPF]─▶[directGain]─▶[rearShelf]─▶[elevShelf]─▶[panner]────┐
+source(voice) ──┤                                                                   ├─▶ sfxWorld
+                └─▶[bleedLPF 400Hz]─▶[bleedGain]─▶[bleedPan (StereoPannerNode)]─────┘
+                                                          │
+                                                          └─▶ pan = 0.35 * sign(azimuth)
+```
+
+The **direct path** is occluded. The **bleed path** models diffraction around the occluder.
+
+v1.0 routed bleed into **the same `PannerNode` as the direct path** while claiming the result was
+"a dull thud with no location" and that "'I heard something but I don't know where' is the entire
+feel of the game." Routed through the panner, the bleed is fully localized and the stated quality
+is not produced by that graph. It is now a `StereoPannerNode` at `pan = 0.35 · sign(azimuth)` —
+a *hemisphere*, not a point. The player learns "something is over there, to the left, behind
+something," which is exactly the intended ambiguity and is a genuinely different perceptual object
+from a located source.
+
+`bleedPan` is deliberately **not** given the rear shelf or the elevation shelf. Diffracted energy
+has lost that information in the world, and it should lose it here.
+
+#### 3.2.2 Occluder thickness
+
+Effective thickness `T` accumulates along the listener→source path, in metres of *effective*
+material:
+
+| Occluder | Contribution to `T` |
+|---|---|
+| Pine trunk | 0.35 per trunk |
+| Canopy / undergrowth | 0.10 per metre of path inside the volume |
+| Terrain ridge | 4.0 (hard block) |
+| Cabin wall, single board layer | 0.55 |
+| Cabin wall, sheathed | 1.20 |
+| Tent canvas | 0.18 |
+| Boathouse / mess hall wall | 1.60 |
+| Water surface | 0.00 — water *helps*; see §3.3 `LAKE_EDGE` |
+
+These are audio's own numbers and are deliberately *ordered the same way* as `GAME_DESIGN.md`
+§4.2's blocker factors (trunk 0.88 > canvas 0.90 ... boathouse 0.45), so that a player's ear and
+a camper's ear agree about what is hard to hear through. They are not the same scale and they are
+not meant to be; what must match is the ranking.
+
+#### 3.2.3 The transfer functions — one formula, no prose
+
+```
+fc      = clamp(18000 * Math.exp(-0.55 * T), 180, 18000)   // Hz, directLPF
+gainDb  = clamp(-3.2 * T, -34, 0)                          // directGain
+bleedDb = clamp(-14 - 1.1 * T, -40, -14)                   // bleedGain
+```
+
+v1.0 specified the bleed gain **twice and incompatibly**: "always present at `−12 dB ·
+directGain⁻¹`-ish" in prose and `bleedDb = -14 - 1.1*T` in the formula block. The prose is
+deleted. "-ish" was doing load-bearing work in the game's most important system.
+
+Worked values:
+
+| Situation | `T` | `fc` | direct | bleed |
+|---|---|---|---|---|
+| One tree | 0.35 | 14.9 kHz | −1.1 dB | −14.4 dB |
+| Three trees | 1.05 | 10.1 kHz | −3.4 dB | −15.2 dB |
+| Cabin wall, sheathed | 1.20 | 9.3 kHz | −3.8 dB | −15.3 dB |
+| Terrain ridge | 4.00 | 2.0 kHz | −12.8 dB | −18.4 dB |
+| Three walls of the finished cabin | 3.60 | 2.5 kHz | −11.5 dB | −18.0 dB |
+| Boathouse wall + a ridge | 5.60 | 0.83 kHz | −17.9 dB | −20.2 dB |
+
+Smooth all three with `setTargetAtTime(τ = 0.08)` so a camper walking behind a tree **sweeps**
+rather than steps.
+
+#### 3.2.4 The whistle exception
+
+`camper_whistle` (§4.28.2) uses `gainDb` normally but floors `bleedDb` at **−24 dB** regardless of
+`T`. At radius 90 m it is the loudest camper event in the game and the mechanical signal that the
+head counselor has raised the alarm. A whistle through a wall is still a whistle. This is the only
+documented exception to §3.2.3 and it exists because ambiguity here is a bug, not a feature.
+
+#### 3.2.5 The raycast budget — the analytic estimate is **primary**
+
+`ARCHITECTURE.md` §12 caps the whole game at 12 raycasts/frame. `AudioEngine` may use **at most
+3**, via `Physics.raycast()`.
+
+v1.0 specified that "occluder thickness accumulates along the listener→source ray" with
+per-trunk contributions, at 3 rays/frame. Accumulating *all* trunk hits along a ray through an
+`InstancedMesh` forest requires enumerating every intersection, which needs a BVH this
+architecture does not list, and `Physics.raycast()` is documented as a pooled first-hit query.
+The v1.0 method could not be implemented as written.
+
+**The analytic estimate is therefore the primary method at all ranges:**
+
+```js
+// Sampled at 8 points along the listener→source segment, from a density grid baked at init.
+T_forest = pathLength * 0.10 * meanDensity        // canopy/undergrowth term
+         + trunkRate(meanDensity) * pathLength    // trunkRate ≈ 0.22 trunks/m at density 1.0
+T_ridge  = Terrain.segmentBelowHeightfield(a, b) ? 4.0 : 0.0;
+T        = T_forest + T_ridge + T_structures;
+```
+
+The density grid is 8 m cells, baked once in `AudioEngine.init()` by querying
+`Forest.densityAt(x, z)` (§0.4; fallback: 0.35 inside the 190 m ring, 0.55 outside). It costs
+one `Uint8Array` of 80 × 65 = 5200 bytes for the whole world.
+
+The **3 rays/frame** are reserved for exactly two cases, where the analytic estimate is known to
+be wrong and the error is audible:
+
+1. The **two nearest active sources** (nearest first), because at < 12 m a single trunk is the
+   difference between hearing a camper and not.
+2. **Cabin walls**, because `T_structures` needs a real geometric query and the cabin is the
+   thing the player hides behind (`GAME_DESIGN.md` §4.4: "the thing you are building is your best
+   cover").
+
+Results are cached per source for **120 ms** and sources are refreshed round-robin by priority
+(nearest and loudest first). Above 45 m, analytic only, always.
+
+### 3.3 Reverb — four persistent convolvers and one comb
+
+v1.0 contradicted itself inside a single section: "Only two `ConvolverNode`s exist at any time,"
+followed by per-source instructions routing the loon 0.85 wet to `LAKE_EDGE`, tin rain 0.45 to
+`TIN_ROOF`, far thunder 0.70 to `LAKE_EDGE` "even if the player is in the woods," and the distance
+layer 0.55 to `OPEN_FOREST`. A player under the tin roof at the lake edge hearing a loon needs
+three spaces resident simultaneously; two convolvers hold whatever the probe cell says.
+
+Two further problems: reassigning `.buffer` on a live `ConvolverNode` re-partitions the impulse
+response synchronously on the main thread **and** instantly truncates the outgoing tail — a click,
+in direct violation of §9.2. And the probe grid was 8 m cells, which is larger than the cabin
+footprint (the Night-5 north wall is 4.8 m per `STORY.md`), so `CABIN_SHELL` — "the cabin's reverb
+is a progress meter" — could never resolve.
+
+#### 3.3.1 The architecture
+
+**Four `ConvolverNode`s, created once in `init()`, buffers assigned once, never reassigned for the
+lifetime of the context.** Space selection is by **send gain only**. There is no crossfade of
+buffers because there is no reassignment of buffers.
+
+| Convolver | Space | RT60 (low / mid / high) | Early taps |
+|---|---|---|---|
+| A | `OPEN_FOREST` | 0.90 / 0.55 / 0.22 s | 6 taps, 11–48 ms, −9 dB |
+| B | `DENSE_TREES` | 1.35 / 0.95 / 0.30 s | 22 taps, 6–70 ms, −5 dB, randomized pan |
+| C | `CABIN_SHELL` | 0.55 / 0.62 / 0.40 s | 9 taps, 3–26 ms, −2 dB |
+| D | `LAKE_EDGE` | 2.40 / 2.10 / 1.10 s | 3 taps + the **41 m cove slap at 240 ms, −11 dB**, hard-panned; + the far-shore slap at 2.22 s, −19 dB |
+
+`TIN_ROOF` is **not** a convolver. Its character in v1.0 was "inverted spectrum, high band rings
+longer, plus a comb at 3.1 ms, feedback 0.5" — which is a feedback comb and two shelves, not a
+convolution. Building it as a persistent network (§3.3.4) costs ~7 nodes instead of a fifth
+convolution and frees the slot that made the architecture contradictory.
+
+At `settings.quality === 'low'`: **one** convolver, holding a 50/50 blend of `OPEN_FOREST` and
+`DENSE_TREES`, plus the tin comb. No space selection at all — only a global send level that
+tracks the listener's density sample.
+
+#### 3.3.2 IR generation
+
+Procedurally generated in an `OfflineAudioContext` during `AudioEngine.init()`. Budget: **< 140 ms
+total** for all four (measured; they render far faster than realtime). Generate at 24 kHz on
+`low`/`medium` and let the `ConvolverNode` resample; 48 kHz on `high`/`ultra`.
+
+Recipe per space: noise → per-band exponential decay envelopes (4 bands crossed at 250 / 1200 /
+5000 Hz, each with its own RT60) → a sparse set of early-reflection taps prepended → normalize to
+unity RMS → `normalize = false` on the `ConvolverNode` so our normalization is the one that
+counts.
+
+`CABIN_SHELL` additionally bakes two resonant modes at **118 Hz and 187 Hz, Q 9** — the half-built
+frame *rings*. See §3.3.3.
+
+#### 3.3.3 `CABIN_SHELL` occupancy is geometric, and the progress meter is continuous
+
+Not from the probe grid. Two inputs:
+
+```js
+// 1. Are we inside? Geometric, from the Build agent.
+const enc = CabinSite.enclosure?.(listenerPos);   // 0..1, TODO(api) §0.4
+// Fallback if absent — and this fallback is good enough to ship:
+const enc = clamp01(countInstalled('panel') / totalSlots('panel'));
+
+// 2. How built is it? This is the meter.
+sendC.gain.setTargetAtTime(0.55 * enc, now, 2.0);
+```
+
+The **continuous** `enc` is the entire point. `GAME_DESIGN.md` §4.4 makes installed panels both
+occlusion blockers and LOS blockers — "Panels installed = safety earned." The reverb says the same
+thing, continuously, with no UI: as the player seals the shell, their own footsteps acquire a
+room. On Night 2 there is no room. On Night 6 they are indoors and they built it. **Nothing
+announces this and nobody comments.**
+
+As `enc` rises past 0.6, additionally crossfade `CABIN_SHELL`'s send into a second, longer variant
+(RT60 +0.25 s, modes +6 dB) baked at init as a fifth buffer held in memory but assigned to no
+convolver — swapped by a **gain crossfade between two send paths into the same convolver**, never
+by reassigning `.buffer`. Two sends, one convolver, no click.
+
+The probe grid is retained **only** for the two outdoor spaces (`OPEN_FOREST` / `DENSE_TREES`) and
+is reduced to **4 m cells** (one byte per cell; 160 × 130 = 20,800 bytes for the world). Sampled
+every 250 ms.
+
+#### 3.3.4 The tin comb
+
+Persistent, built once, always in the graph, gated by `sendT`:
+
+```
+sendT ─▶[delay 3.1 ms]─┬─▶[highshelf f=4200, gain=+5]─▶[gain 0.50]─┐
+          ▲            └──────────────────────────────────────────▶├─▶[lowcut hp f=380]─▶ verbReturn
+          └──────────────────────────────────────────────────────  ┘   (feedback loop, 0.50)
+```
+
+Feedback 0.50 at 3.1 ms → a comb with peaks every 323 Hz and an RT60 of ≈ 0.031 s in the comb
+alone; the `+5 dB` shelf inside the loop is what makes the high band ring *longer* than the low
+band, which is the inverted-spectrum character that makes tin unmistakable. The 380 Hz high-pass
+in the return keeps the comb from muddying the body band (§1.2).
+
+`sendT` is opened only when `CabinSite.tinRoofArea()` reports the listener inside the roofed
+volume (fallback: within 6 m of the plot centre once a roof stage is complete). Ramp τ = 0.35.
+
+#### 3.3.5 Space dwell and send levels
+
+**Minimum dwell: 6 seconds.** Once the dominant outdoor space changes, it may not change again for
+6 s. Without this, a player walking a treeline oscillates between `OPEN_FOREST` and `DENSE_TREES`
+several times a second and the reverb *breathes* audibly. Architectural transitions (`CABIN_SHELL`,
+tin) are exempt — they are driven by continuous geometry, not by a discrete probe, and are
+naturally smooth.
+
+Per-bus base send levels:
+
+| Bus | Send |
+|---|---|
+| `sfxWorld` | 0.22 (per-source overrides in §4) |
+| `vo` | 0.12 at 0 m → 0.85 at 40 m (§7.2) |
+| `ambience` | 0.10 |
+| `music` | 0.35 — the score lives in the same forest as the player |
+| `sfxUI` | **0.00**, always, no exceptions |
+| `body` | **0.00**, always, no exceptions |
+
+Per-source overrides that need more than one space (the loon, far thunder) simply open **two**
+sends. That is now legal, because all four convolvers are always resident. It is what made the
+v1.0 architecture impossible and it is what four persistent convolvers buys.
+
+---
+
+## 4. The SFX Cookbook
+
+### 4.0 Primitives, and the LIVE/BAKED law
+
+#### 4.0.1 Shared primitives (build these first, in `ProceduralSFX.js`)
+
+**`NOISE`** — three 4.0 s stereo `AudioBuffer`s generated once at init: white; pink
+(Voss-McCartney, 16 octaves); brown (leaky integrator `y[n] = 0.996·y[n−1] + 0.03·w[n]`,
+DC-blocked). Every noise source is an `AudioBufferSourceNode` on one of these three with
+`loop = true`, a random `loopStart` offset, and `detune` in ±120 cents. **Never allocate a new
+noise buffer at runtime.**
+
+**`impulse(durMs)`** — a 2 ms noise burst with a linear ramp-down. Used to excite modal banks. Not
+a 1-sample spike: a spike is a `param.value` assignment in disguise and it clicks (§9.2).
+
+**`modal(exciter, modes[], dest)`** — the workhorse. `modes[]` is a list of
+`{ f, Q, gain, decayMs }`. Each mode is a persistent `BiquadFilterNode` (`type='bandpass'`,
+`frequency=f`, `Q=Q`) fed in parallel from the exciter, each into its own `GainNode` set to `gain`
+and then `exponentialRampToValueAtTime(1e-4, now + decayMs/1000)`. Sum to `dest`. **This one
+function produces every impact, ping, knock, clack, and body resonance in the game.** The filters
+live in the voice slot and are reused; only the exciter is recreated.
+
+**`grainTrain(rate, jitter, durMs, grainFn)`** — schedules `grainFn` at `1/rate` intervals with
+±`jitter` uniform timing noise, from a pre-allocated ring buffer of event descriptors (§9.3, zero
+garbage). Used for gravel, rain, crackle, saw teeth, zippers, the pen stroke.
+
+**`frictionOsc(params)`** — the stick-slip model behind every creak, squeak, drag, and pry. §4.12.
+
+**Envelope minimums.** Never `gain.value = 0`. Never a hard start. Every voice opens with a
+`linearRampToValueAtTime` of **≥ 4 ms** and closes with **≥ 8 ms** (exponential to 1e-4, then
+`setValueAtTime(0)` one quantum later). Not optional. It is the difference between a game and a
+clickfest.
+
+#### 4.0.2 LIVE vs BAKED — the node-churn law
+
+v1.0's §9.1 said "**Never build a `BiquadFilterNode` inside a `play()` call**," and then every
+grain recipe in §4 did exactly that. The arithmetic:
+
+| Recipe | v1.0 cost | Per second at `ultra` |
+|---|---|---|
+| Gravel footstep | 9–16 grains × (1 src + 2 biquad + 3 gain) ≈ 96 nodes | ≈ 180 at a sprint |
+| Rain on tin | 450 grains/s × ~6 nodes | **2,700** |
+| Rain on leaves | 450 grains/s × ~5 nodes | **2,250** |
+| Cricket chorus | ~90 chirps/s × 4 nodes | 360 |
+| Campfire crackle | 9 grains/s × 5 nodes | 45 |
+
+Roughly **5,500 node constructions per second** at `ultra`, each a main-thread allocation plus a
+graph-mutation message to the audio thread, competing with a 60 fps Three.js frame that also runs
+volumetrics and post. v1.0 budgeted only a *voice count*, which is the wrong unit entirely.
+
+**Every §4 recipe is now classified.**
+
+**`LIVE`** — synthesized in the live graph, per instance. Reserved for hero one-shots whose exact
+parameters carry gameplay information and therefore cannot be pre-rendered:
+
+> creaks (all tiers), the seating tap ladder, `join_seat` / the grind / `join_split`, the pry bar,
+> the saw's plate ring, wood splitting, hammer on wood, hammer on steel, thunder, the whistle,
+> the clean universe's three words, the grab, the Night 7 breath catch, all music voices, all
+> footstep IMPACT layers, all `frictionOsc` instances.
+
+**`BAKED`** — rendered into `AudioBuffer`s at init in an `OfflineAudioContext`, played as pooled
+`AudioBufferSourceNode`s with `detune` ±140 ¢ and `playbackRate` jitter ±6%. Everything grain-like:
+
+| Family | Variants | Length | Bytes (48 k mono f32) |
+|---|---|---|---|
+| `step_needles.material` | 12 | 60 ms | 138 KB |
+| `step_grass.material` | 12 | 75 ms | 173 KB |
+| `step_gravel.material` | 12 | 190 ms | 438 KB |
+| `step_mud.material` | 12 | 140 ms | 323 KB |
+| `step_wood.material` | 8 | 50 ms | 77 KB |
+| `step_tin.material` | 8 | 50 ms | 77 KB |
+| `rain_leaves.grain` | 16 | 20 ms | 61 KB |
+| `rain_tin.grain` | 16 | 45 ms | 138 KB |
+| `rain_water.plink` | 12 | 60 ms | 138 KB |
+| `fire.crackle` | 16 | 26 ms | 80 KB |
+| `fire.pop` | 8 | 80 ms | 123 KB |
+| `cricket.chirp` | 10 | 80 ms | 154 KB |
+| `glass.ping` | 12 | 230 ms | 530 KB |
+| `gravel.tick` | 12 | 40 ms | 92 KB |
+| `wood.tick` | 12 | 60 ms | 138 KB |
+| `zipper.grain` | 8 | 10 ms | 15 KB |
+| `saw.tooth` | 12 | 8 ms | 18 KB |
+| **Total** | | ≈ 14 s of audio | **≈ 2.7 MB** |
+
+Budget: **≤ 8 MB** and **≤ 400 ms** of offline render, executed asynchronously in `init()` off the
+first frame. Measured expectation ≈ 2.7 MB and ≈ 60–140 ms.
+
+**The hybrid rule, which is better than baking everything.** Footsteps are `[IMPACT] + [MATERIAL]
++ [TAIL]`. The **IMPACT layer stays LIVE** (3 nodes, and it is the transient the ear locks onto
+for surface identity and `loud`); the **MATERIAL grain layer is BAKED**. Twelve baked variants ×
+detune ±140 ¢ × rate jitter × a live impact whose filter tracks `loud` continuously gives more
+perceptual variety than v1.0's fully-live version, at 8% of the node cost. §4.1's rule "never play
+the same step twice" survives intact.
+
+#### 4.0.3 The budget, and how it is enforced
+
+| `settings.quality` | Node constructions/s | Per-frame hard cap |
+|---|---|---|
+| `low` | ≤ 24 | 2 |
+| `medium` | ≤ 40 | 3 |
+| `high` | ≤ 70 | 4 |
+| `ultra` | **≤ 120** | 6 |
+
+Enforcement:
+
+- `AudioEngine.stats.nodeChurn` — a rolling 1 s counter, incremented in the one factory function
+  through which all node construction is funnelled. Nothing constructs a node outside it.
+- Over the per-frame cap, construction requests are **deferred one frame**, up to **2 frames**,
+  then dropped. Dropped requests increment `AudioEngine.stats.dropped` and are chosen by the
+  §9.1 stealing score (lowest first), so what gets dropped is always a rain grain, never a creak.
+- `AudioEngine.stats.underruns` — read from `ctx.baseLatency` drift and from
+  `AudioContext.outputLatency` jumps; logged once per session via `Log.debug()` if non-zero.
+- `tools/node-churn-check.mjs` (§11.3) runs a headless 60 s worst-case scene (storm + cascade +
+  five campers + sprint on gravel) and fails the build if the budget is exceeded.
+
+---
+
+### 4.1 Footsteps — `LIVE` impact, `BAKED` material
+
+Structure for all surfaces: `[IMPACT] + [MATERIAL] + [TAIL]`, total 60–260 ms, triggered by
+`player:footstep { position, surface, loud }`.
+
+`loud` scales gain and, critically, **which baked material variant is selected and at what
+playback rate** — a heavy step displaces more material, so `loud > 0.5` selects from the upper six
+variants (rendered with 1.6× grain count) and `loud ≤ 0.5` from the lower six. Randomize `detune`
+±140 ¢ per step. Left/right alternate with a −1.5 / +1.5 semitone bias so the gait is organic
+without limping.
+
+Every step emits `noise:emit { kind:'footstep' }` at the §1.3 row matching the player's movement
+state and carry class. **The surface multiplies the emitted intensity** — this is a level-design
+tool and the player must be taught it:
+
+| Surface | Intensity × | Why |
+|---|---|---|
+| Mud | **0.60** | dead surface, no tail — the safest floor in the game |
+| Pine needles | 1.00 | the baseline |
+| Wet grass | 1.10 | |
+| Sawn wood | 1.25 | |
+| Gravel | **1.70** | loudest natural surface |
+| Tin | **2.40** | a suicide surface, and a comedy surface |
+
+**Pine needles** (the default forest floor)
+- IMPACT `LIVE`: brown noise, 18 ms, lowpass `f = 180 + 90·loud, Q = 0.7`, env `A 2 / D 16` exp,
+  −18 dBFS@1m.
+- MATERIAL `BAKED` (`step_needles.material`): each variant is `grainTrain(rate=180, jitter=0.6,
+  dur=55ms)`, 6–11 grains, each 4 ms white noise through bandpass
+  `f = 2400·(1 + rand(−0.35, 0.6)), Q = 3.5`, exp decay 9 ms.
+- TAIL `BAKED` (folded into the variant): pink noise 90 ms, highpass 1800, bandpass
+  `f = 3600, Q = 0.8`, env `A 4 / D 86`, −24 dBFS@1m. **This dry rustle is what makes needles read
+  as needles**, and it is the reason the default surface is not the quiet one.
+
+**Mud**
+- IMPACT `LIVE`: brown noise 30 ms, lowpass sweeping `900 → 260` over 40 ms, `Q = 1.4`,
+  −10 dBFS@1m.
+- MATERIAL `BAKED`: **the suck.** A bandpass sweeping **upward** `180 → 620 Hz` over 130 ms at
+  `Q = 7`, fed by pink noise at −16 dBFS@1m, env `A 30 / D 100`, offset 40 ms after the impact.
+  The rising resonance *on the lift* is the entire signature of mud, and it is why mud reads as
+  slow: the sound tells you your foot is still coming out.
+- TAIL: none.
+
+**Wet grass**
+- IMPACT `LIVE`: as needles but lowpass 180, −20 dBFS@1m.
+- MATERIAL `BAKED`: `grainTrain(rate=260, jitter=0.8, dur=70ms)`, grains 3 ms noise through
+  bandpass `f = 5200·rand(0.7, 1.4), Q = 2.2`, decay 14 ms.
+- TAIL `BAKED`: 120 ms noise wash, bandpass `f = 900, Q = 0.6`, −26 dBFS@1m. The blade-slap.
+
+**Gravel**
+- IMPACT `LIVE`: brown noise 22 ms, lowpass 300, −12 dBFS@1m.
+- MATERIAL `BAKED`: `grainTrain(rate=95, jitter=1.0, dur=180ms)` — 9–16 grains, deliberately
+  sparse and irregular. Each grain is
+  `modal(impulse(1ms), [{f:1200·r, Q:14, g:1, d:35}, {f:2900·r, Q:9, g:0.5, d:22}])`,
+  `r = rand(0.75, 1.45)`. **Stones are little resonators, not noise.**
+- Grains keep arriving for 180 ms, so a running player on gravel emits an unbroken stream at
+  1.70× intensity. That is the design.
+
+**Sawn wood** (the cabin deck, planks, the truck bed)
+- IMPACT `LIVE`: `modal(impulse(2ms), [{f:186,Q:26,g:1.00,d:120}, {f:432,Q:34,g:0.55,d:95},
+  {f:971,Q:28,g:0.30,d:62}, {f:1830,Q:20,g:0.14,d:40}])` — the plank's flexural modes.
+- BODY `LIVE`: lowpassed noise thud, `f = 140`, 40 ms, −14 dBFS@1m — the boot itself.
+- HOLLOW `LIVE`, conditional: over the cabin's crawl space, add `{f:88, Q:7, g:0.40, d:340}`.
+  **The cabin booms underfoot as it gets built.** Free progression cue, and it pairs with the
+  `CABIN_SHELL` meter (§3.3.3) so the floor and the room agree.
+
+**Tin** (roof sheets, shed, water tank)
+- IMPACT `LIVE`: 6 inharmonic modes, `f = [412, 703, 1147, 1892, 2611, 4380]`,
+  `Q = [90, 120, 140, 160, 150, 110]`, gains `[1, .72, .55, .48, .30, .18]`,
+  decays `[900, 780, 640, 520, 380, 240] ms`.
+- MEMBRANE `LIVE`: sine 74 Hz, `exponentialRamp` to 58 over 180 ms, env `A 3 / D 200`,
+  −8 dBFS@1m.
+- OIL-CANNING `LIVE`: after 120 ms, 20% chance of a second `modal` hit at 0.94× the frequencies —
+  the sheet popping back. Model it accurately; do not shorten it; it is not a gag (§1.5).
+
+### 4.2 The lantern
+
+Carried at all times; the player's light and their liability. Three layers under a single
+`PannerNode` parented ~0.9 m ahead and 0.4 m below the eye. Gated on `Player.illumination` and the
+lantern's own lit state.
+
+**Gas hiss** `LIVE`, continuous — pink noise → bandpass `f = 2350, Q = 0.85` → highshelf
+`f = 6000, gain = −8` → gain **−38 dBFS@1m**. Amplitude-modulated by the flame flicker: a random
+walk (`setTargetAtTime` every 60 ms to `0.85 + rand(0, 0.3)`, τ = 0.04) plus a **11.5 Hz** sine at
+±0.06. Continuous, always on, and the player will stop hearing it in 90 seconds — which is the
+whole point of §8 S8.
+
+At fuel < 15 units (`GAME_DESIGN.md` §6.2, where the flame gutters at 3 Hz and the flicker itself
+becomes a detection spike), the random walk's period drops to 20 ms and its range widens to
+`0.45 + rand(0, 0.7)`. **The lantern audibly panics before the light does**, giving the player
+about four seconds of warning that their illumination is about to start spiking their own
+detection.
+
+**Handle squeak** `LIVE` — `frictionOsc` tier 1 (§4.12), gated to the bail's swing. The bail
+pivots twice per step cycle; fire at each velocity extremum **only if `|angularVel| > 0.9 rad/s`**.
+`f_center = 1750·(1 + 0.4·|angVel|)`, duration 90–180 ms, −26 dBFS@1m.
+
+**The faster you move, the more you squeak. Crouch-walk never squeaks.** This is the game's
+stamina-versus-stealth dial and it is entirely audible with no UI. It emits no `noise:emit` of its
+own — it rides the footstep that caused it — because a second emitter on the same event would
+double-count the player's noise in `Campers`.
+
+**Glass rattle** `BAKED` (`glass.ping`) — on any footfall with `loud > 0.22`, fire 2–5 pings:
+`modal(impulse(0.5ms), [{f:2830·r,Q:95,g:1,d:210}, {f:4410·r,Q:110,g:0.6,d:170},
+{f:6920·r,Q:80,g:0.25,d:120}])`, `r = rand(0.97, 1.03)`, staggered 0–35 ms, −30 dBFS@1m. Scale
+count and gain linearly with `loud`. On tin or gravel, one extra ping and +4 dB.
+
+### 4.3 Lumber
+
+**Hoisting** (`build:pickup`, class C/D) — three layers over 900 ms:
+1. Cloth/effort `LIVE`: pink noise, bandpass `f = 1100, Q = 0.8` sweeping `800 → 1400` as the beam
+   comes up, env `A 120 / S 300 / R 400`, −30 dBFS@1m.
+2. Wood groan `LIVE`: `frictionOsc` tier 2 at `f_center = 240`, only if mass > 60 kg (i.e. beams
+   and trusses, per `GAME_DESIGN.md` §2.1).
+3. Shoulder seat `LIVE`: sine 62 → 48 Hz over 120 ms, −16 dBFS@1m, at the moment the load lands.
+
+Plus the breath (§4.27.1) switches to `HEAVY` for 4 s. **No grunt. Ever.** `STORY.md` §2: "Not a
+grunt of exertion, not a roar."
+
+**Dragging (lumber)** — a sustained loop, `noise:emit { kind:'drag', radius:22, intensity:0.38 }`
+every 0.5 s:
+
+```
+bed:    brown noise → modal(sawn-wood 4 modes, Q reduced to 8, excited continuously)
+                    → gain ∝ dragSpeed
+grain:  grainTrain(rate = 40 + 90·speed, jitter=0.9) of 6 ms bandpass-2200 grains  [BAKED: wood.tick]
+global: lowpass fc = 600 + 2400·speed, Q 0.7
+```
+
+Broad `Q` because a beam sliding on duff is excited continuously and everything damps everything.
+
+**Dropping** (`build:drop`) — the loudest routine build sound. `noise:emit { kind:'drop' }` at the
+§1.3 row for the carry class.
+1. Sub `LIVE`: sine 58 Hz → 41 over 90 ms, env `A 2 / D 300`, −6 dBFS@1m.
+2. Body `LIVE`: sawn-wood modal bank at `Q × 1.4`, decays × 1.6, −4 dBFS@1m.
+3. Surface `BAKED`: the surface's material variant at the 1.6× grain-count tier.
+4. Bounce `LIVE`: 55% chance of a second impact at `t = 140 + rand(0, 60) ms`, and a third if the
+   second fired. Restitution: `t_{n+1} = t_n · 0.72`, `gain_{n+1} = gain_n · 0.45`.
+
+**Two beams knocking** — the sound of the player fumbling. Pure `modal`, `LIVE`:
+`[{f:214,Q:40,g:1,d:180}, {f:496,Q:52,g:0.7,d:150}, {f:1130,Q:44,g:0.4,d:95}]`, excited by a
+1.5 ms burst highpassed at 900. Dry, woody, almost musical. **Pitch-shift the bank by beam
+length:** `f × (2.4 / lengthMetres)`. A 3.2 m beam and a 2.6 m beam therefore knock at different
+pitches — which is the audio half of grammar **G4** (`GAME_DESIGN.md` §2.4: "Two beams differ only
+in length. No dimensions are printed"). A player who learns this can identify which beam is in
+their hands in total darkness. That is the single most valuable thing this cookbook gives a
+skilled player and it costs three filters.
+
+**Carry bump** (`Physics` reports > 1.2 m/s relative): the knocking bank at
+`gain = −18 + 14·speedNorm`, plus `noise:emit { kind:'impact', radius:18,
+intensity: 0.25 + 0.4·speedNorm }` per `GAME_DESIGN.md` §5.3.
+
+### 4.4 Hammer on wood — `LIVE`
+
+The single most-repeated gameplay sound in the game. Every element carries information.
+
+- TRANSIENT: 1.2 ms noise burst, highpass 2000, −6 dBFS@1m. Steel face meeting fibre.
+- **NAIL:** `modal(sameExciter, [{f: fNail, Q:180, g:0.35, d:110}, {f: 2.16·fNail, Q:140,
+  g:0.18, d:70}])`. **`fNail` rises 4% per strike** as the nail seats — shorter free length, higher
+  mode. This is the progress readout and §4.7 turns it into the game's central skill check.
+- **REFERENCE:** a fixed `{f: 3510, Q: 30, g: 0.12, d: 90}` partial in the WOOD layer — the backing
+  board's own mode, physically justified and perceptually load-bearing. See §4.7.2.
+- WOOD: sawn-wood modal bank, `Q × 0.8`, decays × 0.7, −8 dBFS@1m.
+- BODY: sine 96 → 71 Hz over 70 ms, −14 dBFS@1m.
+
+Total ≈ 340 ms. `noise:emit { kind:'hammer', radius: 34, intensity: 0.30–0.55 }` per strike,
+intensity from the §4.7 tap ladder. **Radius is 34 m, from `GAME_DESIGN.md` §4.2** — v1.0 said
+42 m, which is 52% more area and a materially different game.
+
+### 4.5 Hammer on steel — `LIVE`
+
+Bracket, spike, the anvil in the shed. Same transient, then:
+
+```js
+modal(exciter, [
+  { f:  2130, Q:  900, g: 1.00, d: 1800 },
+  { f:  3910, Q: 1100, g: 0.75, d: 1600 },
+  { f:  5740, Q:  800, g: 0.50, d: 1200 },
+  { f:  8320, Q:  600, g: 0.28, d:  800 },
+  { f: 11200, Q:  400, g: 0.12, d:  500 },
+]);
+```
+
+- **Nonlinear pitch glide:** immediately after the strike, detune all modes +35 ¢ and
+  `exponentialRamp` back to 0 over 240 ms. Real struck metal goes sharp under high amplitude and
+  settles. Without this it is a synth. With it, it is metal.
+- **`WaveShaperNode`, soft clip, 3rd-order, drive 1.6, on the first 60 ms only, then bypassed —
+  and `oversample: '4x'`.** With the default `'none'`, an 11.2 kHz partial through a 3rd-order
+  shaper folds its harmonics back below Nyquist as inharmonic mud, and this bank has the highest
+  partials in the game. `'4x'` is mandatory here and on all five shapers (§9.3.4).
+- DC blocker after the shaper: `highpass f = 18, Q = 0.7` (§9.2 rule 7).
+
+`noise:emit { kind:'hammer', radius: 34, intensity: 0.55 }` — same canonical row as wood. v1.0
+gave steel a private 85 m radius, which does not exist. Its **audible** horizon is ≈ 560 m
+(§3.0), and that is where "heard across the entire lake" actually lives: the player hears it
+carry, the campers respond at 34 m. The gap between those two numbers is the most useful lie in
+the game and it is now deliberate rather than accidental.
+
+### 4.6 Bracket dropped on rock — `LIVE` bank, `BAKED` ticks
+
+- Bounce sequence: 3–5 impacts, `t_1 = 0, t_2 = 165 ms`, `t_{n+1} = t_n · 0.68`, gains
+  `−0 / −7 / −13 / −19 / −25` dB relative to −17.0 dBFS@1m (the `drop` class-B row).
+- Each impact: the steel bank (§4.5) with decays scaled to `[220, 180, 150, 120, 90] ms` and a
+  **different random detune per bounce (±90 ¢)** — the bracket is tumbling and presenting
+  different faces.
+- Each impact also gets a rock tick `BAKED` (`gravel.tick`):
+  `modal(impulse(0.8ms), [{f:1700·r,Q:22,g:0.5,d:26}, {f:4300·r,Q:16,g:0.3,d:16}])`.
+- Final settle: `grainTrain(rate = 34 → 90 accelerando, dur = 380 ms)` of quiet (−28 dBFS@1m)
+  short metal ticks, like a dropped coin coming to rest.
+
+**Direction — and this replaces v1.0's, which broke pillar 1.** v1.0 wrote: "The comedy sound. It
+must be *inconveniently* charming… **This tail is the joke.**" The world does not do bits (§1.5).
+
+> **Model this accurately and mix it flat. Do not shorten it, do not sweeten it, do not add a
+> button, do not put a smile on the final tick. It is 380 ms long because a tumbling steel bracket
+> settling on rock takes 380 ms, and nobody involved in making this sound thinks it is funny.**
+
+It *is* funny. The player has been perfectly silent for ninety seconds and a small piece of
+hardware is now going to spend nearly half a second announcing itself, and then a camper is going
+to say `COO_HEAR_01` — "Deer. That's deer. That's a deer thing." **The laugh is in the
+consequence.** The bracket is just a bracket.
+
+### 4.7 The seating check — the game's central skill, as a tap ladder
+
+`GAME_DESIGN.md` §2.3 calls this "the single most important interaction in the game." v1.0
+specified a *screw torque* readout with a continuous grain train and a seat cue at
+`torque > 0.86`. **There are no screws in this game, there is no continuous torque value, and 0.86
+is not the target.** The real check is a 2.2 s hold against `p = (t/2.2)^1.35` with a green band
+at `p ∈ [0.72, 0.88]`, resolved in **3–6 discrete hammer taps**. A player releasing on v1.0's seat
+thump would have had 0.02 of margin before a cosmetic dimple and 0.10 before splitting the wood.
+
+#### 4.7.1 The tap ladder — **DERIVED from `GAME_DESIGN.md` §2.3**
+
+The design gives tap *counts* per outcome band. Those counts uniquely determine the tap positions:
+
+| Release at | Taps | Only possible if taps sit at `p` = |
+|---|---|---|
+| `p < 0.72` | 3 | 0.18, 0.40, 0.62 |
+| `p ∈ [0.72, 0.88]` | 4 | + 0.80 |
+| `p ∈ (0.88, 0.96]` | 5 | + 0.92 |
+| `p > 0.96` | 6 | + 0.98 |
+
+Inverting the ease-in curve, `t = 2.2 · p^(1/1.35)`:
+
+| Tap | `p` | `t` (ms) | Δt from previous | `noise:emit` intensity | `fNail` (Hz) | \|Δ from 3510\| |
+|---|---|---|---|---|---|---|
+| 1 | 0.18 | 618 | — | 0.30 | 3120 | 390 |
+| 2 | 0.40 | 1116 | 498 | 0.30 | 3245 | 265 |
+| 3 | 0.62 | 1544 | 428 | 0.35 | 3375 | **135** |
+| **4** | **0.80** | **1865** | **321** | **0.35** | **3510** | **0** |
+| 5 | 0.92 | 2068 | 203 | 0.40 | 3650 | **140** |
+| 6 | 0.98 | 2167 | 99 | 0.55 | 3796 | 286 |
+
+**The taps accelerate**, from 498 ms apart to 99 ms apart, because the design's own ease-in curve
+says so. That accelerating rhythm is a learnable clock, and it is free — nobody had to invent it.
+
+#### 4.7.2 The band cue — critical-band roughness, not a beat rate
+
+Each tap's nail mode is beaten against the fixed 3510 Hz reference partial in the wood layer
+(§4.4). The ear's response to two tones separated by Δ inside one critical band is *roughness*,
+peaking near a quarter of the ERB. At 3510 Hz, `ERB = 24.7·(0.00437·3510 + 1) = 404 Hz`, so
+roughness peaks near **101 Hz** of separation.
+
+| Tap | Δ | Perceptual result |
+|---|---|---|
+| 1 | 390 Hz | ≈ one ERB: a clean, wide, unremarkable interval |
+| 2 | 265 Hz | mildly rough |
+| 3 | 135 Hz | **near-maximum roughness** — harsh, buzzing, *wrong-sounding* |
+| **4** | **0 Hz** | **perfect fusion. One tone. Clean.** |
+| 5 | 140 Hz | **near-maximum roughness again** |
+| 6 | 286 Hz | rough, then the split |
+
+**The band tap is the only clean tap in the ladder and it is flanked on both sides by the two
+roughest.** A player does not need to count taps or watch a bar. They need to release on the one
+that stops buzzing. That is an unmistakable perceptual target that works through rain, through
+occlusion, on a laptop speaker, and with the eyes closed — which is §1.1's actual requirement.
+
+The review proposed signalling the band by "the third partial's beat rate against a −20 dB
+reference sine dropping below 3 Hz." That does not work at these separations: beating is only
+perceived as a *rate* below roughly 20 Hz of separation, and tap 3 is 135 Hz away. The
+mechanism had to be roughness, not beating. The *idea* — make the ear do arithmetic the eyes
+cannot — was right and is what this section implements.
+
+#### 4.7.3 Asymmetry: which side of the band are you on?
+
+Roughness is symmetric, so taps 3 and 5 sound similar. The disambiguation is not inferred — it is
+a **new sound**, exactly where the design puts a new consequence:
+
+- **Tap 5** (`p ∈ (0.88, 0.96]`, "over-torqued, cosmetic dimple"): add the **dimple** —
+  a 1.5 ms noise burst lowpassed at 900, `Q = 1.2`, plus a 40 ms fibre-crush tail
+  (`grainTrain(rate=90, jitter=1.0, dur=40ms)` of 2 ms bandpass-1300 grains), at −20 dBFS@1m.
+  Soft, dull, and slightly sickening. It is the sound of wood giving up a little.
+- **Tap 6** (`p > 0.96`): the dimple, then `join_split` (§4.8) at full level, plus the design's
+  `noise:emit { kind:'impact', radius:30, intensity:0.60 }`, plus an instant severity-0.7 creak.
+
+So: buzz, buzz, **clean**, dimple, catastrophe. Four distinguishable states, all diegetic, no HUD.
+
+#### 4.7.4 Thunder masking and the first-time exception
+
+`GAME_DESIGN.md` §2.3: "Under thunder masking the player can hold to `p = 0.88` at zero effective
+risk. Skilled play is timing your hammering to the storm." §4.17.4 is what makes that timeable.
+
+`GAME_DESIGN.md` §11 t=1:02: the first seating check ever opens automatically, with the band at
+2× width and time at 0.6×. At 0.6× time the taps land at 1030, 1860, 2573, 3108, 3447, 3612 ms and
+the pitch ladder stretches with them. **Do not compensate the pitches for the time scale** — let
+the whole ladder run slow, so the player's first experience of the cue is at half speed, and every
+subsequent one is the same shape faster.
+
+### 4.8 Wood splitting — `LIVE`
+
+- **Pre-crackle:** `grainTrain(rate = 12 → 70 accelerando over 400 ms, jitter 1.0)`, grains =
+  `modal(impulse(1ms), [{f:1900·r,Q:30,g:1,d:40}, {f:3800·r,Q:24,g:0.4,d:24}])`,
+  `r = rand(0.6, 1.6)`. Fibres letting go one at a time. **Rising density is rising dread**, and it
+  is the only accelerando in this document that is allowed to build tension, because it is the one
+  place where the outcome is not yet decided.
+- **THE CRACK:** 3 ms noise burst highpassed at 1200, −2 dBFS@1m; **plus** a downward chirp, sine
+  1400 → 180 Hz over 55 ms (the whipcrack of release); **plus** the sawn-wood bank at `Q × 2`,
+  `gain +6 dB`, decays × 2.5.
+- **Tear tail:** pink noise 700 ms, bandpass sweeping `2600 → 700 Hz`, `Q 1.6`, exp decay,
+  −16 dBFS@1m.
+
+Emits `noise:emit { kind:'impact', radius: 30, intensity: 0.60 }` per `GAME_DESIGN.md` §2.3.
+v1.0 invented a `split` kind at intensity 0.90 — deleted. The design routes splits through
+`impact` and 0.60 is the number.
+
+### 4.9 The four placement outcomes — the truth table
+
+This is the most important table in the cookbook, because three of its four rows are about
+*withholding* information. `build:place { part, slot, correct }` carries only a boolean; the
+outcome class comes from `state.installed[slotId]` on the next tick, or from `BuildSystem`'s
+`audio:sfx` id, whichever arrives first.
+
+| Outcome | `correct` | `w` | Sound, at the moment of placement | Duration | Later |
+|---|---|---|---|---|---|
+| **Seated** | `true` | 0.00 | `join_seat`: `modal([{f:158,Q:30,g:1,d:150},{f:390,Q:26,g:0.5,d:110}])` + a 4 kHz tick at −24 dBFS@1m. Mixed **+2 dB louder than it strictly needs to be.** | 210 ms | silence forever |
+| **Rotated** | `false` | 0.35 | `join_seat`, then **the grind** (§4.9.1) | 210 + 400 ms | creaks |
+| **Wrong slot** | `false` | 0.60 | **`join_seat`. Identical. Nothing else. No tell of any kind.** | 210 ms | creaks; the part it belonged in can never be seated |
+| **Wrong part** | `false` | 1.00 | the pry-bar sequence (§4.11) then `join_split` (§4.8) | 1400 + 900 ms | permanent 1.0 wrongness |
+
+`join_seat` is the most satisfying sound in the game and it should be mixed slightly louder than
+strictly necessary. It is the entire positive-feedback economy of a game with no score, no XP, and
+no HUD.
+
+**Row 3 is a contract.** Wrong-slot must be *acoustically indistinguishable* from Seated. Not
+subtle — **identical**: same recipe, same level, same reverb send, same random seed policy. Any
+future engineer who adds "just a tiny difference" to help players has removed grammar G4 and G5
+from the game (`GAME_DESIGN.md` §2.4) and turned a diagnostic puzzle into a compliance test. This
+row is annotated in the registry (§10) with `MUST_BE_IDENTICAL_TO: join_seat`.
+
+#### 4.9.1 The grind — the discrimination the player must *almost* miss
+
+`GAME_DESIGN.md` §2.3, Rotated: "seats, but with 6 mm visible offset and a **0.4 s grinding
+tail**." This is the finest discrimination in the game. It has to be genuinely detectable and
+genuinely missable, and v1.0 did not specify it at all.
+
+```
+frictionOsc:  slipRate 46, N = 11, duration 400 ms
+              f_center 1180 → 1040 Hz, Q = 34, pitchDrop 220 ¢
+              gain −27 dBFS@1m  (i.e. 10 dB below the join_seat thump that precedes it)
+bed:          brown noise → lowpass f_center/3 → −34 dBFS@1m
+onset:        begins 180 ms after the seat thump — i.e. *inside* the thump's own 210 ms decay
+```
+
+The onset offset is the whole design. The grind begins while the seat thump is still ringing, at
+10 dB down, in the same frequency neighbourhood the thump's second mode (390 Hz) has already
+vacated. A player who is listening hears it. A player who is watching a camper's torch does not.
+**Both are correct outcomes**, and the second one is why the creak system exists.
+
+`Q = 34` is deliberately low for a `frictionOsc` — the two surfaces are in full contact under load
+and heavily damped, so it grinds rather than squeals. A high-Q grind would sound like a small
+creak and the player would learn the wrong lesson.
+
+No `noise:emit`. The grind is quiet, close, and for the player alone. Campers do not hear you make
+a mistake; they hear the mistake nine seconds later, which is the game.
+
+---
 <!--CONTINUE-->
+

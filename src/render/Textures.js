@@ -273,6 +273,13 @@ const DECLS = /* glsl */`
 struct Surf { vec3 albedo; float rough; float metal; float ao; };
 float H(vec2 uv);
 Surf  S(vec2 uv, float h, float ao, vec3 n);
+// Opacity, for alpha-to-coverage cards (foliage, fern, dirty glass).  Sets that declare
+// { alpha: true } get HAS_ALPHA and must define A(); everything else is solid.
+#ifdef HAS_ALPHA
+float A(vec2 uv, float h);
+#else
+float A(vec2 uv, float h) { return 1.0; }
+#endif
 `;
 
 const MAIN = /* glsl */`
@@ -328,7 +335,7 @@ void main() {
   // 1/255 triangular dither on the normal so smooth relief does not band in RGBA8.
   float dth = (hash12(gl_FragCoord.xy * 0.7371) - 0.5) / 255.0;
 
-  oAlbedo = vec4(clamp(s.albedo, 0.0, 1.0), 1.0);
+  oAlbedo = vec4(clamp(s.albedo, 0.0, 1.0), clamp(A(uv, h), 0.0, 1.0));
   oNormal = vec4(clamp(n * 0.5 + 0.5 + dth, 0.0, 1.0), h);
   oORM    = vec4(clamp(s.ao, 0.0, 1.0), s.rough, clamp(s.metal, 0.0, 1.0), cav);
 }
@@ -1061,6 +1068,291 @@ Surf S(vec2 uv, float h, float ao, vec3 n) {
 }
 `;
 
+// --- pine foliage card (ALPHA) -----------------------------------------------------------------
+// A sprig of needles for the canopy cards.  Alpha-to-coverage, never alpha-test
+// (ART_DIRECTION §5.2) -- Materials should set `alphaToCoverage: true`, not `alphaTest`.
+M['foliage-pine'] = /* glsl */`
+float needles(vec2 uv, out float id, out float tip) {
+  Seg a = segField(uv * vec2(13.0, 13.0), vec2(13.0, 13.0), 0.48, 1.30, 0.34);
+  Seg b = segField(uv * vec2(17.0, 17.0) + 6.0, vec2(17.0, 17.0), 0.46, 1.86, 0.30);
+  float ma = 1.0 - smoothstep(0.010, 0.030, a.d);
+  float mb = 1.0 - smoothstep(0.008, 0.026, b.d);
+  id = ma > mb ? a.id : b.id;
+  tip = ma > mb ? abs(a.t) : abs(b.t);
+  return max(ma, mb);
+}
+float H(vec2 uv) {
+  float id, tip;
+  float nm = needles(uv, id, tip);
+  // twigs: the woody spine the needles hang off
+  Seg t = segField(uv * vec2(5.0, 5.0) + 2.0, vec2(5.0, 5.0), 0.49, 1.55, 0.22);
+  float tw = (1.0 - smoothstep(0.012, 0.030, t.d)) * step(0.30, t.id);
+  // a needle is a half-round section: highest along its spine, falling to the edges
+  return clamp(nm * (0.55 + 0.25 * id) * (1.0 - tip * 0.35) + tw * 0.55, 0.0, 1.0);
+}
+float A(vec2 uv, float h) {
+  float id, tip;
+  float nm = needles(uv, id, tip);
+  Seg t = segField(uv * vec2(5.0, 5.0) + 2.0, vec2(5.0, 5.0), 0.49, 1.55, 0.22);
+  float tw = (1.0 - smoothstep(0.014, 0.028, t.d)) * step(0.30, t.id);
+  // taper the far end of each needle so the silhouette is not a blunt capsule
+  float taper = 1.0 - smoothstep(0.72, 1.0, tip);
+  return clamp(max(nm * taper, tw) * 1.35, 0.0, 1.0);
+}
+Surf S(vec2 uv, float h, float ao, vec3 n) {
+  Surf o;
+  float id, tip;
+  needles(uv, id, tip);
+  vec3 wet = C3(19.0, 31.0, 26.0);      // foliage.wet #131f1a -- the default state, nights 1-7
+  vec3 dry = C3(59.0, 68.0, 48.0);      // foliage.dry #3b4430, only under shelter
+  vec3 alb = mix(wet, dry, id * 0.55 * smoothstep(0.35, 0.85, fbm(uv * vec2(2.0, 2.0), vec2(2.0, 2.0), 3, 0.6)));
+  alb *= 0.80 + 0.34 * id;                                   // per-needle tone spread
+  alb = mix(alb, C3(74.0, 68.0, 51.0), smoothstep(0.6, 1.0, tip) * 0.35);   // browning tips
+  Seg t = segField(uv * vec2(5.0, 5.0) + 2.0, vec2(5.0, 5.0), 0.49, 1.55, 0.22);
+  float tw = (1.0 - smoothstep(0.012, 0.030, t.d)) * step(0.30, t.id);
+  alb = mix(alb, C3(46.0, 38.0, 30.0), tw * 0.85);
+  o.albedo = alb * (0.72 + 0.28 * ao);
+  o.rough = mix(0.42, 0.60, id);         // waxy cuticle: ART_DIRECTION says 0.42 wet
+  o.rough = mix(o.rough, 0.86, tw);
+  o.metal = 0.0;
+  o.ao = ao;
+  return o;
+}
+`;
+
+// --- fern / undergrowth card (ALPHA) -----------------------------------------------------------
+// Two fronds per tile: a rachis running along U with tapering pinnae either side.  The vertex
+// AO gradient root->tip that ART_DIRECTION asks for belongs on the mesh; here we bake the
+// darkening toward the rachis so the leaflets read as separate blades.
+M['foliage-fern'] = /* glsl */`
+float frondMask(vec2 uv, out float along, out float across, out float leafId) {
+  vec2 f = vec2(uv.x, fract(uv.y * 2.0));
+  along = uv.x;
+  across = abs(f.y - 0.5);
+  float lx = fract(uv.x * 24.0);
+  leafId = hash11(floor(uv.x * 24.0) + 0.5);
+  // leaflet length varies smoothly along the frond (period-1, so it tiles)
+  float len = 0.20 + 0.16 * fbm(uv * vec2(3.0, 1.0), vec2(3.0, 1.0), 3, 0.6) + 0.08 * leafId;
+  // each leaflet is a lens swept back from the rachis
+  float sweep = across * 0.55;
+  float blade = smoothstep(0.46, 0.30, abs(lx - 0.5) + sweep);
+  float reach = smoothstep(len, len * 0.55, across);
+  float rachis = smoothstep(0.028, 0.010, across);
+  return clamp(max(blade * reach, rachis), 0.0, 1.0);
+}
+float H(vec2 uv) {
+  float along, across, leafId;
+  float m = frondMask(uv, along, across, leafId);
+  float rachis = smoothstep(0.030, 0.008, across);
+  float vein = 0.5 + 0.5 * cos(fract(uv.x * 24.0) * TAU);
+  return clamp(m * (0.42 + 0.20 * leafId) + rachis * 0.42 + m * vein * 0.10, 0.0, 1.0);
+}
+float A(vec2 uv, float h) {
+  float along, across, leafId;
+  return clamp(frondMask(uv, along, across, leafId) * 1.4, 0.0, 1.0);
+}
+Surf S(vec2 uv, float h, float ao, vec3 n) {
+  Surf o;
+  float along, across, leafId;
+  frondMask(uv, along, across, leafId);
+  vec3 alb = mix(C3(26.0, 42.0, 34.0), C3(38.0, 52.0, 40.0), leafId);
+  alb *= mix(0.55, 1.15, smoothstep(0.0, 0.22, across));    // dark at the root, per ART_DIRECTION
+  alb = mix(alb, C3(64.0, 60.0, 40.0), smoothstep(0.80, 0.99, fbm(uv * vec2(4.0, 4.0), vec2(4.0, 4.0), 4, 0.6)) * 0.5);
+  float rachis = smoothstep(0.030, 0.008, across);
+  alb = mix(alb, C3(52.0, 56.0, 38.0), rachis * 0.7);
+  o.albedo = alb * (0.70 + 0.30 * ao);
+  // ART_DIRECTION: "a specular sheen so strong the fern reads as a silhouette of highlights"
+  o.rough = mix(0.35, 0.52, leafId);
+  o.metal = 0.0;
+  o.ao = ao;
+  return o;
+}
+`;
+
+// --- fresh blood (ALPHA decal) -----------------------------------------------------------------
+// Non-Newtonian: a raised meniscus ring at the edge, a near-mirror interior, satellite droplets.
+M['blood'] = /* glsl */`
+float pool(vec2 uv) {
+  vec2 w = warp(uv, vec2(3.0, 3.0), 0.055, 4);
+  float b = fbm(w * vec2(3.0, 3.0), vec2(3.0, 3.0), 5, 0.58);
+  float main = smoothstep(0.50, 0.60, b);
+  Cell d = worley(uv * vec2(9.0, 9.0) + 4.0, vec2(9.0, 9.0), 1.0);
+  float spat = step(0.72, d.id) * smoothstep(0.16, 0.04, d.f1);   // satellite droplets
+  return clamp(max(main, spat), 0.0, 1.0);
+}
+float H(vec2 uv) {
+  float p = pool(uv);
+  // meniscus: surface tension piles the fluid up at the rim
+  float rim = p * (1.0 - p) * 4.0;
+  return clamp(p * 0.55 + rim * rim * 0.42, 0.0, 1.0);
+}
+float A(vec2 uv, float h) { return clamp(pool(uv) * 1.25, 0.0, 1.0); }
+Surf S(vec2 uv, float h, float ao, vec3 n) {
+  Surf o;
+  float p = pool(uv);
+  float thin = 1.0 - smoothstep(0.15, 0.75, p);
+  // thick blood is blood.fresh; a thin film transmits and goes blood.hot
+  vec3 alb = mix(C3(122.0, 22.0, 26.0), C3(122.0, 16.0, 19.0), smoothstep(0.2, 0.9, p));
+  alb = mix(alb, C3(168.0, 22.0, 26.0), thin * 0.55);
+  alb *= 0.88 + 0.22 * fbm(uv * vec2(30.0, 30.0), vec2(30.0, 30.0), 3, 0.5);
+  o.albedo = alb;
+  o.rough = mix(0.30, 0.10, smoothstep(0.1, 0.6, p));
+  o.metal = 0.0;
+  o.ao = ao;
+  return o;
+}
+`;
+
+// --- dried blood ------------------------------------------------------------------------------
+M['blood-dry'] = /* glsl */`
+float pool(vec2 uv) {
+  vec2 w = warp(uv, vec2(3.0, 3.0), 0.05, 4);
+  return smoothstep(0.48, 0.62, fbm(w * vec2(3.0, 3.0), vec2(3.0, 3.0), 5, 0.58));
+}
+float H(vec2 uv) {
+  float p = pool(uv);
+  // cracked-mud pattern at ~0.8 mm, slightly raised at the crack edges
+  Cell c = worley(uv * vec2(70.0, 70.0), vec2(70.0, 70.0), 1.0);
+  float crack = smoothstep(0.0, 0.09, c.f2 - c.f1);
+  float curl = (1.0 - crack) * 0.0;
+  return clamp(p * (0.42 + 0.26 * crack + 0.12 * c.id) + curl
+             + (fbm(uv * vec2(180.0, 180.0), vec2(180.0, 180.0), 2, 0.5) - 0.5) * 0.06, 0.0, 1.0);
+}
+float A(vec2 uv, float h) { return clamp(pool(uv) * 1.3, 0.0, 1.0); }
+Surf S(vec2 uv, float h, float ao, vec3 n) {
+  Surf o;
+  float p = pool(uv);
+  Cell c = worley(uv * vec2(70.0, 70.0), vec2(70.0, 70.0), 1.0);
+  vec3 alb = mix(C3(58.0, 17.0, 19.0), C3(38.0, 17.0, 19.0), smoothstep(0.2, 0.9, p));
+  alb *= 0.86 + 0.28 * c.id;
+  alb = mix(alb, C3(24.0, 11.0, 11.0), smoothstep(0.10, 0.0, c.f2 - c.f1));   // black crack floors
+  o.albedo = alb * (0.66 + 0.34 * ao);
+  o.rough = 0.74;
+  o.metal = 0.0;
+  o.ao = ao;
+  return o;
+}
+`;
+
+// --- wet skin ----------------------------------------------------------------------------------
+// Pores at two scales, fine crease lines, a coarse wrinkle layer, and blotchy subsurface
+// mottling.  ART_DIRECTION: desaturated, never pink.
+M['skin-wet'] = /* glsl */`
+float H(vec2 uv) {
+  Cell p1 = worley(uv * vec2(110.0, 110.0), vec2(110.0, 110.0), 1.0);
+  Cell p2 = worley(uv * vec2(46.0, 46.0), vec2(46.0, 46.0), 1.0);
+  float pore = (1.0 - smoothstep(0.0, 0.22, p1.f1)) * step(0.42, p1.id);
+  float cell = smoothstep(0.0, 0.30, p2.f2 - p2.f1);
+  Seg cr = segField(uv * vec2(14.0, 14.0) + 3.0, vec2(14.0, 14.0), 0.47, 0.7, 2.2);
+  float crease = (1.0 - smoothstep(0.004, 0.020, cr.d)) * step(0.42, cr.id);
+  float macro = fbm(uv * vec2(5.0, 5.0), vec2(5.0, 5.0), 4, 0.6);
+  return clamp(0.56 + (macro - 0.5) * 0.26 + cell * 0.14 - pore * 0.24 - crease * 0.20, 0.0, 1.0);
+}
+Surf S(vec2 uv, float h, float ao, vec3 n) {
+  Surf o;
+  vec3 base = C3(107.0, 81.0, 72.0);    // mat.skin.wet #6b5148
+  float mottle = fbm(uv * vec2(3.0, 3.0), vec2(3.0, 3.0), 5, 0.62);
+  vec3 alb = base * mix(0.80, 1.14, mottle);
+  // subdermal blotching -- slightly cooler, never pink
+  alb = mix(alb, C3(88.0, 68.0, 66.0), smoothstep(0.58, 0.86, fbm(uv * vec2(7.0, 7.0) + 11.0, vec2(7.0, 7.0), 4, 0.6)) * 0.45);
+  alb = mix(alb, C3(62.0, 48.0, 44.0), smoothstep(0.4, 0.0, h) * 0.4);
+  o.albedo = alb * (0.74 + 0.26 * ao);
+  // damp: the broad lobe is 0.36, but the low spots hold water and go glossy
+  o.rough = mix(0.36, 0.18, smoothstep(0.55, 0.12, h));
+  o.metal = 0.0;
+  o.ao = ao;
+  return o;
+}
+`;
+
+// --- blue poly tarp ----------------------------------------------------------------------------
+M['tarp-plastic'] = /* glsl */`
+float H(vec2 uv) {
+  // folds: warped ridged noise reads as creased sheet far better than plain fbm
+  vec2 w = warp(uv, vec2(2.0, 2.0), 0.070, 3);
+  float fold = ridged(w * vec2(3.0, 3.0), vec2(3.0, 3.0), 4);
+  float crease = ridged(w * vec2(9.0, 9.0), vec2(9.0, 9.0), 3);
+  // scrim: the woven polyethylene mesh under the film
+  vec2 t = uv * vec2(120.0, 120.0);
+  vec2 ci = floor(t), cf = t - ci;
+  float over = step(mod(wrap2(ci, vec2(120.0)).x + wrap2(ci, vec2(120.0)).y, 2.0), 0.5);
+  float scrim = mix(sin(cf.y * PI), sin(cf.x * PI), over);
+  return clamp(0.42 + fold * 0.34 + crease * 0.14 + scrim * 0.10, 0.0, 1.0);
+}
+Surf S(vec2 uv, float h, float ao, vec3 n) {
+  Surf o;
+  vec3 alb = C3(47.0, 69.0, 80.0);      // #2f4550
+  alb *= mix(0.78, 1.14, fbm(uv * vec2(3.0, 3.0), vec2(3.0, 3.0), 4, 0.62));
+  // abraded fold crests go chalky and pale
+  float crest = smoothstep(0.68, 0.95, h);
+  alb = mix(alb, C3(120.0, 138.0, 146.0), crest * 0.45);
+  // grime pooled in the sags
+  alb = mix(alb, C3(34.0, 38.0, 36.0), smoothstep(0.42, 0.05, h) * 0.5);
+  o.albedo = alb * (0.70 + 0.30 * ao);
+  o.rough = mix(0.24, 0.52, crest);     // plastic sheen except where scuffed
+  o.metal = 0.0;
+  o.ao = ao;
+  return o;
+}
+`;
+
+// --- rope (3-strand hemp) -----------------------------------------------------------------------
+// The rope axis is U.  Strand and yarn helices are integer-coefficient diagonals, which is what
+// keeps a twisted structure tileable.
+M['rope'] = /* glsl */`
+float H(vec2 uv) {
+  float strand = fract(uv.y * 3.0 + uv.x * 5.0);
+  float sh = sin(strand * PI);
+  float yarn = fract(uv.y * 21.0 + uv.x * 26.0);
+  float yh = sin(yarn * PI);
+  float fibre = fbm(uv * vec2(160.0, 40.0), vec2(160.0, 40.0), 3, 0.5);
+  Seg fuzz = segField(uv * vec2(30.0, 30.0) + 8.0, vec2(30.0, 30.0), 0.44, 0.5, 2.6);
+  float hair = (1.0 - smoothstep(0.006, 0.020, fuzz.d)) * step(0.68, fuzz.id);
+  return clamp(sh * 0.52 + sh * yh * 0.26 + (fibre - 0.5) * 0.12 + hair * 0.12, 0.0, 1.0);
+}
+Surf S(vec2 uv, float h, float ao, vec3 n) {
+  Surf o;
+  float strand = fract(uv.y * 3.0 + uv.x * 5.0);
+  vec3 alb = C3(110.0, 98.0, 72.0);
+  alb *= 0.84 + 0.30 * fbm(uv * vec2(90.0, 24.0), vec2(90.0, 24.0), 3, 0.5);
+  alb *= mix(0.72, 1.08, sin(strand * PI));
+  // the rope has been dragged through mud
+  alb = mix(alb, C3(42.0, 34.0, 27.0), smoothstep(0.62, 0.90, fbm(uv * vec2(4.0, 2.0), vec2(4.0, 2.0), 4, 0.6)) * 0.7);
+  o.albedo = alb * (0.60 + 0.40 * ao);
+  o.rough = 0.88;
+  o.metal = 0.0;
+  o.ao = ao;
+  return o;
+}
+`;
+
+// --- dirty glass (ALPHA = grime coverage) --------------------------------------------------------
+M['glass-dirty'] = /* glsl */`
+float grime(vec2 uv) {
+  float film = fbm(uv * vec2(3.0, 3.0), vec2(3.0, 3.0), 5, 0.62);
+  float streak = fbm(uv * vec2(40.0, 2.0), vec2(40.0, 2.0), 4, 0.55);
+  Cell sp = worley(uv * vec2(28.0, 28.0), vec2(28.0, 28.0), 1.0);
+  float spot = step(0.74, sp.id) * smoothstep(0.20, 0.05, sp.f1);
+  return clamp(smoothstep(0.42, 0.78, film) * 0.7 + smoothstep(0.55, 0.9, streak) * 0.5 + spot, 0.0, 1.0);
+}
+float H(vec2 uv) {
+  float g = grime(uv);
+  float dust = fbm(uv * vec2(200.0, 200.0), vec2(200.0, 200.0), 2, 0.5);
+  return clamp(0.5 + g * 0.30 + (dust - 0.5) * 0.10, 0.0, 1.0);
+}
+float A(vec2 uv, float h) { return clamp(0.10 + grime(uv) * 0.90, 0.0, 1.0); }
+Surf S(vec2 uv, float h, float ao, vec3 n) {
+  Surf o;
+  float g = grime(uv);
+  vec3 alb = mix(C3(28.0, 36.0, 40.0), C3(96.0, 92.0, 80.0), g);
+  o.albedo = alb * (0.80 + 0.20 * ao);
+  o.rough = mix(0.03, 0.72, g);        // clean glass is the mirror; grime kills it
+  o.metal = 0.0;
+  o.ao = ao;
+  return o;
+}
+`;
+
 // ---------------------------------------------------------------------------------------------
 // SET TABLE
 //   size    'hero' = base resolution, 'mid' = half, 'small' = quarter (ART_DIRECTION §5:
@@ -1086,10 +1378,51 @@ const SET_DEFS = {
   'concrete':       { size: 'mid',   relief: 0.014, tile: 0.90, ao: 0.80, cavity: 0.45, toksvig: 0.28, taps: 6, disp: true },
   'water-normal':   { size: 'small', relief: 0.045, tile: 3.00, ao: 0.00, cavity: 0.00, toksvig: 0.00, taps: 4, disp: false, animated: true },
   'detail-normal':  { size: 'small', relief: 0.0025, tile: 0.12, ao: 0.30, cavity: 0.15, toksvig: 0.00, taps: 4, disp: false },
+
+  // Foliage cards and decals.  `alpha: true` injects HAS_ALPHA and the set writes opacity into
+  // map.a -- use alphaToCoverage, NOT alphaTest (ART_DIRECTION trap 10: alpha-tested pine cards
+  // shimmer horribly in motion).
+  'foliage-pine':   { size: 'mid',   relief: 0.004, tile: 0.45, ao: 0.55, cavity: 0.30, toksvig: 0.20, taps: 4, disp: false, alpha: true },
+  'foliage-fern':   { size: 'mid',   relief: 0.004, tile: 0.55, ao: 0.55, cavity: 0.30, toksvig: 0.20, taps: 4, disp: false, alpha: true },
+  'blood':          { size: 'small', relief: 0.002, tile: 0.50, ao: 0.40, cavity: 0.20, toksvig: 0.10, taps: 6, disp: false, alpha: true },
+  'blood-dry':      { size: 'small', relief: 0.0016, tile: 0.50, ao: 0.60, cavity: 0.35, toksvig: 0.25, taps: 6, disp: false, alpha: true },
+  'skin-wet':       { size: 'mid',   relief: 0.0012, tile: 0.18, ao: 0.45, cavity: 0.25, toksvig: 0.15, taps: 6, disp: false },
+  'tarp-plastic':   { size: 'mid',   relief: 0.020, tile: 1.20, ao: 0.70, cavity: 0.40, toksvig: 0.22, taps: 6, disp: false },
+  'rope':           { size: 'small', relief: 0.006, tile: 0.09, ao: 0.75, cavity: 0.45, toksvig: 0.30, taps: 6, disp: false },
+  'glass-dirty':    { size: 'small', relief: 0.0008, tile: 0.40, ao: 0.30, cavity: 0.15, toksvig: 0.15, taps: 4, disp: false, alpha: true },
 };
 
-/** Names in bake order. */
+/**
+ * Friendly aliases so consumers can ask by the name that reads best at the call site.
+ * Aliases share ONE bake -- they resolve before the cache is touched.
+ */
+const ALIASES = {
+  'ground-needles': 'pine-needles',
+  'forest-floor': 'pine-needles',
+  'ground-mud': 'wet-earth',
+  'mud': 'wet-earth',
+  'ground-moss': 'moss',
+  'galvanized-steel': 'galvanized',
+  'steel-galv': 'galvanized',
+  'canvas': 'canvas-tent',
+  'tent-canvas': 'canvas-tent',
+  'water-lake': 'water-normal',
+  'water': 'water-normal',
+  'lumber': 'sawn-lumber',
+  'plank-weathered': 'weathered-wood',
+  'tin': 'corrugated-tin',
+  'rock': 'granite',
+  'bark': 'bark-pine',
+  'birch': 'bark-birch',
+  'tarp': 'tarp-plastic',
+  'detail': 'detail-normal',
+};
+
+/** Names in bake order (canonical only — aliases are not baked separately). */
 export const TEXTURE_SETS = Object.keys(SET_DEFS);
+
+/** Every name `get()` accepts, canonical and alias. */
+export const TEXTURE_ALIASES = ALIASES;
 
 const SIZE_SCALE = { hero: 1.0, mid: 0.5, small: 0.25 };
 
@@ -1225,7 +1558,8 @@ export class Textures {
    * reads .r/.g/.b from the right channels automatically.  Do NOT mutate .repeat on the
    * returned textures unless you asked for a view — they are shared by every material.
    */
-  get(name, opts) {
+  get(rawName, opts) {
+    const name = ALIASES[rawName] ?? rawName;
     const key = _cacheKey(name, opts);
     const hit = this._cache.get(key);
     if (hit) return hit;
@@ -1233,7 +1567,7 @@ export class Textures {
     let base = this._sets.get(name);
     if (!base) {
       if (!SET_DEFS[name]) {
-        Log.once(`tex:unknown:${name}`, `Textures.get('${name}'): unknown set — returning fallback.`);
+        Log.once(`tex:unknown:${name}`, `Textures.get('${rawName}'): unknown set — returning fallback. Known: ${TEXTURE_SETS.join(', ')}`);
         return this._fallbackSet();
       }
       if (!this.ctx?.renderer) return this._fallbackSet();
@@ -1254,8 +1588,17 @@ export class Textures {
     return view;
   }
 
-  /** True if `name` is a known set. */
-  has(name) { return !!SET_DEFS[name]; }
+  /** True if `name` is a known set (or a known alias). */
+  has(name) { return !!SET_DEFS[ALIASES[name] ?? name]; }
+
+  /** Canonical name for an alias, or the input if it is already canonical. */
+  resolve(name) { return ALIASES[name] ?? name; }
+
+  /** Every name this bakery answers to, canonical first. */
+  get names() { return [...TEXTURE_SETS, ...Object.keys(ALIASES)]; }
+
+  /** True once init() has finished baking. */
+  get ready() { return this._ready; }
 
   /** The shared high-frequency detail normal — layer this on everything at 8..40 repeats/m. */
   get detailNormal() {
@@ -1302,6 +1645,7 @@ export class Textures {
     const frag = [
       PRELUDE,
       `#define AO_TAPS ${Math.max(3, def.taps | 0)}`,
+      def.alpha ? '#define HAS_ALPHA' : '',
       NOISE,
       DECLS,
       M[name],

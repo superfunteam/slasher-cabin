@@ -1457,13 +1457,11 @@ function buildZipper(R, dest) {
   const slider = gain(R, dbToGain(-10));
   slider.connect(out);
 
-  const teeth = [];
   grainTrain(R, {
     t0: T0, dur, rate: 110, rateEnd: 90, jitter: 0.15, max: 160,
     spawn: (t, i, u) => {
-      // 110 → 170 → 90 across the pull.
+      // 110 → 170 → 90 across the pull: the rate curve is the hand speed.
       const boost = u < 0.5 ? 1 + u : 2 - u;
-      teeth.push(t);
       pingGrain(R, body, t, {
         f: 3400 * R.rand.range(0.92, 1.08) * boost * 0.85, Q: 6, dur: 0.0015, decay: 0.007, level: 0.9,
       });
@@ -1764,3 +1762,518 @@ function buildUiDeny(R, dest) {
     { f: 1880, Q: 20, g: 0.35, d: 30 },
   ], dest, T0);
 }
+
+// ================================================================ THE RECIPE REGISTRY
+//
+// phase 0 = rendered during init() and awaited (the sounds a player can trigger in the
+// first two seconds). phase 1 = rendered in the background across frames, and lazily on
+// first use if something asks early.
+//
+// peakDb is a *calibration* target, not a mix decision: the rendered buffer's peak is
+// normalized to it so that the §1.3 loudness table is literally true of the asset.
+
+const BREATH_STATES = {
+  calm: { inDur: 1.10, fIn: [420, 680], fEx: [640, 380], Q: 1.1 },
+  walk: { inDur: 0.90, fIn: [480, 820], fEx: [780, 420], Q: 1.3 },
+  heavy: { inDur: 0.60, fIn: [560, 1150], fEx: [1080, 480], Q: 1.8, voiced: true },
+  fear: { inDur: 0.50, fIn: [700, 1350], fEx: [1200, 560], Q: 2.4 },
+};
+
+function breathRecipes(out) {
+  for (const [state, s] of Object.entries(BREATH_STATES)) {
+    const core = state === 'calm' || state === 'walk';
+    out[`breath.${state}.in`] = {
+      dur: s.inDur + 0.15, v: 3, family: 'breath', priority: 3, peakDb: -12, half: true,
+      phase: core ? 0 : 1,
+      build: (R, d) => buildBreath(R, d, { dur: s.inDur, f0: s.fIn[0], f1: s.fIn[1], Q: s.Q }),
+    };
+    const exDur = s.inDur * 1.4;
+    out[`breath.${state}.out`] = {
+      dur: exDur + 0.15, v: 3, family: 'breath', priority: 3, peakDb: -14, half: true,
+      phase: core ? 0 : 1,
+      build: (R, d) => buildBreath(R, d, {
+        dur: exDur, f0: s.fEx[0], f1: s.fEx[1], Q: s.Q, exhale: true, voiced: s.voiced,
+      }),
+    };
+  }
+  return out;
+}
+
+function creakRecipes(out) {
+  for (let tier = 1; tier <= 4; tier++) {
+    for (let si = 0; si < CREAK_SIZES.length; si++) {
+      out[`creak.t${tier}.s${si}`] = {
+        dur: CREAK_DURATIONS[tier - 1] + 0.25,
+        v: tier === 4 ? 2 : 3,
+        family: 'creak',
+        priority: tier >= 2 ? 3 : 2,
+        peakDb: [-30, -20, -12, -8][tier - 1],
+        // The medium member is the one the player hears most, so it is the one we pre-warm.
+        phase: si === 1 && tier <= 3 ? 0 : 1,
+        build: (R, d) => buildCreak(R, d, { tier, size: CREAK_SIZES[si] }),
+      };
+    }
+  }
+  return out;
+}
+
+/** @type {Record<string, object>} */
+export const RECIPES = creakRecipes(breathRecipes({
+  // ---- footsteps. The surface intensity multipliers from §4.1 are baked into peakDb so
+  // that gravel really is the loudest floor in the game and mud really is the safest.
+  'step.pine': { dur: 0.32, v: 6, family: 'footstep', priority: 3, peakDb: -24, phase: 0, build: buildStepPine },
+  'step.mud': { dur: 0.32, v: 5, family: 'footstep', priority: 3, peakDb: -28.4, phase: 0, build: buildStepMud },
+  'step.grass': { dur: 0.32, v: 5, family: 'footstep', priority: 3, peakDb: -24, phase: 0, build: buildStepGrass },
+  'step.gravel': { dur: 0.36, v: 6, family: 'footstep', priority: 3, peakDb: -19.4, phase: 0, build: buildStepGravel },
+  'step.wood': { dur: 0.42, v: 5, family: 'footstep', priority: 3, peakDb: -22, phase: 0, build: buildStepWood },
+  'step.wood.hollow': {
+    dur: 0.6, v: 4, family: 'footstep', priority: 3, peakDb: -21, phase: 1,
+    build: (R, d) => buildStepWood(R, d, { hollow: true }),
+  },
+  'step.tin': { dur: 1.2, v: 5, family: 'footstep', priority: 3, peakDb: -16.4, phase: 1, build: buildStepTin },
+
+  // ---- lumber
+  'lumber.hoist': { dur: 1.1, v: 3, family: 'build', priority: 2, peakDb: -20, phase: 1, build: buildLumberHoist },
+  'lumber.drag': {
+    dur: 3.2, v: 2, family: 'build', priority: 2, peakDb: -20, phase: 1, loop: true, xfade: 0.4,
+    build: buildLumberDrag,
+  },
+  'lumber.drop': { dur: 0.85, v: 4, family: 'build', priority: 2, peakDb: -9, phase: 0, build: buildLumberDrop },
+  'lumber.knock': { dur: 0.4, v: 5, family: 'build', priority: 2, peakDb: -16, phase: 1, build: buildLumberKnock },
+
+  // ---- tools
+  'hammer.wood': {
+    dur: 0.42, v: 4, family: 'hammer', priority: 2, peakDb: -13, phase: 0,
+    // Variant index doubles as the strike index: the nail's pitch rises 4% per strike.
+    build: (R, d, p) => buildHammerWood(R, d, p), params: (i) => ({ strike: i }),
+  },
+  'hammer.steel': { dur: 2.1, v: 3, family: 'hammer', priority: 2, peakDb: -7, phase: 0, build: buildHammerSteel },
+  'bracket.drop.rock': { dur: 1.3, v: 3, family: 'build', priority: 2, peakDb: -18, phase: 1, build: buildBracketDropRock },
+  'screw.torque': { dur: 2.4, v: 3, family: 'build', priority: 2, peakDb: -20, phase: 1, build: buildScrewTorque },
+  'screw.seat': { dur: 0.3, v: 3, family: 'build', priority: 3, peakDb: -16, phase: 0, build: buildScrewSeat },
+  'screw.strip': { dur: 0.6, v: 2, family: 'build', priority: 2, peakDb: -18, phase: 1, build: buildScrewStrip },
+  'wood.split': { dur: 1.3, v: 3, family: 'build', priority: 3, peakDb: -5, phase: 1, build: buildWoodSplit },
+  'nail.pull': { dur: 0.75, v: 3, family: 'build', priority: 2, peakDb: -14, phase: 1, build: buildNailPull },
+  'canvas.flap': { dur: 1.6, v: 4, family: 'world', priority: 1, peakDb: -22, phase: 1, build: buildCanvasFlap },
+  'twig.snap': { dur: 0.3, v: 6, family: 'world', priority: 2, peakDb: -22, phase: 0, build: buildTwigSnap },
+  'branch.snap': {
+    dur: 0.45, v: 4, family: 'world', priority: 2, peakDb: -14, phase: 1,
+    build: (R, d) => buildTwigSnap(R, d, { r: R.rand.range(0.62, 0.84) }),
+  },
+
+  // ---- weather (loops are seam-crossfaded; AudioEngine rides their gain from weather:change)
+  'rain.leaves': { dur: 5.2, ch: 2, half: true, v: 2, family: 'ambience', priority: 0, peakDb: -6, phase: 1, loop: true, build: buildRainLeaves },
+  'rain.tin': { dur: 5.2, ch: 2, half: true, v: 2, family: 'ambience', priority: 0, peakDb: -6, phase: 1, loop: true, build: buildRainTin },
+  'rain.water': { dur: 5.2, ch: 2, half: true, v: 1, family: 'ambience', priority: 0, peakDb: -8, phase: 1, loop: true, build: buildRainWater },
+  'wind.pines': { dur: 8.4, ch: 2, half: true, v: 2, family: 'ambience', priority: 0, peakDb: -6, phase: 1, loop: true, xfade: 0.6, build: buildWindPines },
+  'wind.gust': { dur: 5.5, ch: 2, half: true, v: 2, family: 'ambience', priority: 1, peakDb: -10, phase: 1, build: buildWindGust },
+  'wind.whistle': { dur: 3.0, v: 2, family: 'ambience', priority: 1, peakDb: -18, phase: 1, build: buildWindWhistle },
+  'thunder.near': { dur: 3.0, half: true, v: 2, family: 'thunder', priority: 3, peakDb: -8, phase: 1, build: (R, d) => buildThunder(R, d, { cls: 'near' }) },
+  'thunder.mid': { dur: 5.6, half: true, v: 3, family: 'thunder', priority: 3, peakDb: -14, phase: 1, build: (R, d) => buildThunder(R, d, { cls: 'mid', distance: R.rand.range(500, 1900) }) },
+  'thunder.far': { dur: 8.0, half: true, v: 2, family: 'thunder', priority: 3, peakDb: -26, phase: 1, build: (R, d) => buildThunder(R, d, { cls: 'far' }) },
+
+  // ---- camp life
+  'campfire': { dur: 6.2, ch: 2, half: true, v: 2, family: 'ambience', priority: 1, peakDb: -10, phase: 1, loop: true, build: buildCampfire },
+  'campfire.pop': { dur: 0.4, v: 4, family: 'ambience', priority: 1, peakDb: -18, phase: 1, build: buildCampfirePop },
+  'water.lap': { dur: 5.6, ch: 2, half: true, v: 1, family: 'ambience', priority: 0, peakDb: -12, phase: 1, loop: true, build: buildWaterLap },
+  'zipper': { dur: 1.1, v: 3, family: 'camper', priority: 2, peakDb: -16, phase: 1, build: buildZipper },
+  'click.flashlight.on': { dur: 0.3, v: 3, family: 'camper', priority: 2, peakDb: -14, phase: 0, build: (R, d) => buildClick(R, d, {}) },
+  'click.flashlight.off': { dur: 0.3, v: 3, family: 'camper', priority: 2, peakDb: -16, phase: 1, build: (R, d) => buildClick(R, d, { off: true }) },
+  'click.shutter': { dur: 0.25, v: 3, family: 'camper', priority: 2, peakDb: -14, phase: 1, build: buildShutterClick },
+  'glass.ping': { dur: 0.32, v: 4, family: 'lantern', priority: 0, peakDb: -24, phase: 1, build: buildGlassPing },
+  'lantern.hiss': { dur: 4.2, v: 1, family: 'lantern', priority: 1, peakDb: -6, phase: 1, loop: true, build: buildLanternHiss },
+  'cricket.chirp': { dur: 0.22, v: 6, family: 'cricket', priority: 0, peakDb: -12, phase: 1, build: buildCricketChirp },
+  'cricket.wash': { dur: 4.2, ch: 2, half: true, v: 1, family: 'cricket', priority: 0, peakDb: -14, phase: 1, loop: true, build: buildCricketWash },
+  'loon.wail': { dur: 2.0, v: 2, family: 'wildlife', priority: 1, peakDb: -10, phase: 1, build: buildLoonWail },
+  'loon.tremolo': { dur: 2.0, v: 1, family: 'wildlife', priority: 1, peakDb: -8, phase: 1, build: (R, d) => buildLoonWail(R, d, { tremolo: true }) },
+  'owl.hoot': { dur: 1.9, v: 2, family: 'wildlife', priority: 1, peakDb: -12, phase: 1, build: buildOwlHoot },
+  'dawn.bird': { dur: 0.9, v: 2, family: 'wildlife', priority: 1, peakDb: -14, phase: 1, build: buildDawnBird },
+
+  // ---- the body
+  'heart.thump': { dur: 0.2, v: 2, family: 'body', priority: 3, peakDb: -6, half: true, phase: 0, build: buildHeartThump },
+
+  // ---- the manual. Never varied, never reverbed, never masked.
+  'ui.chime': { dur: 0.6, v: 1, family: 'ui', priority: 3, peakDb: -16, phase: 0, build: buildUiChime },
+  'ui.click': { dur: 0.12, v: 2, family: 'ui', priority: 3, peakDb: -20, phase: 0, build: buildUiClick },
+  'ui.page': { dur: 0.35, v: 3, family: 'ui', priority: 3, peakDb: -20, phase: 1, build: buildUiPage },
+  'ui.stamp': { dur: 0.3, v: 2, family: 'ui', priority: 3, peakDb: -18, phase: 1, build: buildUiStamp },
+  'ui.deny': { dur: 0.2, v: 2, family: 'ui', priority: 3, peakDb: -20, phase: 1, build: buildUiDeny },
+}));
+
+/** Aliases so a caller using a reasonable-but-different id still gets a sound. */
+export const ALIASES = {
+  'step.needles': 'step.pine', 'step.dirt': 'step.mud', 'step.wet': 'step.grass',
+  'step.stone': 'step.gravel', 'step.plank': 'step.wood', 'step.deck': 'step.wood',
+  'step.metal': 'step.tin', 'step.default': 'step.pine',
+  'footstep.pine': 'step.pine',
+  'hammer': 'hammer.wood', 'hammer.nail': 'hammer.wood',
+  'bracket.drop': 'bracket.drop.rock', 'metal.drop': 'bracket.drop.rock',
+  'screw': 'screw.torque', 'seat': 'screw.seat',
+  'flashlight.on': 'click.flashlight.on', 'flashlight.off': 'click.flashlight.off',
+  'lantern.on': 'click.flashlight.on', 'lantern.off': 'click.flashlight.off',
+  'thunder': 'thunder.mid', 'rain': 'rain.leaves', 'wind': 'wind.pines',
+  'twig': 'twig.snap', 'branch': 'branch.snap',
+  'ui.confirm': 'ui.chime', 'ui.error': 'ui.deny', 'ui.turn': 'ui.page',
+  'build.complete': 'ui.chime', 'tool.missing': 'ui.deny',
+};
+
+export function resolveId(id) {
+  if (RECIPES[id]) return id;
+  const a = ALIASES[id];
+  return a && RECIPES[a] ? a : null;
+}
+
+/** Family → the mix/priority hints AudioEngine uses for pooling and stealing (§9.1). */
+export function recipeInfo(id) {
+  const r = resolveId(id);
+  return r ? RECIPES[r] : null;
+}
+
+// ================================================================ §3.3 REVERB SPACES
+
+const SPACE_SPECS = {
+  OPEN_FOREST: { rt: [0.90, 0.55, 0.22], taps: 6, tapMs: [11, 48], tapDb: -9, len: 1.5 },
+  DENSE_TREES: { rt: [1.35, 0.95, 0.30], taps: 22, tapMs: [6, 70], tapDb: -5, len: 1.9, scatter: true },
+  CABIN_SHELL: { rt: [0.55, 0.62, 0.40], taps: 9, tapMs: [3, 26], tapDb: -2, len: 1.2, modes: [118, 187] },
+  LAKE_EDGE: { rt: [2.40, 2.10, 1.10], taps: 3, tapMs: [9, 40], tapDb: -8, len: 2.9, slap: { ms: 240, db: -11 } },
+  TIN_ROOF: { rt: [0.40, 0.55, 0.75], taps: 14, tapMs: [1, 18], tapDb: -4, len: 1.2, comb: { ms: 3.1, fb: 0.5 } },
+};
+
+export const SPACES = Object.keys(SPACE_SPECS);
+
+/**
+ * Generate a reverb impulse response procedurally: noise → four band-limited exponential
+ * decays with independent RT60s → early reflection taps → space-specific colour.
+ * Budget: all five under ~120 ms total. Generated at 24 kHz below `high`.
+ */
+export async function renderImpulseResponse(space, sampleRate, { tierIndex = 3 } = {}) {
+  const spec = SPACE_SPECS[space] ?? SPACE_SPECS.OPEN_FOREST;
+  if (!OfflineCtor) return null;
+  const sr = tierIndex >= 2 ? sampleRate : Math.max(12000, Math.round(sampleRate / 2));
+  let len = spec.len;
+  if (space === 'LAKE_EDGE' && tierIndex < 2) len = 1.6;
+
+  const ctx = new OfflineCtor(2, Math.ceil(len * sr), sr);
+  const R = { ctx, rand: new Rand(`ir:${space}`), sr, tier: tierIndex };
+  const dest = ctx.destination;
+
+  // Four bands crossed at 250 / 1200 / 5000 Hz, each with its own RT60.
+  const rt = [spec.rt[0], spec.rt[1], (spec.rt[1] + spec.rt[2]) * 0.5, spec.rt[2]];
+  const bands = [
+    { make: () => biquad(R, 'lowpass', 250, 0.7) },
+    { make: () => { const a = biquad(R, 'highpass', 250, 0.7); const b = biquad(R, 'lowpass', 1200, 0.7); a.connect(b); return { i: a, o: b }; } },
+    { make: () => { const a = biquad(R, 'highpass', 1200, 0.7); const b = biquad(R, 'lowpass', 5000, 0.7); a.connect(b); return { i: a, o: b }; } },
+    { make: () => biquad(R, 'highpass', 5000, 0.7) },
+  ];
+  for (let i = 0; i < 4; i++) {
+    const made = bands[i].make();
+    const input = made.i ?? made;
+    const output = made.o ?? made;
+    const g = gain(R, 0);
+    const src = noiseSrc(R, 'white', 0, len, { rate: 1 + i * 0.013 });
+    src.connect(input);
+    output.connect(g);
+    g.connect(dest);
+    const d = Math.min(len, Math.max(0.05, rt[i]));
+    g.gain.setValueAtTime(1, 0);
+    g.gain.exponentialRampToValueAtTime(1e-3, d);
+    g.gain.exponentialRampToValueAtTime(MIN_GAIN, Math.min(len, d * 1.3));
+  }
+
+  // Early reflections.
+  for (let i = 0; i < spec.taps; i++) {
+    const t = (spec.tapMs[0] + (spec.tapMs[1] - spec.tapMs[0]) * R.rand.next()) / 1000;
+    const pan = ctx.createStereoPanner ? ctx.createStereoPanner() : null;
+    const g = gain(R, dbToGain(spec.tapDb) * R.rand.range(0.4, 1));
+    const b = burst(R, t, 0.0015, 1, 'white');
+    b.connect(g);
+    if (pan) { pan.pan.value = spec.scatter ? R.rand.range(-1, 1) : R.rand.range(-0.6, 0.6); g.connect(pan); pan.connect(dest); }
+    else g.connect(dest);
+  }
+
+  // The half-built frame *rings*: two resonant modes baked into the cabin's IR.
+  if (spec.modes) {
+    for (const f of spec.modes) {
+      modal(R, burst(R, 0.002, 0.003, 1, 'white'), [{ f, Q: 9, g: 0.5, d: 700 }], dest, 0.002);
+    }
+  }
+
+  // Water reflects specularly — this discrete slap is why you can hear the camp from
+  // across the lake.
+  if (spec.slap) {
+    const t = spec.slap.ms / 1000;
+    const g = gain(R, dbToGain(spec.slap.db));
+    const b = burst(R, t, 0.006, 1, 'white');
+    const lp = biquad(R, 'lowpass', 4200, 0.7);
+    b.connect(lp); lp.connect(g);
+    if (ctx.createStereoPanner) { const p = ctx.createStereoPanner(); p.pan.value = -0.9; g.connect(p); p.connect(dest); }
+    else g.connect(dest);
+  }
+
+  // Tin rings *longer* at the top, and combs.
+  if (spec.comb) {
+    const d = ctx.createDelay(0.05);
+    d.delayTime.value = spec.comb.ms / 1000;
+    const fb = gain(R, spec.comb.fb);
+    const hp = biquad(R, 'highpass', 900, 0.7);
+    d.connect(fb); fb.connect(hp); hp.connect(d);
+    const tapIn = burst(R, 0.001, 0.004, 0.6, 'white');
+    tapIn.connect(d);
+    d.connect(dest);
+  }
+
+  let buf;
+  try { buf = await ctx.startRendering(); }
+  catch (e) { Log.warn(`IR '${space}' failed to render:`, e?.message ?? e); return null; }
+
+  // Fade the head in a hair and normalize to a sane RMS so swapping spaces never jumps.
+  const fade = Math.floor(0.002 * sr);
+  for (let ch = 0; ch < buf.numberOfChannels; ch++) {
+    const d = buf.getChannelData(ch);
+    for (let i = 0; i < fade && i < d.length; i++) d[i] *= i / fade;
+  }
+  const rms = bufferRms(buf);
+  if (rms > 1e-6) scaleBuffer(buf, clamp(0.055 / rms, 0.05, 40));
+  const peak = bufferPeak(buf);
+  if (peak > 0.98) scaleBuffer(buf, 0.98 / peak);
+  return buf;
+}
+
+// ================================================================ THE BANK
+
+const yieldToFrame = () => new Promise((resolve) => {
+  if (typeof globalThis.requestIdleCallback === 'function') globalThis.requestIdleCallback(() => resolve(), { timeout: 60 });
+  else if (typeof globalThis.requestAnimationFrame === 'function') globalThis.requestAnimationFrame(() => resolve());
+  else setTimeout(resolve, 0);
+});
+
+function variantCount(rec, tierIndex) {
+  const n = rec.v ?? 3;
+  if (n <= 1) return 1;
+  const scale = tierIndex <= 0 ? 0.5 : tierIndex === 1 ? 0.7 : 1;
+  return Math.max(1, Math.min(n, Math.round(n * scale)));
+}
+
+/**
+ * The cached SFX bank. Owns every rendered AudioBuffer in the game.
+ *
+ *   const bank = new SFXBank(audioCtx, { settings });
+ *   await bank.renderPhase(0);      // the sounds needed in the first second — awaited
+ *   bank.renderPhase(1);            // everything else, chunked across frames
+ *   bank.get('step.pine');          // → a random variant, or null if not rendered yet
+ */
+export class SFXBank {
+  /**
+   * @param {BaseAudioContext|null} audioContext
+   * @param {{ rand?: any, settings?: any, sampleRate?: number, tierIndex?: number }} [opts]
+   */
+  constructor(audioContext, { rand = null, settings = null, sampleRate = null, tierIndex = null } = {}) {
+    this.available = !!OfflineCtor;
+    this.sampleRate = sampleRate ?? audioContext?.sampleRate ?? 48000;
+    this.tierIndex = tierIndex ?? settings?.tierIndex ?? 3;
+    this.rand = rand ?? new Rand('sfxbank');
+    /** @type {Map<string, AudioBuffer[]>} */
+    this._buffers = new Map();
+    /** @type {Map<string, Promise<AudioBuffer[]>>} */
+    this._pending = new Map();
+    this._missing = new Set();
+    this._disposed = false;
+    this._grainMax = [200, 350, 550, 800][clamp(this.tierIndex, 0, 3)];
+    this.stats = { rendered: 0, buffers: 0, ms: 0 };
+  }
+
+  /** True once a given id has at least one variant available. */
+  has(id) {
+    const r = resolveId(id);
+    return !!(r && this._buffers.has(r));
+  }
+
+  /** A random variant of `id`, or null if it has not been rendered yet (kicks off a render). */
+  get(id, rand = null) {
+    const r = resolveId(id);
+    if (!r) {
+      if (!this._missing.has(id)) { this._missing.add(id); Log.once(`sfx:${id}`, `Unknown sfx id '${id}' — ignored.`); }
+      return null;
+    }
+    const list = this._buffers.get(r);
+    if (!list || !list.length) { this.ensure(r); return null; }
+    const n = list.length;
+    if (n === 1) return list[0];
+    const u = (rand ?? this.rand).next();
+    return list[Math.min(n - 1, Math.floor(u * n))];
+  }
+
+  /** A specific variant (wraps). Used for the hammer's rising nail pitch. */
+  variant(id, index) {
+    const r = resolveId(id);
+    if (!r) return null;
+    const list = this._buffers.get(r);
+    if (!list || !list.length) { this.ensure(r); return null; }
+    return list[((index | 0) % list.length + list.length) % list.length];
+  }
+
+  /** How many variants exist for an id (0 if not rendered). */
+  count(id) {
+    const r = resolveId(id);
+    return r ? (this._buffers.get(r)?.length ?? 0) : 0;
+  }
+
+  /**
+   * THE CREAK. `severity` 0..1 (quantized to four categorical tiers by BuildSystem),
+   * `size` = the length in metres of the member that is complaining, which sets the body
+   * resonance. Falls back to the medium-size variant while a size bucket is still rendering.
+   */
+  creak(severity, size = 2.4, rand = null) {
+    const id = creakId(severity, size);
+    const buf = this.get(id, rand);
+    if (buf) return buf;
+    const fallback = `creak.t${creakTier(severity)}.s1`;
+    return fallback === id ? null : this.get(fallback, rand);
+  }
+
+  /** A shared noise bed at the live context's rate — for AudioEngine's realtime layers. */
+  noise(type = 'pink', seconds = 4) {
+    return noiseBuffer(type, this.sampleRate, seconds);
+  }
+
+  /** Render one id now (idempotent). Returns a promise for its variant list. */
+  ensure(id) {
+    const r = resolveId(id);
+    if (!r || this._disposed || !this.available) return Promise.resolve([]);
+    const have = this._buffers.get(r);
+    if (have && have.length) return Promise.resolve(have);
+    const pend = this._pending.get(r);
+    if (pend) return pend;
+    const p = this._renderId(r).finally(() => this._pending.delete(r));
+    this._pending.set(r, p);
+    return p;
+  }
+
+  async _renderId(id) {
+    const rec = RECIPES[id];
+    if (!rec) return [];
+    const n = variantCount(rec, this.tierIndex);
+    const out = [];
+    for (let i = 0; i < n; i++) {
+      if (this._disposed) break;
+      const buf = await this._renderVariant(id, rec, i);
+      if (buf) out.push(buf);
+    }
+    if (out.length && !this._disposed) {
+      this._buffers.set(id, out);
+      this.stats.buffers += out.length;
+    }
+    return out;
+  }
+
+  async _renderVariant(id, rec, index) {
+    const t0 = performance.now();
+    const baseSr = this.sampleRate;
+    const sr = rec.half ? Math.max(11025, Math.round(baseSr / 2)) : baseSr;
+    const channels = rec.ch ?? 1;
+    const frames = Math.max(64, Math.ceil((rec.dur + 0.05) * sr));
+    let ctx;
+    try {
+      ctx = new OfflineCtor(channels, frames, sr);
+    } catch (e) {
+      Log.once('sfx:offline', 'OfflineAudioContext unavailable — SFX bank disabled.', e?.message ?? e);
+      this.available = false;
+      return null;
+    }
+    const R = {
+      ctx,
+      rand: new Rand(`${id}:${index}`),
+      sr,
+      tier: this.tierIndex,
+      tierMax: this._grainMax,
+    };
+    try {
+      rec.build(R, ctx.destination, rec.params ? rec.params(index, R) : {});
+    } catch (e) {
+      Log.warn(`SFX '${id}' variant ${index} failed to build:`, e?.message ?? e);
+      return null;
+    }
+    let buf;
+    try {
+      buf = await ctx.startRendering();
+    } catch (e) {
+      Log.warn(`SFX '${id}' variant ${index} failed to render:`, e?.message ?? e);
+      return null;
+    }
+    if (rec.loop) buf = makeSeamless(buf, rec.xfade ?? 0.35);
+    if (rec.norm !== 'none') {
+      const jr = new Rand(`${id}:${index}:lvl`);
+      // A whisper of level variation between variants so a repeated sound never lands
+      // twice at exactly the same loudness.
+      const jitter = rec.v > 1 ? jr.range(-1.5, 0.4) : 0;
+      normalizeBufferTo(buf, dbToGain((rec.peakDb ?? -12) + jitter));
+    }
+    this.stats.rendered++;
+    this.stats.ms += performance.now() - t0;
+    return buf;
+  }
+
+  /**
+   * Render every recipe in a phase, yielding to the frame whenever the wall-clock budget is
+   * exceeded so boot never stalls. phase 0 is awaited by AudioEngine.init(); phase 1 runs
+   * in the background.
+   */
+  async renderPhase(phase = 0, { budgetMs = 6, onProgress = null } = {}) {
+    if (!this.available || this._disposed) return this;
+    const ids = Object.keys(RECIPES).filter((id) => (RECIPES[id].phase ?? 1) === phase);
+    let chunkStart = performance.now();
+    for (let i = 0; i < ids.length; i++) {
+      if (this._disposed) break;
+      await this.ensure(ids[i]);
+      onProgress?.((i + 1) / ids.length, ids[i]);
+      if (performance.now() - chunkStart > budgetMs) {
+        await yieldToFrame();
+        chunkStart = performance.now();
+      }
+    }
+    return this;
+  }
+
+  /** Everything, in phase order. */
+  async renderAll(opts = {}) {
+    await this.renderPhase(0, opts);
+    await this.renderPhase(1, opts);
+    Log.debug(`SFX bank: ${this.stats.buffers} buffers in ${this.stats.ms.toFixed(0)} ms`);
+    return this;
+  }
+
+  dispose() {
+    this._disposed = true;
+    this._buffers.clear();
+    this._pending.clear();
+    this._missing.clear();
+  }
+}
+
+/**
+ * Convenience: build and fully prime a bank. `AudioEngine` uses the two-phase form instead
+ * so that boot is not blocked on the long ambience loops.
+ * @param {BaseAudioContext} audioContext
+ */
+export async function renderAll(audioContext, opts = {}) {
+  const bank = new SFXBank(audioContext, opts);
+  await bank.renderAll(opts);
+  return bank;
+}
+
+/**
+ * One-off creak render outside the bank (for tools, tests, or a bespoke member size).
+ * Resolves to an AudioBuffer.
+ */
+export async function creak(severity, size = 2.4, { sampleRate = 48000, seed = 'creak' } = {}) {
+  if (!OfflineCtor) return null;
+  const tier = creakTier(severity);
+  const dur = CREAK_DURATIONS[tier - 1] + 0.25;
+  const ctx = new OfflineCtor(1, Math.ceil(dur * sampleRate), sampleRate);
+  const R = { ctx, rand: new Rand(`${seed}:${tier}:${size}`), sr: sampleRate, tier: 3 };
+  buildCreak(R, ctx.destination, { tier, size });
+  const buf = await ctx.startRendering();
+  return normalizeBufferTo(buf, dbToGain([-30, -20, -12, -8][tier - 1]));
+}
+
+export default SFXBank;

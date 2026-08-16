@@ -202,7 +202,6 @@ const BYTES_PER_SECOND = 16000;
 const _lisPos = { x: 0, y: 1.7, z: 0 };
 const _lisFwd = { x: 0, y: 0, z: -1 };
 const _lisUp = { x: 0, y: 1, z: 0 };
-const _lisRight = { x: 1, y: 0, z: 0 };
 const _tmpVec = { x: 0, y: 0, z: 0 };
 const _tmpVec2 = { x: 0, y: 0, z: 0 };
 
@@ -306,6 +305,7 @@ export class VoiceBank {
     this._globalNextAt = 0;
     this._silenceUntil = 0;           // §8 silence rules — outranks everything
     this._chatterUntil = 0;           // the camp is listening — blocks priority < 3 only
+    this._warmNextAt = 0;
     this._hardStopped = false;
 
     // World sampling.
@@ -1083,7 +1083,6 @@ export class VoiceBank {
     const e = cam.matrixWorld?.elements;
     if (e && e.length >= 16) {
       _lisPos.x = e[12]; _lisPos.y = e[13]; _lisPos.z = e[14];
-      _lisRight.x = e[0]; _lisRight.y = e[1]; _lisRight.z = e[2];
       _lisUp.x = e[4]; _lisUp.y = e[5]; _lisUp.z = e[6];
       _lisFwd.x = -e[8]; _lisFwd.y = -e[9]; _lisFwd.z = -e[10];
     } else {
@@ -1415,9 +1414,12 @@ export class VoiceBank {
 
       const a = this.actx;
       const now = a.currentTime;
-      // A decode that took longer than a second means the moment has passed. Drop it — a
-      // reaction that arrives late is worse than no reaction at all.
-      if (now - slot.startedAt > 1.0 && slot.priority < 3) {
+      // A line that arrives long after the moment that asked for it is worse than no line at
+      // all — a camper reacting to a noise four seconds late reads as a bug, not a person. So
+      // a slow cold-cache decode is dropped. The window scales with priority, and the idle
+      // warmer (`_warmNext`) keeps the LRU stocked so this almost never fires in practice.
+      const stale = slot.priority >= 2 ? 2.5 : 1.2;
+      if (now - slot.startedAt > stale) {
         this._releaseSlot(slot, serial);
         return;
       }
@@ -1752,13 +1754,19 @@ export class VoiceBank {
       if (c.active) this._advanceConversation(c, now);
     }
 
-    // Start a new one?
+    const phase = this.ctx?.state?.phase;
+    if (phase === 'menu' || phase === 'gameover' || phase === 'briefing' || phase === 'night-end') {
+      return;
+    }
+
+    // Silence is when we do the loading. Warming one likely line every few seconds keeps the
+    // LRU stocked without ever preloading the bank, so the next reaction is already resident.
+    this._warmNext(now);
+
+    // Start a new conversation?
     if (now < this._nextConvAt || now < this._chatterUntil) return;
     if (this._tokens <= 0) return;
     if (this._camperCount < 1) return;
-
-    const phase = this.ctx?.state?.phase;
-    if (phase === 'menu' || phase === 'gameover' || phase === 'briefing') return;
 
     const conv = this._freeConversation();
     if (!conv) return;
@@ -1772,6 +1780,28 @@ export class VoiceBank {
     this._tokens--;
     this._nextConvAt = now + CONV_MIN_GAP_S + this._rand.range(0, 14);
     this._openConversation(conv, this._pickTopic(), now);
+  }
+
+  /**
+   * Warm one buffer the current situation is likely to want next. Bounded to a single
+   * in-flight decode and stops as soon as the LRU is full — this is opportunistic
+   * pre-caching, never a preload of the bank.
+   */
+  _warmNext(now) {
+    if (now < this._warmNextAt) return;
+    this._warmNextAt = now + 3;
+    if (this._loading.size > 0) return;
+    if (this._buffers.size >= this._cacheMax) return;
+
+    const pool = this._byCategory.get(this._pickTopic());
+    if (!pool || pool.length === 0) return;
+    const off = Math.floor(this._rand.next() * pool.length);
+    for (let i = 0; i < pool.length; i++) {
+      const id = pool[(i + off) % pool.length];
+      if (this._buffers.has(id) || this._failed.has(id) || this._usedThisNight.has(id)) continue;
+      this._ensureBuffer(id);
+      return;
+    }
   }
 
   /** Gather up to three campers standing near each other into a conversation. */
