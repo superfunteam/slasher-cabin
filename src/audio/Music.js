@@ -2452,6 +2452,7 @@ export class Music {
 
   dispose() {
     this.enabled = false;
+    this._disposed = true;              // in-flight fetches/decodes now resolve into nothing
     this.currentMood = 'off';
 
     if (this._watchdog) { globalThis.clearTimeout?.(this._watchdog); this._watchdog = 0; }
@@ -2470,10 +2471,27 @@ export class Music {
     this._dest = null;
     this._bufPink = this._bufWhite = this._bufString = this._bufStringShort = null;
     this._bufMetal = this._bufMetalRev = null;
+    this._bedBuffers.clear();
+    this._bedFiles.clear();
+    this._bedLoading.clear();
+    this._bedGate = this._bedMix = this._bedHP = this._bedLP = null;
   }
 
   _teardownGraph() {
     const t = this.ac ? this.ac.currentTime + 0.01 : 0;
+
+    // Bed voices first: their sources are created outside `_sources` (one per loop, not one
+    // per graph) and their gains ARE in `_nodes`, so they must be stopped before the sweep.
+    for (const v of this._bedVoices) {
+      if (v.src) {
+        try { v.src.stop(t); } catch { /* already stopped */ }
+        try { v.src.disconnect(); } catch { /* noop */ }
+      }
+      v.src = null; v.id = ''; v.f = null; v.level = 0; v.stopped = true;
+    }
+    this._bedVoices.length = 0;
+    this._bedCurrent = null;
+
     for (const s of this._sources) {
       try { s.stop?.(t); } catch { /* already stopped */ }
     }

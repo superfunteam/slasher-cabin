@@ -362,6 +362,7 @@ export class AudioEngine {
     this._bedT = 0;
     this._primaryBed = null;
     this._primaryOverride = null;
+    this._bedTense = 0;
     this._genWindTrim = 1;               // procedural bed makes room for the generated one
     this._genRainTrim = 1;
     this._place = { fire: new THREE.Vector3(), camp: new THREE.Vector3(), shore: new THREE.Vector3() };
@@ -2034,6 +2035,7 @@ export class AudioEngine {
     const def = BED_DEFS[name];
     const c = this.context;
     if (!def || !c || !this.generatedAvailable || !this._genIndex.has(name)) return null;
+    if (!this.buses?.ambience?.input) return null;
 
     const gainNode = c.createGain();
     gainNode.gain.value = MIN_G;
@@ -2232,10 +2234,10 @@ export class AudioEngine {
    * the camp by proximity, and the chorus by the one rule that matters — THE CRICKETS STOP.
    */
   _updateBeds(now, dt) {
-    if (!this._bedsOnline) return;
-    // Iteration scheduling has to run at full slow-tick rate; the director does not.
+    // Iteration scheduling has to run at full slow-tick rate — a bed asked for by hand
+    // through setBed() before the director came up must still loop.
     for (let i = 0; i < this._bedList.length; i++) this._pumpBed(this._bedList[i], now);
-    if (now - this._bedT < 0.25) return;
+    if (!this._bedsOnline || now - this._bedT < 0.25) return;
     this._bedT = now;
     this._updatePlaces(now);
     void dt;
@@ -2999,6 +3001,20 @@ export class AudioEngine {
 
     this.enabled = false;
 
+    // Generated assets: cancel anything still on the network, stop and disconnect every bed
+    // node, and drop the decoded buffers.
+    try { this._genAbort?.abort(); } catch { /* no AbortController */ }
+    this._genAbort = null;
+    try { this._stopBeds(); } catch { /* already torn down */ }
+    this._genIndex.clear();
+    this._genCache.clear();
+    this._genPending.clear();
+    this._genBytes = 0;
+    this.generatedAvailable = false;
+    this._thunder.at = 0;
+    this._thunder.id = null;
+    _gsel.buf = null;
+
     for (const v of this._voices) { try { v.dispose(); } catch { /* already torn down */ } }
     this._voices.length = 0;
 
@@ -3038,6 +3054,8 @@ export class AudioEngine {
   }
 }
 
+/** Scratch for the generated-buffer selector: the buffer and its level correction. */
+const _gsel = { buf: null, gain: 1 };
 /** Scratch for the occlusion triple: `gain` linear, `fc` Hz, `bleed` 0..1 diffraction. */
 const _occ = { gain: 1, fc: 18000, bleed: 0 };
 const NO_OCC = Object.freeze({ gain: 1, fc: 18000, bleed: 0 });

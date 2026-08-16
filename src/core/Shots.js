@@ -250,9 +250,51 @@ export class Shots {
     this._resolveReady?.({ shot: null, list: true });
   }
 
+  /**
+   * Render the current frame and POST it to the dev server, which writes shots/<name>.png.
+   * Exposed as window.__CAPTURE__ so a reviewer can call it and then just Read the file —
+   * no browser-pane visibility required, which is the whole point (see vite.config.js).
+   *
+   *   await window.__CAPTURE__('ridge')                  // current size
+   *   await window.__CAPTURE__('ridge', 1920, 1080)      // forced size
+   */
+  async capture(name = 'frame', width = 0, height = 0) {
+    const png = await this.ctx.engine.captureFrame(
+      width && height ? { width, height, dpr: 1 } : {},
+    );
+    const res = await fetch('/__shot', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ name, png }),
+    });
+    return res.json();
+  }
+
+  /** Capture every canonical shot in sequence. Returns the written file paths. */
+  async captureAll(width = 1920, height = 1080) {
+    const out = [];
+    for (const id of Object.keys(SHOTS)) {
+      this.requested = id;
+      this.active = SHOTS[id];
+      this.frozen = true;
+      this._settleFrames = 0;
+      // Let temporal accumulation (TAA, volumetric reprojection) converge before capturing,
+      // or the reviewer judges noise instead of art.
+      for (let i = 0; i < 50; i++) {
+        this.update();
+        this.ctx.engine._render();
+        await new Promise((r) => setTimeout(r, 8));
+      }
+      out.push(await this.capture(id, width, height));
+    }
+    return out;
+  }
+
   dispose() {
     delete globalThis.__SHOT_READY__;
     delete globalThis.__SHOTS__;
+    delete globalThis.__CAPTURE__;
+    delete globalThis.__CAPTURE_ALL__;
   }
 }
 

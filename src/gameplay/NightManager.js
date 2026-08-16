@@ -66,7 +66,7 @@
 
 import * as THREE from 'three';
 import { Log } from '../core/Log.js';
-import { Rand, hashStr } from '../core/Rand.js';
+import { Rand } from '../core/Rand.js';
 import Script from '../story/Script.js';
 
 // =================================================================================================
@@ -266,6 +266,14 @@ const _v0 = new THREE.Vector3();
 const _v1 = new THREE.Vector3();
 const _v2 = new THREE.Vector3();
 
+/** Module-scope so `_countState` allocates nothing at 60 Hz. */
+const RE_ALERTED = /alert|panic/i;
+const RE_SEARCHING = /search|curious|notic/i;
+const RE_ROOF = /doorframe|batten|shingle|roof/i;
+const RE_ANSEL = /ansel/i;
+const RE_SMALL_CHAIR = /chair[-_ ]?small|small[-_ ]?chair/i;
+const RE_ROBIN = /robin/i;
+
 const clamp01 = (v) => (v < 0 ? 0 : v > 1 ? 1 : v);
 const clamp = (v, a, b) => (v < a ? a : v > b ? b : v);
 const finite = (v, d = 0) => (Number.isFinite(Number(v)) ? Number(v) : d);
@@ -315,6 +323,8 @@ export class NightManager {
     this._ending = null;        // 'a' | 'b' | 'c' once chosen
     this._nightOver = false;
     this._closingT = -1;        // >= 0 while the closing image is held
+    this._autoStartPending = 0; // s until we start the night ourselves when no UI does
+    this._manualClosed = false; // the player closed the briefing manual — start the night
 
     // --- pacing state ---------------------------------------------------------------------
     this._pacingEnabled = true;
@@ -762,12 +772,13 @@ export class NightManager {
     if (leave) {
       this._manualClosed = false;
       this.setPhase('build');
-      this._weather()?.requestWind?.(0, 1);   // nudge Weather to re-latch on the live clock
     }
   }
 
   /** BUILD (and CHASE — the clock runs in both). Dawn is the only real currency. */
   _updateBuild(dt) {
+    if (this._nightOver) return;
+
     // ---- the clock -------------------------------------------------------------------------
     if (Number.isFinite(this.def.seconds)) {
       this._buildSeconds += dt;
@@ -1017,7 +1028,10 @@ export class NightManager {
   _endLull() {
     this._lull = 0;
     this._lullReason = null;
-    this._releaseMusic();
+    // Hand the score back to its own dread scalar — unless a chase started inside the lull,
+    // in which case the chase still owns the mix.
+    if (this._chase) this._music()?.setIntensity?.(TUNING.chaseMusic);
+    else this._releaseMusic();
     if (this.ctx.state?.director) this.ctx.state.director.lull = 0;
     // The player has had their breath. The clock has not stopped.
     this._pressureIdle = 0;
@@ -1750,11 +1764,8 @@ export class NightManager {
     if (!snap) return false;
     const st = this.ctx.state;
     if (!st) return false;
-    try {
-      const base = typeof st.constructor?.name === 'string' ? null : null;
-      void base;
-      Object.assign(st, snap);
-    } catch (e) { Log.once('nm:load', 'NightManager: restore failed', e); return false; }
+    try { Object.assign(st, snap); }
+    catch (e) { Log.once('nm:load', 'NightManager: restore failed', e); return false; }
 
     this._rungs.clear();
     for (const r of (snap.director?.rungs ?? [])) this._rungs.add(r);
@@ -1901,7 +1912,6 @@ export class NightManager {
         const stage = finite(payload?.stage, 1);
         this._fireTrigger('stage-complete', { stage });
         this._autosave('checkpoint');
-        if (this.night === 7) this._beatsFired = Math.max(this._beatsFired, this._beats.length - 1);
         // A finished stage is the natural place to let the player breathe.
         if (this._tension > 0.5) this.requestLull(Math.min(30, TUNING.lullSeconds), 'stage-complete');
         break;
@@ -1940,9 +1950,9 @@ export class NightManager {
     if (this.night !== 7) return;
     const slotId = String(payload?.slot?.id ?? payload?.slot ?? '');
     const partId = String(payload?.part?.partId ?? payload?.part?.id ?? payload?.part ?? '');
-    if (/ansel/i.test(partId) || /chair[-_ ]?small|small[-_ ]?chair/i.test(slotId)) {
+    if (RE_ANSEL.test(partId) || RE_SMALL_CHAIR.test(slotId)) {
       this.chooseEnding('c');
-    } else if (/robin/i.test(partId)) {
+    } else if (RE_ROBIN.test(partId)) {
       this.chooseEnding('a');
     }
   }
@@ -2117,8 +2127,8 @@ export class NightManager {
     } catch { return 0; }
   }
 
-  _alertedCount() { return this._countState(/alert|panic/i); }
-  _searchingCount() { return this._countState(/search|curious|notic/i); }
+  _alertedCount() { return this._countState(RE_ALERTED); }
+  _searchingCount() { return this._countState(RE_SEARCHING); }
 
   _playerLum() {
     const f = this._flashlight();
@@ -2183,7 +2193,7 @@ export class NightManager {
       if (!Array.isArray(slots)) return false;
       for (const s of slots) {
         const id = String(s?.id ?? '');
-        if (!/doorframe|batten|shingle|roof/i.test(id)) continue;
+        if (!RE_ROOF.test(id)) continue;
         sawTarget = true;
         if (!bs.joins?.has?.(s.id)) { unbuilt = true; break; }
       }
