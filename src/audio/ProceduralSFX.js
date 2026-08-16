@@ -2269,7 +2269,9 @@ export class SFXBank {
       if (this._disposed) break;
       await this.ensure(ids[i], variants);
       onProgress?.((i + 1) / ids.length, ids[i]);
-      if (performance.now() - chunkStart > budgetMs) {
+      // A hidden tab has no frame to protect and throttles timers hard, so run straight
+      // through: the bank should be complete by the time the player comes back.
+      if (performance.now() - chunkStart > budgetMs && globalThis.document?.hidden !== true) {
         await yieldToFrame();
         chunkStart = performance.now();
       }

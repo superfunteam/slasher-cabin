@@ -84,6 +84,9 @@ export const NAV_TUNING = {
   syncExpandCap: 40000,        // hard ceiling for a blocking findPath()
   asyncExpandPerFrame: 1400,   // amortised budget for queued requests
   routeExpandPerFrame: 600,    // idle budget for pre-computing route legs
+  asyncMsPerFrame: 0.65,       // wall-clock guard — expansions alone do not bound the frame
+  routeMsPerFrame: 0.30,
+  expandSlice: 512,            // re-check the clock this often, so the tail stays bounded
   heapCapacity: 1 << 15,
   maxPathNodes: 4096,
   smoothLookahead: 28,         // string-pull window, in nodes
@@ -1801,20 +1804,29 @@ export class Navmesh {
   }
 
   _modMul(i) {
-    const mods = this._mods;
-    const n = mods.length;
-    if (n === 0) return 1;
+    if (this._mods.length === 0) return 1;
     const ix = i % this.width;
     const iz = (i / this.width) | 0;
-    const x = this.originX + (ix + 0.5) * this.cell;
-    const z = this.originZ + (iz + 0.5) * this.cell;
+    return this._modMulXZ(
+      this.originX + (ix + 0.5) * this.cell,
+      this.originZ + (iz + 0.5) * this.cell,
+      i,
+    );
+  }
+
+  /**
+   * Hot path — called once per expanded neighbour, so it takes world coordinates the caller
+   * already has rather than recovering them from the index with a divide and a modulo.
+   * A modifier with a bounding circle costs four multiplies for every node outside it.
+   */
+  _modMulXZ(x, z, i) {
+    const mods = this._mods;
+    const n = mods.length;
     let m = 1;
     for (let k = 0; k < n; k++) {
       const mod = mods[k];
-      if (mod.br2 < Infinity) {
-        const dx = x - mod.bx, dz = z - mod.bz;
-        if (dx * dx + dz * dz >= mod.br2) continue;
-      }
+      const dx = x - mod.bx, dz = z - mod.bz;
+      if (dx * dx + dz * dz >= mod.br2) continue;   // br2 is Infinity when unbounded
       let v = 1;
       try { v = mod.fn(x, z, i); } catch (e) {
         Log.once(`nav:mod:${mod.name}`, `Navmesh: cost modifier '${mod.name}' threw — ignored.`, e);
@@ -1986,9 +1998,20 @@ export class Navmesh {
     if (this._reqPool.length < 32) this._reqPool.push(req);
   }
 
-  _pumpQueue(budget) {
+  /**
+   * Drain the request queue against BOTH a node budget and a wall-clock budget.
+   *
+   * The node budget alone does not bound the frame: extracting, string-pulling and emitting a
+   * finished path is real work that expands no nodes, and seven campers finishing in the same
+   * frame once cost 4.2 ms. So the clock is checked between slices, and a slice is small enough
+   * that the tail after the last check stays under a few tenths of a millisecond.
+   */
+  _pumpQueue(budget, msBudget) {
+    const t0 = performance.now();
+    const slice = NAV_TUNING.expandSlice;
     let remaining = budget;
     while (remaining > 0) {
+      if (performance.now() - t0 >= msBudget) break;
       if (!this._activeRequest) {
         while (this._queue.length && this._queue[0].cancelled) this._release(this._queue.shift());
         if (!this._queue.length) break;
@@ -2035,10 +2058,10 @@ export class Navmesh {
       }
 
       const before = ws.expanded;
-      const r = this._step(ws, remaining);
+      const r = this._step(ws, Math.min(remaining, slice));
       remaining -= (ws.expanded - before);
       this.stats.expandedLastFrame += (ws.expanded - before);
-      if (r === 0) break;                       // still running; resume next frame
+      if (r === 0) continue;                    // slice used up; loop re-checks the clock
       this._finishRequest(req, r === 1 ? req.gi : ws.best, r === 1);
     }
   }
@@ -2093,6 +2116,8 @@ export class Navmesh {
     const hasMods = this._mods.length > 0;
     const litW = NAV_TUNING.litDiscount;
     const LT = this._lit;
+    const ox = this.originX + this.cell * 0.5;
+    const oz = this.originZ + this.cell * 0.5;
 
     if (ws.expanded === 0 && heap.size === 0) {
       // First step: seed the open set.
@@ -2135,7 +2160,7 @@ export class Navmesh {
         }
 
         let unit = C[ni] * INV256 * (1 - litW * (LT[ni] * INV255));
-        if (hasMods) unit *= this._modMul(ni);
+        if (hasMods) unit *= this._modMulXZ(ox + nx * cell, oz + nz * cell, ni);
         const ng = gc + (n >= 4 ? diag : cell) * unit;
 
         if (stamp[ni] === gen && state[ni] === 1 && ng >= g[ni]) continue;
@@ -2588,7 +2613,10 @@ export class Navmesh {
     let urgent = act ? act.priority > 0 : false;
     for (let i = 0; i < this._queue.length && !urgent; i++) if (this._queue[i].priority > 0) urgent = true;
     if (act || this._queue.length) {
-      this._pumpQueue(urgent ? NAV_TUNING.asyncExpandPerFrame : NAV_TUNING.routeExpandPerFrame);
+      this._pumpQueue(
+        urgent ? NAV_TUNING.asyncExpandPerFrame : NAV_TUNING.routeExpandPerFrame,
+        urgent ? NAV_TUNING.asyncMsPerFrame : NAV_TUNING.routeMsPerFrame,
+      );
     }
     void dt;
   }

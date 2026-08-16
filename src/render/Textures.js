@@ -1592,6 +1592,10 @@ export class Textures {
    */
   get(rawName, opts) {
     const name = ALIASES[rawName] ?? rawName;
+    // Arm the animated re-bake BEFORE the cache lookup. _bake() seeds _cache during init(), so
+    // every real call is a cache hit and an early return here would leave _waterLive false
+    // forever -- update() would then skip the re-bake and the lake would sit frozen.
+    if (name === 'water-normal') this._waterLive = (this.ctx?.settings?.tierIndex ?? 3) >= 1;
     const key = _cacheKey(name, opts);
     const hit = this._cache.get(key);
     if (hit) return hit;
@@ -1611,7 +1615,6 @@ export class Textures {
         return this._fallbackSet();
       }
     }
-    if (name === 'water-normal') this._waterLive = (this.ctx?.settings?.tierIndex ?? 3) >= 1;
 
     if (!opts || (!opts.repeat && !opts.offset && opts.rotation === undefined)) return base;
 

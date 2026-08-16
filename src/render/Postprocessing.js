@@ -863,9 +863,15 @@ void main() {
     vec3 n = texture2D( tNoise, guv ).rgb * 2.0 - 1.0;
     n *= vec3( 1.25, 1.0, 1.25 );          // dye-cloud behaviour: R and B are coarser
     float L = scLuma( col );
-    float amp = uGrain.x * ( 0.055 * pow( 1.0 - clamp( L, 0.0, 1.0 ), 1.4 ) + 0.008 );
+    float amp = uGrain.x * ( 0.042 * pow( 1.0 - clamp( L, 0.0, 1.0 ), 1.4 ) + 0.006 );
     col += n * amp;
   }
+
+  // THE BLACK POINT (§12.4). Additive grain in a frame whose whole useful range lives in the
+  // bottom 5% will otherwise punch channels to hard 0 across half the screen, which is the exact
+  // histogram spike this document calls a bug. Floor it above the grain, dither on top, floor
+  // again by 1 LSB less so the dither still has somewhere to go.
+  col = max( col, vec3( 4.0 / 255.0 ) );
 
   // --- triangular-PDF blue-noise dither, +/- 1 LSB. MANDATORY: our whole useful range lives in
   // the bottom 5% of an 8-bit framebuffer and would band catastrophically without it.
@@ -874,7 +880,7 @@ void main() {
   float tri = ( dn.x + dn.y - 1.0 );
   col += tri / 255.0;
 
-  gl_FragColor = vec4( clamp( col, 0.0, 1.0 ), 1.0 );
+  gl_FragColor = vec4( clamp( col, 3.0 / 255.0, 1.0 ), 1.0 );
 }
 `;
 
@@ -1167,9 +1173,12 @@ export class Postprocessing {
     this._noise = this._resolveNoiseTexture();
     this._makeFallbackTextures();
 
-    this._w = Math.max(1, ctx.width || 1);
-    this._h = Math.max(1, ctx.height || 1);
-    this._dpr = ctx.dpr || 1;
+    // The drawing buffer is the authority — ctx.width/height can still be 1x1 during boot if the
+    // mount had no layout when Engine constructed itself.
+    const buf = renderer.getDrawingBufferSize(_v2a);
+    this._dpr = ctx.dpr || renderer.getPixelRatio() || 1;
+    this._w = Math.max(1, Math.round((buf.width || (ctx.width * this._dpr) || 1) / this._dpr));
+    this._h = Math.max(1, Math.round((buf.height || (ctx.height * this._dpr) || 1) / this._dpr));
 
     try {
       this._buildTargets();
@@ -1412,9 +1421,18 @@ export class Postprocessing {
     this._depthTex.generateMipmaps = false;
     this._depthTex.name = 'sc-depth';
 
-    // --- the scene MRT. Attachment 0 is the HDR frame; attachment 1 is the gbuffer slot that
-    // Materials.js will fill once SC_MRT_OUT lands (ART_DIRECTION §11.4 F5).
-    const useMRT = this._isWebGL2 && (this._settings?.tierIndex ?? 3) >= 2;
+    // --- the scene MRT. Attachment 0 is the HDR frame; attachment 1 is the gbuffer slot for
+    // packed normal+roughness+velocity that Materials.js will fill once SC_MRT_OUT lands
+    // (ART_DIRECTION §11.4 F5).
+    //
+    // IMPORTANT, measured in Chrome: binding two draw buffers while the scene materials only
+    // declare output 0 is a hard `GL_INVALID_OPERATION: Active draw buffers with missing
+    // fragment shader outputs` on EVERY draw call. So attachment 1 stays unbound until someone
+    // actually authors it. Flip `Postprocessing.MRT_GBUFFER = true` (before construction) the
+    // same commit SC_MRT_OUT lands, and the second attachment appears with no other change.
+    // Until then normals come from the depth-reconstruction pass below, which is exact enough
+    // for AO/SSR/fog and costs one full-screen pass.
+    const useMRT = this._isWebGL2 && (Postprocessing.MRT_GBUFFER || this.gbufferIsAuthored);
     this.sceneTarget = this._mkTarget(pw, ph, {
       depthBuffer: true, depthTexture: this._depthTex,
       count: useMRT ? 2 : 1, name: 'sc-hdr',
@@ -1457,15 +1475,30 @@ export class Postprocessing {
     }
   }
 
-  _mkQuad(name, frag, uniforms) {
+  _mkMaterial(name, frag, uniforms, defines) {
     const mat = new THREE.ShaderMaterial({
       name, uniforms, vertexShader: VERT, fragmentShader: frag,
+      defines: defines ? { ...defines } : undefined,
       depthTest: false, depthWrite: false, blending: THREE.NoBlending,
     });
     this._materials.push(mat);
+    return mat;
+  }
+
+  _mkQuad(name, frag, uniforms, defines) {
+    const mat = this._mkMaterial(name, frag, uniforms, defines);
     const q = new FullScreenQuad(mat);
     this._quads.push(q);
     return { quad: q, mat, u: mat.uniforms };
+  }
+
+  /**
+   * A ShaderPass built from a pre-made ShaderMaterial. Passing a plain shader object instead
+   * makes ShaderPass call UniformsUtils.clone(), which warns loudly on every render-target
+   * texture we hand it — and we hand it several.
+   */
+  _mkPass(name, frag, uniforms, defines) {
+    return new ShaderPass(this._mkMaterial(name, frag, uniforms, defines));
   }
 
   _buildQuads() {
@@ -1487,11 +1520,10 @@ export class Postprocessing {
       uParams: { value: new THREE.Vector4(0.75, 1.4, 1.15, 0.14) },
       uNearFar: { value: new THREE.Vector2(0.05, 1200) },
       uFrame: { value: 0 },
-    });
-    this._aoQuad.mat.defines = {
+    }, {
       AO_DIRS: tierIdx >= 3 ? 12 : (tierIdx >= 2 ? 8 : 4),
       AO_STEPS: tierIdx >= 3 ? 4 : 3,
-    };
+    });
 
     this._aoBlurQuad = this._mkQuad('sc-ao-blur', FRAG_AO_BLUR, {
       tAO: { value: null },
@@ -1514,8 +1546,7 @@ export class Postprocessing {
       uNearFar: { value: new THREE.Vector2(0.05, 1200) },
       uParams: { value: new THREE.Vector4(0.35, 0.55, 24, 0) },
       uStrength: { value: 0.55 },
-    });
-    this._ssrQuad.mat.defines = { SSR_STEPS: tierIdx >= 3 ? 32 : 16 };
+    }, { SSR_STEPS: tierIdx >= 3 ? 32 : 16 });
 
     this._lumQuad = this._mkQuad('sc-lum', FRAG_LUM, {
       tDiffuse: { value: this.sceneTarget.texture },
@@ -1545,20 +1576,16 @@ export class Postprocessing {
 
     const tierIdx = this._settings?.tierIndex ?? 3;
 
-    // --- 5. resolve
-    this._resolvePass = new ShaderPass({
-      uniforms: {
-        tScene: { value: this.sceneTarget.texture },
-        tAO: { value: this._whiteTex },
-        tSSR: { value: this._blackTex },
-        tFog: { value: this._fogFallback },
-        uTexel: { value: new THREE.Vector2() },
-        uParams: { value: new THREE.Vector4(0.85, 0.55, 6.0, 0) },
-      },
-      vertexShader: VERT,
-      fragmentShader: FRAG_RESOLVE,
+    // --- 5. resolve. Reads the MRT directly, so it deliberately has no `tDiffuse` uniform and
+    // ShaderPass leaves the composer's read buffer alone.
+    this._resolvePass = this._mkPass('sc-resolve', FRAG_RESOLVE, {
+      tScene: { value: this.sceneTarget.texture },
+      tAO: { value: this._whiteTex },
+      tSSR: { value: this._blackTex },
+      tFog: { value: this._fogFallback },
+      uTexel: { value: new THREE.Vector2() },
+      uParams: { value: new THREE.Vector4(0.85, 0.55, 6.0, 0) },
     });
-    this._resolvePass.material.name = 'sc-resolve';
     composer.addPass(this._resolvePass);
 
     // --- 6. TAA
@@ -1567,41 +1594,29 @@ export class Postprocessing {
     composer.addPass(this._taaPass);
 
     // --- 7. motion blur
-    this._motionPass = new ShaderPass({
-      uniforms: {
-        tDiffuse: { value: null },
-        tDepth: { value: this._depthTex },
-        tNoise: { value: this._noise },
-        uProjInv: { value: new THREE.Matrix4() },
-        uViewInv: { value: new THREE.Matrix4() },
-        uPrevViewProj: { value: new THREE.Matrix4() },
-        uNoiseScale: { value: new THREE.Vector2() },
-        uJitter: { value: new THREE.Vector2() },
-        uTexel: { value: new THREE.Vector2() },
-        uParams: { value: new THREE.Vector4(0.5, 0.03, 0, 0) },
-      },
-      vertexShader: VERT,
-      fragmentShader: FRAG_MOTION,
-    });
-    this._motionPass.material.name = 'sc-motion';
-    this._motionPass.material.defines = { MB_TAPS: tierIdx >= 3 ? 12 : 8 };
+    this._motionPass = this._mkPass('sc-motion', FRAG_MOTION, {
+      tDiffuse: { value: null },
+      tDepth: { value: this._depthTex },
+      tNoise: { value: this._noise },
+      uProjInv: { value: new THREE.Matrix4() },
+      uViewInv: { value: new THREE.Matrix4() },
+      uPrevViewProj: { value: new THREE.Matrix4() },
+      uNoiseScale: { value: new THREE.Vector2() },
+      uJitter: { value: new THREE.Vector2() },
+      uTexel: { value: new THREE.Vector2() },
+      uParams: { value: new THREE.Vector4(0.5, 0.03, 0, 0) },
+    }, { MB_TAPS: tierIdx >= 3 ? 12 : 8 });
     composer.addPass(this._motionPass);
 
     // --- 8. depth of field
-    this._dofPass = new ShaderPass({
-      uniforms: {
-        tDiffuse: { value: null },
-        tDepth: { value: this._depthTex },
-        tAdapt: { value: this._adapt[0].texture },
-        uTexel: { value: new THREE.Vector2() },
-        uNearFar: { value: new THREE.Vector2(0.05, 1200) },
-        uParams: { value: new THREE.Vector4(9.0, 0.30, 0.0, 0.0) },
-      },
-      vertexShader: VERT,
-      fragmentShader: FRAG_DOF,
-    });
-    this._dofPass.material.name = 'sc-dof';
-    this._dofPass.material.defines = { DOF_TAPS: tierIdx >= 3 ? 12 : 8 };
+    this._dofPass = this._mkPass('sc-dof', FRAG_DOF, {
+      tDiffuse: { value: null },
+      tDepth: { value: this._depthTex },
+      tAdapt: { value: this._adapt[0].texture },
+      uTexel: { value: new THREE.Vector2() },
+      uNearFar: { value: new THREE.Vector2(0.05, 1200) },
+      uParams: { value: new THREE.Vector4(9.0, 0.30, 0.0, 0.0) },
+    }, { DOF_TAPS: tierIdx >= 3 ? 12 : 8 });
     composer.addPass(this._dofPass);
 
     // --- 9. bloom (needsSwap false — leaves its result in a texture)
@@ -1610,40 +1625,33 @@ export class Postprocessing {
     composer.addPass(this._bloomPass);
 
     // --- 10. composite
-    this._compositePass = new ShaderPass({
-      uniforms: {
-        tDiffuse: { value: null },
-        tBloom: { value: this._bloomMips.length ? this._bloomMips[0].texture : this._blackTex },
-        tAdapt: { value: this._adapt[0].texture },
-        tNoise: { value: this._noise },
-        uResolution: { value: new THREE.Vector2(1920, 1080) },
-        uNoiseSize: { value: new THREE.Vector2(this._noiseSize, this._noiseSize) },
-        uExposure: { value: new THREE.Vector4(0.62, 0.10, 0.55, 2.6) },
-        uBloom: { value: new THREE.Vector4(0.055, 0.10, 0.08, 0) },
-        uGradeLift: { value: new THREE.Vector4(0.000, 0.004, 0.016, 0) },
-        uGradeGamma: { value: new THREE.Vector4(1.02, 1.00, 0.96, 0) },
-        uGradeGain: { value: new THREE.Vector4(1.06, 1.00, 0.92, 0) },
-        uSat: { value: new THREE.Vector4(0.86, 0.75, 0.70, 1.18) },
-        uVignette: { value: new THREE.Vector4(0.30, 0.42, 1.10, 1.0) },
-        uGrain: { value: new THREE.Vector4(1.0, 1.35, 0.020, 0) },
-        uLens: { value: new THREE.Vector4(0.0016, 0, 0, 0) },
-        uVigTint: { value: new THREE.Vector3(0.0037, 0.0075, 0.0114) },  // #0a1216 in linear
-        uTime: { value: 0 },
-        uFrame: { value: 0 },
-      },
-      vertexShader: VERT,
-      fragmentShader: FRAG_COMPOSITE,
+    this._compositePass = this._mkPass('sc-composite', FRAG_COMPOSITE, {
+      tDiffuse: { value: null },
+      tBloom: { value: this._bloomMips.length ? this._bloomMips[0].texture : this._blackTex },
+      tAdapt: { value: this._adapt[0].texture },
+      tNoise: { value: this._noise },
+      uResolution: { value: new THREE.Vector2(1920, 1080) },
+      uNoiseSize: { value: new THREE.Vector2(this._noiseSize, this._noiseSize) },
+      uExposure: { value: new THREE.Vector4(0.62, 0.10, 0.55, 2.6) },
+      uBloom: { value: new THREE.Vector4(0.055, 0.10, 0.08, 0) },
+      uGradeLift: { value: new THREE.Vector4(0.000, 0.004, 0.016, 0) },
+      uGradeGamma: { value: new THREE.Vector4(1.02, 1.00, 0.96, 0) },
+      uGradeGain: { value: new THREE.Vector4(1.06, 1.00, 0.92, 0) },
+      uSat: { value: new THREE.Vector4(0.86, 0.75, 0.70, 1.18) },
+      uVignette: { value: new THREE.Vector4(0.30, 0.42, 1.10, 1.0) },
+      uGrain: { value: new THREE.Vector4(1.0, 1.35, 0.020, 0) },
+      uLens: { value: new THREE.Vector4(0.0016, 0, 0, 0) },
+      uVigTint: { value: new THREE.Vector3(0.0037, 0.0075, 0.0114) },  // #0a1216 in linear
+      uTime: { value: 0 },
+      uFrame: { value: 0 },
     });
-    this._compositePass.material.name = 'sc-composite';
     composer.addPass(this._compositePass);
 
     // --- 11. FXAA (only when TAA is off)
-    this._fxaaPass = new ShaderPass({
-      uniforms: { tDiffuse: { value: null }, uTexel: { value: new THREE.Vector2() } },
-      vertexShader: VERT,
-      fragmentShader: FRAG_FXAA,
+    this._fxaaPass = this._mkPass('sc-fxaa', FRAG_FXAA, {
+      tDiffuse: { value: null },
+      uTexel: { value: new THREE.Vector2() },
     });
-    this._fxaaPass.material.name = 'sc-fxaa';
     composer.addPass(this._fxaaPass);
 
     this.stats.passes = composer.passes.length;
@@ -1991,5 +1999,11 @@ export class Postprocessing {
     }
   }
 }
+
+/**
+ * Opt-in: bind attachment 1 of the scene MRT. Leave false until Materials.js emits SC_MRT_OUT —
+ * see the comment in _buildTargets(). Set before Postprocessing is constructed.
+ */
+Postprocessing.MRT_GBUFFER = false;
 
 export default Postprocessing;

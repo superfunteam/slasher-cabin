@@ -291,13 +291,13 @@ void main() {
     float shell = 0.0;
   #else
     vec3 rel = abs(p - uCamPos) / (box * 0.5);
-    float edge = 1.0 - smoothstep(0.70, 1.0, max(max(rel.x, rel.y), rel.z));
+    float edge = 1.0 - smoothstep(0.82, 1.0, max(max(rel.x, rel.y), rel.z));
     float shell = aParams.x;
   #endif
 
   float nearFade = smoothstep(0.30, 1.10, dist);
   float fogFade = exp(-dist * uFogD0 * 0.85);
-  float a = alive * edge * nearFade * fogFade * mix(0.62, 0.30, shell);
+  float a = alive * edge * nearFade * fogFade * mix(0.78, 0.44, shell);
 
   #ifndef DRIP
     a *= smoothstep(0.02, 0.22, uRain);
@@ -309,7 +309,10 @@ void main() {
   float cosA = dot(toL / max(dl, 1e-4), uLanternAxis);
   float cone = smoothstep(uLanternParams.x, uLanternParams.y, cosA)
              * (1.0 - smoothstep(uLanternParams.w * 0.45, uLanternParams.w, dl));
-  vLit = 0.22 + 0.30 * uMoon + 2.20 * cone * uLanternParams.z + 2.60 * uLightning;
+  // ART §5.4: a streak inside a light cone is lit at 2.2x ambient rain brightness. The ambient
+  // term has to be high enough that the 2.2x actually reads as the classic image and not as a
+  // slightly less invisible drop.
+  vLit = 0.52 + 0.52 * uMoon + 2.20 * cone * uLanternParams.z + 2.60 * uLightning;
 
   vAlpha = a;
   if (a < 0.002) {
@@ -330,11 +333,21 @@ varying float vLit;
 varying vec2  vQuad;
 
 void main() {
-  float across = 1.0 - abs(vQuad.x - 0.5) * 2.0;
+  // Flat-topped across the streak, not a triangle. A streak is only ~2 px wide: with a
+  // triangular profile the rasteriser samples the ramp at a random offset and the drop reads
+  // at a third of its intended brightness, which is how rain becomes invisible.
+  float across = smoothstep(0.0, 0.45, 1.0 - abs(vQuad.x - 0.5) * 2.0);
   float along = smoothstep(0.0, 0.20, vQuad.y) * (1.0 - smoothstep(0.72, 1.0, vQuad.y));
-  float a = vAlpha * across * across * along;
+  float a = vAlpha * across * along;
   if (a < 0.003) discard;
   gl_FragColor = vec4(uRainColor * vLit, a);
+
+  // Composite exactly like every other material in the scene. Without these two chunks the
+  // shader writes linear radiance straight into whatever buffer is bound, so rain is graded
+  // differently from the world it is falling through — and looks pasted on in one path and
+  // invisible in the other.
+  #include <tonemapping_fragment>
+  #include <colorspace_fragment>
 }
 `;
 
@@ -386,6 +399,8 @@ varying float vLit;
 void main() {
   if (vAlpha < 0.003) discard;
   gl_FragColor = vec4(uRippleColor * vLit, vAlpha);
+  #include <tonemapping_fragment>
+  #include <colorspace_fragment>
 }
 `;
 
@@ -560,6 +575,10 @@ export class Weather {
   fixedUpdate(fdt) {
     if (this._disposed || this._paused) return;
     this._fixedRan++;
+    // Shots.js writes rain/fog/lightning at the end of a frame; fixedUpdate is the first thing
+    // to run in the next one, so the override has to be caught here or the simulation
+    // overwrites it before update() ever sees it.
+    this._adoptPins();
     this._simulate(fdt);
   }
 
@@ -574,7 +593,10 @@ export class Weather {
 
     this._adoptPins();
     this._writeUniforms(d);
-    this._updateRain(d, Number.isFinite(elapsed) ? elapsed : this._t);
+    // The particle clock is the night clock, not the session clock: `_t` is bounded by the
+    // night length, so `velocity * time` inside the wrap never loses float precision on a long
+    // session, and it resets cleanly at every night boundary.
+    this._updateRain(d, this._t);
     this._maybeEmitChange();
   }
 
@@ -584,9 +606,11 @@ export class Weather {
     // sub-pixelling into nothing.
     const fov = (this.ctx?.camera?.fov ?? 72) * Math.PI / 180;
     const px = (2 * Math.tan(fov * 0.5)) / Math.max(1, height || this.ctx?.height || 1080);
-    const w = clamp(px * 1.35, 0.0006, 0.02);
+    // ~2.4 px minimum. Below about two pixels a streak is a coverage lottery and the rain
+    // silently disappears at distance instead of receding.
+    const w = clamp(px * 2.4, 0.0006, 0.02);
     this._streakMat.uniforms.uPxWidth.value = w;
-    if (this._dripMat) this._dripMat.uniforms.uPxWidth.value = w * 1.6;
+    if (this._dripMat) this._dripMat.uniforms.uPxWidth.value = w * 1.5;
   }
 
   dispose() {

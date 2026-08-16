@@ -29,6 +29,7 @@ const _lis = new THREE.Vector3();
 const _tmp = new THREE.Vector3();
 
 const clamp = (v, a, b) => (v < a ? a : v > b ? b : v);
+const copyOcc = (src, dst) => { dst.gain = src.gain; dst.fc = src.fc; dst.bleed = src.bleed; return dst; };
 const clamp01 = (v) => (v < 0 ? 0 : v > 1 ? 1 : v);
 const MIN_G = 1e-4;
 
@@ -582,12 +583,14 @@ export class AudioEngine {
     const spatial = !!opts.position && busName !== 'sfxUI' && busName !== 'body';
 
     const gainValue = opts.volume ?? 1;
-    const occT = opts.occlusion ?? 0;
     let distance = 0;
     if (spatial) {
       this._listenerPosition(_lis);
       distance = _tmp.copy(opts.position).distanceTo(_lis);
     }
+    // `occ:false` opts out (ambience beds and the player's own body are never occluded).
+    const occ = opts.occ === false || !spatial ? null
+      : (opts.occ ?? (opts.occlusion != null ? this._occFromThickness(opts.occlusion) : this._occlusion(opts.position, distance)));
 
     return this._playBuffer(buf, {
       id: resolved,
@@ -600,7 +603,7 @@ export class AudioEngine {
       detune: opts.detune ?? 0,
       loop: !!opts.loop,
       reverb: opts.reverb,
-      occlusion: occT,
+      occ,
       distance,
       rolloff: opts.rolloff,
       refDistance: opts.refDistance,
@@ -713,14 +716,13 @@ export class AudioEngine {
     const busObj = this.buses[busKey] ?? this.buses.sfxWorld;
     const spatial = !!o.position;
 
-    // ---- occlusion split (§3.2)
-    const T = clamp(o.occlusion ?? 0, 0, 14);
-    const fc = clamp(18000 * Math.exp(-0.55 * T), 180, 18000);
-    const directDb = clamp(-3.2 * T, -34, 0);
-    const bleedDb = T > 0.02 ? clamp(-14 - 1.1 * T, -40, -14) : -60;
-    this._set(v.directLP.frequency, fc, now);
-    this._set(v.directGain.gain, dbToGain(directDb), now);
-    this._set(v.bleedGain.gain, T > 0.02 ? dbToGain(bleedDb) : 0, now);
+    // ---- the two-path occlusion split (§3.2). The direct path is occluded; the bleed path
+    // models diffraction around the occluder, so a sound behind a wall becomes a dull thud
+    // with no location rather than vanishing.
+    const occ = o.occ ?? (o.occlusion ? this._occFromThickness(o.occlusion) : NO_OCC);
+    this._set(v.directLP.frequency, occ.fc, now);
+    this._set(v.directGain.gain, occ.gain, now);
+    this._set(v.bleedGain.gain, occ.bleed > 0.02 ? dbToGain(clamp(-14 - 20 * occ.bleed, -40, -14)) : 0, now);
 
     // ---- elevation cue: HRTF elevation is weak, so we fake it with a shelf (§3.1)
     let shelf = 0;
@@ -1064,7 +1066,6 @@ export class AudioEngine {
       position: e.position ?? null,
       volume: e.volume ?? 1,
       rate: e.rate ?? 1,
-      occlusion: e.position ? this._occlusionThickness(e.position) : 0,
     });
   }
 
@@ -1115,7 +1116,7 @@ export class AudioEngine {
       gain: mix.rel * adj,
       rate: kind === 'footstep-crouch' ? 0.85 : kind === 'footstep-run' ? 1.12 : 1,
       detune: this.rand.range(-140, 140),
-      occlusion: mix.T,
+      occ: mix.occ,
       distance: dist,
       // We have taken over the distance law; the panner is direction only.
       rolloff: ROLLOFF.flat,
@@ -1127,61 +1128,113 @@ export class AudioEngine {
     return this.sfx ? this.sfx.get(id, this.rand) : null;
   }
 
-  /** Distance + occlusion, expressed as attenuation relative to 1 m unoccluded. */
+  /**
+   * THE HANDSHAKE. Distance, occlusion and rain-masking for one noise event, expressed as
+   * attenuation relative to the source's own 1 m level.
+   *
+   * `NoiseSystem.acousticsAt()` exists precisely for this: it returns the AI's own
+   * `attenuation` together with the lowpass cutoff derived from the *same* occlusion walk.
+   * Taking both means the sound the player hears and the number a camper acts on are the
+   * same physics, not two models that happen to agree today.
+   *
+   * `audibilityAt()` is the fallback (older shape), then our own §3.2 model. Every path
+   * returns { rel, occ } in the same units.
+   */
   _noiseMix(e, dist) {
+    this._listenerPosition(_lis);      // never trust a caller to have primed the scratch
     const distGain = REF_DISTANCE / (REF_DISTANCE + ROLLOFF.world * Math.max(0, dist - REF_DISTANCE));
-    let rel = null;
-
+    const intensity = clamp(Number(e.intensity) || 1, 1e-3, 1);
     const ns = this.ctx?.systems?.get?.('NoiseSystem');
+
+    if (ns && typeof ns.acousticsAt === 'function') {
+      let a = null;
+      try { a = ns.acousticsAt(_lis, e); } catch { a = null; }
+      const heard = Number(a?.attenuation ?? a?.heard);
+      if (Number.isFinite(heard)) {
+        // `heard = intensity · falloff · occlusion · (1 − mask)`, so dividing out the
+        // event's own intensity leaves exactly the path's attenuation.
+        _mix.rel = clamp01(heard / intensity);
+        const clarity = Number.isFinite(a?.occlusion) ? clamp01(a.occlusion) : 1;
+        copyOcc(this._occFromClarity(clarity, dist, ns), _mix.occ);
+        if (Number.isFinite(a?.lowpassHz)) _mix.occ.fc = clamp(a.lowpassHz, 180, 18000);
+        return _mix;
+      }
+    }
+
     if (ns && typeof ns.audibilityAt === 'function') {
       let a = null;
       try { a = ns.audibilityAt(_lis, e); } catch { a = null; }
       if (a && typeof a === 'object') a = a.audibility ?? a.gain ?? a.value ?? a.level ?? null;
       if (Number.isFinite(a) && a >= 0) {
-        const peak = clamp(Number(e.intensity) || 1, 1e-3, 1);
-        // NoiseSystem may or may not fold `intensity` into its answer; normalize either way.
-        rel = a <= peak * 1.02 ? a / peak : Math.min(1, a);
+        // The older shape may or may not fold `intensity` in; normalize either way.
+        const rel = clamp01(a <= intensity * 1.02 ? a / intensity : Math.min(1, a));
+        _mix.rel = rel;
+        // Whatever attenuation is not explained by distance is occlusion — and occlusion
+        // must be heard as *muffling*, not merely as quiet.
+        const ratio = clamp(rel / Math.max(distGain, 1e-5), 1e-4, 1);
+        copyOcc(this._occFromThickness(clamp(-20 * Math.log10(ratio) / 3.2, 0, 12)), _mix.occ);
+        return _mix;
       }
     }
 
-    let T;
-    if (rel === null) {
-      T = this._occlusionThickness(e.position, dist);
-      rel = distGain * dbToGain(clamp(-3.2 * T, -34, 0));
-    } else {
-      const ratio = clamp(rel / Math.max(distGain, 1e-5), 1e-4, 1);
-      T = clamp(-20 * Math.log10(ratio) / 3.2, 0, 12);
-    }
-    _mix.rel = clamp01(rel);
-    _mix.T = T;
+    // No NoiseSystem: our own model, so the mix still behaves the way the AI would.
+    const occ = this._occlusion(e.position, dist);
+    _mix.rel = clamp01(distGain * occ.gain);
+    copyOcc(occ, _mix.occ);
     return _mix;
   }
 
   /**
-   * Effective occluder thickness in metres along listener→source. Prefers NoiseSystem's own
-   * number (so the AI and the mix cannot disagree), then a cheap analytic estimate from the
-   * forest density grid. We never spend more than the 3 raycasts §3.2 allows.
+   * The two-path occlusion filter for one source→listener path, as {gain, fc, bleed}.
+   *
+   * Prefers NoiseSystem's own occlusion walk — it is the same walk the campers hear through,
+   * so the mix and the AI physically cannot disagree. Falls back to the §3.2 analytic model
+   * from the forest density grid. We never spend a raycast of our own.
    */
-  _occlusionThickness(position, dist = -1) {
-    if (!position) return 0;
+  _occlusion(position, dist = -1) {
+    _occ.gain = 1; _occ.fc = 18000; _occ.bleed = 0;
+    if (!position) return _occ;
     this._listenerPosition(_lis);
     const d = dist >= 0 ? dist : _tmp.copy(position).distanceTo(_lis);
     const ns = this.ctx?.systems?.get?.('NoiseSystem');
-    for (const name of ['occlusionThickness', 'occlusionBetween', 'occlusion']) {
-      const fn = ns?.[name];
-      if (typeof fn === 'function') {
-        let t = null;
-        try { t = fn.call(ns, _lis, position); } catch { t = null; }
-        if (t && typeof t === 'object') t = t.thickness ?? t.T ?? t.value ?? null;
-        if (Number.isFinite(t)) return clamp(t, 0, 14);
-      }
+
+    if (ns && typeof ns.occlusionBetween === 'function') {
+      let occ = null;
+      try { occ = ns.occlusionBetween(_lis, position); } catch { occ = null; }
+      if (occ && typeof occ === 'object') occ = occ.occlusion ?? occ.value ?? null;
+      if (Number.isFinite(occ)) return this._occFromClarity(clamp01(occ), d, ns);
     }
-    // Analytic: canopy contributes 0.10 per metre of path inside the volume (§3.2).
+
+    // Analytic: canopy contributes ~0.10 of effective thickness per metre of path inside it.
     const forest = this.ctx?.systems?.get?.('Forest');
     const dens = forest && typeof forest.densityAt === 'function'
       ? Number(forest.densityAt(position.x, position.z)) : NaN;
-    if (Number.isFinite(dens)) return clamp(dens * Math.min(d, 60) * 0.02, 0, 6);
-    return clamp(Math.min(d, 60) * 0.006, 0, 1.2);
+    const T = Number.isFinite(dens)
+      ? clamp(dens * Math.min(d, 60) * 0.02, 0, 6)
+      : clamp(Math.min(d, 60) * 0.006, 0, 1.2);
+    return this._occFromThickness(T);
+  }
+
+  /** NoiseSystem's clarity scalar (1 = clear line, 0 = solid) → our filter triple. */
+  _occFromClarity(occ, d, ns) {
+    const clarity = clamp(occ, 0.01, 1);
+    _occ.gain = clarity;
+    _occ.bleed = 1 - clarity;
+    let fc = null;
+    if (typeof ns?.lowpassFor === 'function') {
+      try { fc = ns.lowpassFor(clarity, d); } catch { fc = null; }
+    }
+    _occ.fc = Number.isFinite(fc) ? clamp(fc, 180, 18000) : clamp(18000 * Math.pow(clarity, 2.2), 180, 18000);
+    return _occ;
+  }
+
+  /** §3.2's model, for when nobody can tell us what is in the way. */
+  _occFromThickness(T) {
+    const t = clamp(T, 0, 14);
+    _occ.gain = dbToGain(clamp(-3.2 * t, -34, 0));
+    _occ.fc = clamp(18000 * Math.exp(-0.55 * t), 180, 18000);
+    _occ.bleed = t > 0.02 ? 1 - Math.exp(-0.55 * t) : 0;
+    return _occ;
   }
 
   _stepId(surface) {
@@ -1269,11 +1322,11 @@ export class AudioEngine {
 
     const pos = e?.position ?? null;
     let dist = 0;
-    let T = 0;
+    let occ = null;
     if (pos) {
       this._listenerPosition(_lis);
       dist = _tmp.copy(pos).distanceTo(_lis);
-      T = this._occlusionThickness(pos, dist);
+      occ = this._occlusion(pos, dist);
     }
 
     // §2.3 — a serious creak takes the room with it.
@@ -1294,7 +1347,7 @@ export class AudioEngine {
       gain: 1,
       rate: 1,
       detune: this.rand.range(-60, 60),
-      occlusion: T,
+      occ,
       distance: dist,
       reverb: tier >= 3 ? 0.34 : 0.22,
     });
@@ -1319,11 +1372,7 @@ export class AudioEngine {
   _onDrop(e) {
     const pos = e?.part?.position ?? e?.position ?? null;
     if (pos) {
-      this.play('lumber.drop', {
-        position: pos,
-        occlusion: this._occlusionThickness(pos),
-        priority: 2,
-      });
+      this.play('lumber.drop', { position: pos, priority: 2 });
     } else {
       this._playNear('lumber.drop', 1.0);
     }
@@ -2052,11 +2101,11 @@ export class AudioEngine {
       budget--;
       if (now - (v.occT ?? 0) < 0.12) continue;
       v.occT = now;
-      const T = this._occlusionThickness(v.position);
-      const fc = clamp(18000 * Math.exp(-0.55 * T), 180, 18000);
-      this._set(v.directLP.frequency, fc, now, 0.08);
-      this._set(v.directGain.gain, dbToGain(clamp(-3.2 * T, -34, 0)), now, 0.08);
-      this._set(v.bleedGain.gain, T > 0.02 ? dbToGain(clamp(-14 - 1.1 * T, -40, -14)) : 0, now, 0.08);
+      // Smoothed so a camper walking behind a tree sweeps rather than steps (§3.2).
+      const occ = this._occlusion(v.position);
+      this._set(v.directLP.frequency, occ.fc, now, 0.08);
+      this._set(v.directGain.gain, occ.gain, now, 0.08);
+      this._set(v.bleedGain.gain, occ.bleed > 0.02 ? dbToGain(clamp(-14 - 20 * occ.bleed, -40, -14)) : 0, now, 0.08);
       this._setPannerPosition(v.panner, v.position, now, 0.05);
     }
   }
@@ -2220,7 +2269,11 @@ export class AudioEngine {
   }
 }
 
-const _mix = { rel: 0, T: 0 };
+/** Scratch for the occlusion triple: `gain` linear, `fc` Hz, `bleed` 0..1 diffraction. */
+const _occ = { gain: 1, fc: 18000, bleed: 0 };
+const NO_OCC = Object.freeze({ gain: 1, fc: 18000, bleed: 0 });
+/** Scratch for one noise event's mix. `occ` is a private copy — `_occ` is reused. */
+const _mix = { rel: 0, occ: { gain: 1, fc: 18000, bleed: 0 } };
 
 /** §4.19 — the breathing cycle table. */
 const BREATH_TIMING = {

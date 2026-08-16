@@ -1829,7 +1829,10 @@ export class Blueprint {
 
   _buildPanels(def, rand) {
     const n = def.night;
-    const scripted = (this.script?.panelsFor?.(n) ?? []).filter((p) => p && p.night === n);
+    // `Script.panelsFor(n)` returns the whole sheet ({ night, tone, cover, panels }), not an array.
+    const sheet = this.script?.panelsFor?.(n) ?? null;
+    const sheetPanels = Array.isArray(sheet) ? sheet : (sheet?.panels ?? []);
+    const scripted = sheetPanels.filter((p) => p && p.night === n);
     const target = PANEL_COUNT[n] ?? 9;
     const panels = [];
 
@@ -2360,3 +2363,678 @@ export class Blueprint {
     this._disposed = true;
   }
 }
+
+/* ══════════════════════════════════════════════════════════════════════════════════════════
+ * 12. THE PAGES.
+ *
+ * One function per kind of drawing. Everything here is line art; nothing here is text except
+ * article numbers, HJEM and the maker's mark. `Script.panels[].caption` describes these drawings
+ * for developers and is never, under any circumstance, printed.
+ * ════════════════════════════════════════════════════════════════════════════════════════ */
+
+/** Draw one part, projected, centred at (x,y) and scaled to fit `fit` page units. */
+Blueprint.prototype._part = function _part(c, type, x, y, fit, opt = {}) {
+  const p = { id: 'X', type, articleNo: null };
+  const inst = makeInstance(p, { position: { x: 0, y: 0, z: 0 }, yaw: opt.yaw ?? 0 }, null,
+    { mirror: !!opt.mirror, scale: opt.scale ?? 1 });
+  const drawn = projectInstances([inst], NOMINAL_SCALE);
+  const bb = bboxOfDrawn(drawn);
+  const w = Math.max(1, bb.x1 - bb.x0), h = Math.max(1, bb.y1 - bb.y0);
+  const s = opt.exactScale ?? Math.min(fit / w, (opt.fitH ?? fit) / h);
+  c.save();
+  c.translate(x, y);
+  c.scale(s, s);
+  c.translate(-(bb.x0 + bb.x1) / 2, -(bb.y0 + bb.y1) / 2);
+  const col = opt.color ?? PALETTE.ink;
+  for (const d of drawn) {
+    for (let k = 0; k < d.polys.length; k++) {
+      strokePath(c, d.polys[k], {
+        hand: opt.hand, weight: (opt.weight ?? WEIGHTS.heavy) / s, color: col,
+        dash: opt.dotted ? [3.5 / s, 4.5 / s] : null, alpha: opt.alpha ?? 1,
+        seed: (opt.seed ?? 11) + k * 3, step: 7 / s,
+      });
+    }
+    for (let k = 0; k < d.detailPolys.length; k++) {
+      strokePath(c, d.detailPolys[k], {
+        hand: opt.hand, weight: WEIGHTS.hairline / s, color: PALETTE.inkSoft,
+        alpha: (opt.alpha ?? 1) * 0.9, seed: (opt.seed ?? 11) + 300 + k, step: 6 / s,
+      });
+    }
+  }
+  c.restore();
+  return { s, w: w * s, h: h * s };
+};
+
+const RENDERERS = {
+  /* ── The cover ───────────────────────────────────────────────────────────────────── */
+  cover(c, env) {
+    const { hand, box, panel, m } = env;
+    const cx = m.pw / 2;
+    // The house, three-quarter elevation, in the same projection as everything else.
+    const P = (x, y, z) => [projX(x, y, z, 26), projY(x, y, z, 26)];
+    const { hx, hz, wall, ridge } = FOOT;
+    const corners = [[-hx, hz], [hx, hz], [hx, -hz], [-hx, -hz]];
+    const base = corners.map(([x, z]) => P(x, 0, z));
+    const top = corners.map(([x, z]) => P(x, wall, z));
+    const rid = [P(-hx, ridge, 0), P(hx, ridge, 0)];
+    const off = [cx, box.y + 320];
+    const T = (p) => [p[0] + off[0], p[1] + off[1]];
+    const so = { hand, weight: WEIGHTS.heavy, seed: panel.seed, step: 7 };
+    strokePoly(c, base.map(T).concat([T(base[0])]), { ...so });
+    strokePoly(c, top.map(T).concat([T(top[0])]), { ...so, seed: panel.seed + 1 });
+    for (let i = 0; i < 4; i++) strokePoly(c, [T(base[i]), T(top[i])], { ...so, seed: panel.seed + 2 + i });
+    strokePoly(c, [T(rid[0]), T(rid[1])], { ...so, seed: panel.seed + 9 });
+    for (let i = 0; i < 4; i++) {
+      strokePoly(c, [T(top[i]), T(rid[i === 1 || i === 2 ? 1 : 0])], { ...so, seed: panel.seed + 12 + i });
+    }
+    // A door and a window. The first domestic shapes in the game.
+    const dq = [P(-0.5, 0, hz), P(0.5, 0, hz), P(0.5, 2.05, hz), P(-0.5, 2.05, hz)];
+    strokePoly(c, dq.map(T).concat([T(dq[0])]), { hand, weight: WEIGHTS.medium, seed: panel.seed + 20, step: 6 });
+    const wq = [P(2.0, 1.1, hz), P(3.2, 1.1, hz), P(3.2, 2.0, hz), P(2.0, 2.0, hz)];
+    strokePoly(c, wq.map(T).concat([T(wq[0])]), { hand, weight: WEIGHTS.medium, seed: panel.seed + 24, step: 6 });
+
+    // HJEM. One word. The player parses it as a product name, the way you parse KALLAX.
+    drawText(c, 'HJEM', cx, box.y + 30, 74, { align: 'center', hand, weight: WEIGHTS.heavy, seed: panel.seed + 40 });
+    drawText(c, this.def.assemblyName ?? '', cx, box.y + 126, 22,
+      { align: 'center', hand, weight: WEIGHTS.thin, seed: panel.seed + 44, color: PALETTE.inkSoft });
+    if (panel.articleNo) {
+      drawText(c, panel.articleNo, cx, box.y + box.h - 44, 15,
+        { align: 'center', hand, weight: WEIGHTS.hairline, seed: panel.seed + 48, color: PALETTE.inkSoft });
+    }
+    drawText(c, 'VIK & SØN', cx, box.y + box.h - 14, 17, {
+      align: 'center', hand, weight: WEIGHTS.thin, seed: panel.seed + 52, tracedO: this.def.cover.traced,
+    });
+  },
+
+  /* ── The manifest: the parts bracket, the bag, and tonight's indignity in red ─────── */
+  manifest(c, env) {
+    const { hand, box, panel } = env;
+    const parts = [];
+    const seen = new Set();
+    for (const p of this.def.parts) {
+      if (seen.has(p.type)) continue;
+      seen.add(p.type);
+      parts.push({ type: p.type, count: this.def.parts.filter((q) => q.type === p.type).length, articleNo: p.articleNo });
+      if (parts.length >= 6) break;
+    }
+    const cols = Math.max(1, Math.min(3, parts.length));
+    const rows = Math.max(1, Math.ceil(parts.length / cols));
+    const cw = box.w / cols, ch = Math.min(150, (box.h - 130) / rows);
+    const short = this.def.shortfalls.find((s) => !s.phantom && !s.found);
+
+    // The parts bracket — a square bracket around the whole contents list.
+    strokePoly(c, [[box.x + 6, box.y + 4], [box.x - 2, box.y + 4], [box.x - 2, box.y + ch * rows + 26], [box.x + 6, box.y + ch * rows + 26]],
+      { hand, weight: WEIGHTS.medium, seed: panel.seed + 2 });
+    strokePoly(c, [[box.x + box.w - 6, box.y + 4], [box.x + box.w + 2, box.y + 4], [box.x + box.w + 2, box.y + ch * rows + 26], [box.x + box.w - 6, box.y + ch * rows + 26]],
+      { hand, weight: WEIGHTS.medium, seed: panel.seed + 3 });
+
+    parts.forEach((p, i) => {
+      const x = box.x + cw * (i % cols) + cw / 2;
+      const y = box.y + 34 + ch * Math.floor(i / cols) + ch / 2;
+      const isShort = !!short && !short.found && !!short.count && p.count === short.count;
+      this._part(c, p.type, x, y, cw * 0.54, {
+        hand, seed: panel.seed + 100 + i * 9, fitH: ch * 0.50,
+        color: isShort ? this._accent() : PALETTE.ink,
+      });
+      hardwareCallout(c, x + cw * 0.30, y + ch * 0.26, p.count, { hand, seed: panel.seed + 140 + i, r: 16 });
+      drawText(c, p.articleNo ?? '', x, y + ch * 0.34, 12,
+        { align: 'center', hand, weight: WEIGHTS.hairline, seed: panel.seed + 160 + i, color: PALETTE.inkSoft });
+    });
+
+    // The bag of fasteners for the night.
+    bagIcon(c, box.x + 46, box.y + box.h - 66, 56, this.def.hardware.fasteners, { hand, seed: panel.seed + 200 });
+
+    /*
+     * The shortfall. A red outline and a 40 × 40 m contour inset: the region, never the object.
+     * The manual has always known. It is not lying and it is not sorry.
+     */
+    if (short && short.at) {
+      const ix = box.x + box.w - 190, iy = box.y + box.h - 176;
+      strokePoly(c, [[ix, iy], [ix + 170, iy], [ix + 170, iy + 150], [ix, iy + 150], [ix, iy]],
+        { hand, weight: WEIGHTS.medium, color: short.found ? PALETTE.ink : this._accent(), seed: panel.seed + 210, closed: true });
+      for (let k = 0; k < 5; k++) {
+        const pts = [];
+        const rr = 22 + k * 13;
+        for (let a = 0; a <= 26; a++) {
+          const t = (a / 26) * Math.PI * 2;
+          const w = rr * (0.72 + 0.34 * valueNoise2(Math.cos(t) * 1.7 + k * 3.1, Math.sin(t) * 1.7 + k * 3.1));
+          pts.push(ix + 85 + Math.cos(t) * w, iy + 75 + Math.sin(t) * w * 0.82);
+        }
+        strokePath(c, pts, { hand, weight: WEIGHTS.hairline, color: PALETTE.inkSoft, seed: panel.seed + 220 + k, step: 7, alpha: 0.85 });
+      }
+      if (short.found) tickMark(c, ix + 148, iy + 24, 15, { hand, seed: panel.seed + 240 });
+      else fillDot(c, ix + 85, iy + 75, 3.2, this._accent());
+    }
+  },
+
+  exploded(c, env) { this._pageExploded(c, env); },
+
+  /* ── Night One. HELPFUL. Delighted with you. ─────────────────────────────────────── */
+  wave(c, env) {
+    const { hand, box, panel } = env;
+    drawMascot(c, box.x + box.w * 0.22, box.y + box.h * 0.62, box.h * 0.42,
+      { hand, pose: 'waving', seed: panel.seed });
+    this._part(c, 'pier', box.x + box.w * 0.68, box.y + box.h * 0.48, box.w * 0.30, { hand, seed: panel.seed + 20 });
+    arrowStraight(c, box.x + box.w * 0.68, box.y + box.h * 0.16, box.x + box.w * 0.68, box.y + box.h * 0.34,
+      { hand, seed: panel.seed + 30 });
+  },
+
+  'bolt-magnifier'(c, env) {
+    // A bolt going into a hole. Then the same bolt, larger. Then again, with a magnifier over it.
+    const { hand, box, panel } = env;
+    const y = box.y + box.h * 0.42;
+    const xs = [box.x + box.w * 0.18, box.x + box.w * 0.48, box.x + box.w * 0.80];
+    const scales = [0.10, 0.16, 0.24];
+    xs.forEach((x, i) => {
+      this._part(c, 'fastener', x, y, box.w * scales[i], { hand, seed: panel.seed + i * 17, fitH: box.h * 0.42 });
+      strokePoly(c, [[x - box.w * scales[i] * 0.8, y + box.h * 0.16], [x + box.w * scales[i] * 0.8, y + box.h * 0.16]],
+        { hand, weight: WEIGHTS.heavy, seed: panel.seed + 40 + i });
+      strokePath(c, circlePts(x, y + box.h * 0.16, box.w * scales[i] * 0.16, 14),
+        { hand, weight: WEIGHTS.medium, seed: panel.seed + 50 + i });
+      arrowStraight(c, x, y - box.h * 0.24, x, y - box.h * 0.06, { hand, seed: panel.seed + 60 + i, size: 11 + i * 3 });
+    });
+    magnifier(c, xs[2], y + box.h * 0.02, box.w * 0.15, { hand, seed: panel.seed + 80 });
+    if (TONE[env.night].sparkle) sparkle(c, box.x + box.w * 0.90, box.y + box.h * 0.14, 11, { hand, seed: panel.seed + 90 });
+  },
+
+  'scale-ref'(c, env) {
+    // The mascot beside a pier. No dimension is printed. He is 1.7 m — your own eye height.
+    const { hand, box, panel } = env;
+    const feet = box.y + box.h * 0.78;
+    const H = box.h * 0.46;
+    drawMascot(c, box.x + box.w * 0.34, feet, H, { hand, pose: 'standing-neutral', seed: panel.seed });
+    this._part(c, 'pier', box.x + box.w * 0.66, feet - H * 0.12, box.w * 0.24, { hand, seed: panel.seed + 20 });
+    arrowDouble(c, box.x + box.w * 0.16, feet, box.x + box.w * 0.16, feet - H,
+      { hand, seed: panel.seed + 30, witness: 22 });
+  },
+
+  'shim-fix'(c, env) {
+    // A rectangle, and an arrow pointing it under the low pier. It does not care what the
+    // rectangle is. It has always been a folded 1961 licence plate.
+    const { hand, box, panel } = env;
+    const cx = box.x + box.w * 0.56, cy = box.y + box.h * 0.44;
+    this._part(c, 'pier', cx, cy, box.w * 0.26, { hand, seed: panel.seed });
+    const gap = cy + box.h * 0.16;
+    strokePoly(c, [[cx - 60, gap], [cx + 60, gap]], { hand, weight: WEIGHTS.heavy, seed: panel.seed + 10 });
+    strokePoly(c, [[cx - 46, gap - 9], [cx + 30, gap - 9], [cx + 30, gap - 2], [cx - 46, gap - 2], [cx - 46, gap - 9]],
+      { hand, weight: WEIGHTS.medium, seed: panel.seed + 12, closed: true });
+    arrowStraight(c, box.x + box.w * 0.16, gap - 5, cx - 52, gap - 5, { hand, seed: panel.seed + 14 });
+    arrowDouble(c, cx + 70, gap - 9, cx + 70, gap - 2, { hand, seed: panel.seed + 16, size: 7, witness: 14 });
+  },
+
+  'closing-arms-up'(c, env) {
+    // Standing on the finished foundation, both arms up. One drawn sparkle.
+    const { hand, box, panel } = env;
+    const feet = box.y + box.h * 0.62;
+    const y = feet + 6;
+    strokePoly(c, [[box.x + box.w * 0.22, y], [box.x + box.w * 0.78, y]],
+      { hand, weight: WEIGHTS.heavy, seed: panel.seed + 1 });
+    for (let i = 0; i < 3; i++) {
+      this._part(c, 'pier', box.x + box.w * (0.30 + i * 0.20), y + 26, box.w * 0.11, { hand, seed: panel.seed + 10 + i });
+    }
+    drawMascot(c, box.x + box.w * 0.50, feet, box.h * 0.38, { hand, pose: 'arms-up', seed: panel.seed + 20 });
+    if (TONE[env.night].sparkle) sparkle(c, box.x + box.w * 0.62, feet - box.h * 0.40, 13, { hand, seed: panel.seed + 30 });
+    tickMark(c, box.x + box.w * 0.84, feet - 10, 18, { hand, seed: panel.seed + 40 });
+  },
+
+  /* ── Night Two. PEDANTIC. It has decided you are competent and now it is fussy. ──── */
+  'angle-pedantry'(c, env) {
+    const { hand, box, panel } = env;
+    const y = box.y + box.h * 0.40;
+    const xs = [0.18, 0.50, 0.82].map((t) => box.x + box.w * t);
+    const angles = ['90°', '88°', '89.5°'];
+    xs.forEach((x, i) => {
+      this._part(c, 'bracket', x, y, box.w * 0.20, { hand, seed: panel.seed + i * 13, yaw: i === 0 ? 0 : (i === 1 ? 0.035 : 0.009) });
+      arrowCurved(c, x, y, box.w * 0.135, -Math.PI * 0.9, -Math.PI * 0.35, { hand, seed: panel.seed + 40 + i, size: 9 });
+      drawText(c, angles[i], x, y + box.h * 0.17, 15,
+        { align: 'center', hand, weight: WEIGHTS.thin, seed: panel.seed + 60 + i, color: i === 0 ? PALETTE.ink : this._accent() });
+      if (i === 0) tickMark(c, x, y + box.h * 0.24, 17, { hand, seed: panel.seed + 70 });
+      else slashCircle(c, x, y, box.w * 0.155, { hand, seed: panel.seed + 80 + i, color: this._accent() });
+    });
+  },
+
+  mirror(c, env) {
+    // G2. The left bay only. The right is its reflection and the bracket handedness flips.
+    const { hand, box, panel } = env;
+    const axis = box.x + box.w * 0.62;
+    const fig = panel.figures[0];
+    if (fig) {
+      this._drawFigure(c, fig, { x: box.x, y: box.y, w: box.w * 0.60, h: box.h * 0.82 }, env);
+    } else {
+      this._part(c, 'joist', box.x + box.w * 0.30, box.y + box.h * 0.42, box.w * 0.44, { hand, seed: panel.seed });
+      this._part(c, 'bracket', box.x + box.w * 0.30, box.y + box.h * 0.62, box.w * 0.11, { hand, seed: panel.seed + 6 });
+    }
+    strokePoly(c, [[axis, box.y + 10], [axis, box.y + box.h - 20]],
+      { hand, weight: WEIGHTS.thin, color: PALETTE.inkSoft, dash: [11, 7], seed: panel.seed + 20 });
+    mirrorGlyph(c, axis, box.y + box.h * 0.5, 16, { hand, weight: WEIGHTS.medium, seed: panel.seed + 22 });
+    // The mirrored half: a handed bracket, drawn once, the other way round.
+    this._part(c, 'bracket', axis + box.w * 0.20, box.y + box.h * 0.42, box.w * 0.13,
+      { hand, seed: panel.seed + 30, mirror: true, alpha: 0.9 });
+    arrowDouble(c, axis - 34, box.y + box.h * 0.24, axis + 34, box.y + box.h * 0.24, { hand, seed: panel.seed + 32 });
+  },
+
+  'torque-mouth'(c, env) {
+    // A hand tightening a bolt, then the same hand over-tightened, and the mascot with a mouth.
+    const { hand, box, panel } = env;
+    const y = box.y + box.h * 0.38;
+    this._part(c, 'fastener', box.x + box.w * 0.24, y, box.w * 0.13, { hand, seed: panel.seed, fitH: box.h * 0.30 });
+    arrowCircular(c, box.x + box.w * 0.24, y, box.w * 0.11, { hand, seed: panel.seed + 10, turns: 0.85 });
+    this._part(c, 'fastener', box.x + box.w * 0.60, y, box.w * 0.13, { hand, seed: panel.seed + 20, fitH: box.h * 0.30, color: this._accent() });
+    arrowCircular(c, box.x + box.w * 0.60, y, box.w * 0.13, { hand, seed: panel.seed + 30, turns: 1.5, color: this._accent() });
+    warnTriangle(c, box.x + box.w * 0.84, y, 30, { hand, seed: panel.seed + 40, color: this._accent() });
+    // The mouth. One flat line. He does not have one again for three nights.
+    drawMascot(c, box.x + box.w * 0.60, box.y + box.h * 0.92, box.h * 0.40,
+      { hand, pose: 'standing-neutral', seed: panel.seed + 50, mouth: true });
+  },
+
+  'brace-sequence'(c, env) {
+    // Brace before you release: a circled 3, then a circled 4, drawn in that order and not in
+    // that position.
+    const { hand, box, panel } = env;
+    const fig = panel.figures[0];
+    if (fig) this._drawFigure(c, fig, { x: box.x, y: box.y, w: box.w, h: box.h * 0.78 }, env);
+    stepCircle(c, box.x + box.w * 0.74, box.y + box.h * 0.22, 3, { hand, seed: panel.seed + 4, r: 17 });
+    stepCircle(c, box.x + box.w * 0.26, box.y + box.h * 0.70, 4, { hand, seed: panel.seed + 6, r: 17 });
+    arrowStraight(c, box.x + box.w * 0.70, box.y + box.h * 0.30, box.x + box.w * 0.34, box.y + box.h * 0.62,
+      { hand, seed: panel.seed + 8 });
+  },
+
+  /* ── Night Three. IMPATIENT. Steps get combined. It skips things. ────────────────── */
+  collapsed(c, env) {
+    // Eleven sub-assemblies collapsed into one drawing with fourteen arrows. Good luck.
+    const { hand, box, panel } = env;
+    const fig = panel.figures[0];
+    if (fig) this._drawFigure(c, fig, box, env);
+    const grid = makeRouteGrid(box.w, box.h, [{ x: box.w * 0.28, y: box.h * 0.28, w: box.w * 0.44, h: box.h * 0.44 }]);
+    const r = new Rand(hashInt(panel.seed));
+    c.save(); c.translate(box.x, box.y);
+    for (let i = 0; i < 14; i++) {
+      const a = (i / 14) * Math.PI * 2;
+      const x0 = box.w / 2 + Math.cos(a) * box.w * 0.44, y0 = box.h / 2 + Math.sin(a) * box.h * 0.42;
+      const x1 = box.w / 2 + Math.cos(a) * box.w * 0.20, y1 = box.h / 2 + Math.sin(a) * box.h * 0.18;
+      drawRoutedArrow(c, grid, x0, y0, x1, y1, { hand, seed: panel.seed + i * 3, size: 10, weight: WEIGHTS.thin });
+      if (r.chance(0.45)) stepCircle(c, x0, y0, i + 1, { hand, seed: panel.seed + 200 + i, r: 12, dashed: true });
+    }
+    c.restore();
+  },
+
+  'cut-line'(c, env) {
+    // The ridge beam with one cut line across it and no dimension printed. The saw is drawn
+    // once, small, in the corner, held by nobody.
+    const { hand, box, panel } = env;
+    const y = box.y + box.h * 0.40;
+    const r = this._part(c, 'ridge', box.x + box.w / 2, y, box.w * 0.86, { hand, seed: panel.seed, fitH: box.h * 0.30 });
+    const cutX = box.x + box.w / 2 + r.w * 0.38;
+    strokePoly(c, [[cutX, y - 40], [cutX, y + 40]],
+      { hand, weight: WEIGHTS.medium, color: this._accent(), dash: [8, 6], seed: panel.seed + 10 });
+    arrowStraight(c, cutX, y - 74, cutX, y - 46, { hand, seed: panel.seed + 12, color: this._accent() });
+    // The saw. Small. In the corner. Held by nobody.
+    const sx = box.x + box.w * 0.80, sy = box.y + box.h * 0.80;
+    strokePoly(c, [[sx - 52, sy], [sx + 40, sy - 14], [sx + 44, sy - 4], [sx - 48, sy + 10], [sx - 52, sy]],
+      { hand, weight: WEIGHTS.medium, seed: panel.seed + 20, closed: true });
+    const teeth = [];
+    for (let i = 0; i <= 16; i++) teeth.push([sx - 48 + i * 5.6, sy + 10 - i * 0.9 + (i % 2 ? 0 : 4)]);
+    strokePoly(c, teeth, { hand, weight: WEIGHTS.hairline, seed: panel.seed + 22 });
+    strokePoly(c, [[sx - 52, sy], [sx - 70, sy - 6], [sx - 74, sy + 8], [sx - 56, sy + 12]],
+      { hand, weight: WEIGHTS.medium, seed: panel.seed + 24, closed: true });
+  },
+
+  'one-arrow'(c, env) {
+    // An entire step rendered as one downward arrow and ×6.
+    const { hand, box, panel } = env;
+    arrowStraight(c, box.x + box.w * 0.42, box.y + box.h * 0.18, box.x + box.w * 0.42, box.y + box.h * 0.68,
+      { hand, seed: panel.seed, size: 24, weight: WEIGHTS.heavy });
+    hardwareCallout(c, box.x + box.w * 0.60, box.y + box.h * 0.44, 6, { hand, seed: panel.seed + 4, r: 26 });
+  },
+
+  'hidden-gussets'(c, env) {
+    // G3. The bag says eight. The drawing shows six. Two are behind the visible geometry and
+    // the manual assumes you can see that.
+    const { hand, box, panel } = env;
+    const y = box.y + box.h * 0.44;
+    for (let i = 0; i < 6; i++) {
+      const x = box.x + box.w * (0.13 + (i % 3) * 0.27);
+      const yy = y + (i < 3 ? -box.h * 0.14 : box.h * 0.14);
+      this._part(c, 'gusset', x, yy, box.w * 0.18, { hand, seed: panel.seed + i * 7, fitH: box.h * 0.18 });
+    }
+    // The two that are not drawn — dotted, through the occluder.
+    for (let i = 0; i < 2; i++) {
+      this._part(c, 'gusset', box.x + box.w * (0.72 + i * 0.14), y + (i ? box.h * 0.14 : -box.h * 0.14),
+        box.w * 0.18, { hand, seed: panel.seed + 40 + i, fitH: box.h * 0.18, dotted: true, alpha: 0.85 });
+    }
+    bagIcon(c, box.x + box.w * 0.10, box.y + box.h * 0.88, 58, 8, { hand, seed: panel.seed + 60 });
+  },
+
+  tapping(c, env) {
+    // The mascot, arms folded, tapping one foot. It is waiting for you.
+    const { hand, box, panel } = env;
+    drawMascot(c, box.x + box.w * 0.5, box.y + box.h * 0.80, box.h * 0.54,
+      { hand, pose: 'tapping', seed: panel.seed });
+  },
+
+  /* ── Night Four. KNOWING. It draws things it should not know about. ──────────────── */
+  'hinge-in-situ'(c, env) {
+    const { hand, box, panel } = env;
+    // The hinge, in isolation.
+    this._part(c, 'hinge', box.x + box.w * 0.20, box.y + box.h * 0.24, box.w * 0.22, { hand, seed: panel.seed, fitH: box.h * 0.22 });
+    hardwareCallout(c, box.x + box.w * 0.34, box.y + box.h * 0.30, 3, { hand, seed: panel.seed + 4, r: 17 });
+    // Then in situ. Screwed to a door that belongs to somebody else, with the oar against it.
+    const dx = box.x + box.w * 0.64, dy = box.y + box.h * 0.58;
+    const dw = box.w * 0.28, dh = box.h * 0.60;
+    strokePoly(c, [[dx - dw / 2, dy - dh / 2], [dx + dw / 2, dy - dh / 2], [dx + dw / 2, dy + dh / 2],
+      [dx - dw / 2, dy + dh / 2], [dx - dw / 2, dy - dh / 2]],
+    { hand, weight: WEIGHTS.heavy, seed: panel.seed + 10, closed: true });
+    for (let i = 0; i < 3; i++) {
+      this._part(c, 'hinge', dx - dw / 2, dy - dh * 0.3 + i * dh * 0.3, box.w * 0.10, { hand, seed: panel.seed + 20 + i, fitH: 34 });
+    }
+    strokePoly(c, [[dx + dw * 0.3, dy + dh / 2 + 14], [dx + dw * 0.9, dy - dh * 0.34]],
+      { hand, weight: WEIGHTS.medium, seed: panel.seed + 30 });
+    strokePoly(c, [[dx + dw * 0.86, dy - dh * 0.30], [dx + dw * 0.98, dy - dh * 0.42], [dx + dw * 1.02, dy - dh * 0.30], [dx + dw * 0.90, dy - dh * 0.22]],
+      { hand, weight: WEIGHTS.medium, seed: panel.seed + 32, closed: true });
+    arrowStraight(c, box.x + box.w * 0.38, box.y + box.h * 0.30, dx - dw * 0.68, dy - dh * 0.30, { hand, seed: panel.seed + 40 });
+  },
+
+  'scale-ambiguity'(c, env) {
+    /*
+     * G4. Two beams that differ only in length. No dimensions are printed. The dimension arrow
+     * carries unit divisions instead of a numeral: count 16 against 13 and you have your ratio.
+     * The mascot between them is the only absolute scale reference, and he is 1.7 m, which is
+     * the player's own eye height.
+     */
+    const { hand, box, panel } = env;
+    const yA = box.y + box.h * 0.24, yB = box.y + box.h * 0.66;
+    const a = this._part(c, 'beam', box.x + box.w * 0.52, yA, box.w * 0.80, { hand, seed: panel.seed, fitH: box.h * 0.18 });
+    const b = this._part(c, 'beamShort', box.x + box.w * 0.46, yB, box.w * 0.80, { hand, seed: panel.seed + 9, fitH: box.h * 0.18, exactScale: a.s });
+    arrowDouble(c, box.x + box.w * 0.52 - a.w / 2, yA + 42, box.x + box.w * 0.52 + a.w / 2, yA + 42,
+      { hand, seed: panel.seed + 20, witness: 18, divisions: 16 });
+    arrowDouble(c, box.x + box.w * 0.46 - b.w / 2, yB + 42, box.x + box.w * 0.46 + b.w / 2, yB + 42,
+      { hand, seed: panel.seed + 30, witness: 18, divisions: 13 });
+    drawMascot(c, box.x + box.w * 0.07, yB - 6, box.h * 0.34, { hand, pose: 'standing-neutral', seed: panel.seed + 40 });
+  },
+
+  'light-cone'(c, env) {
+    // A cone of light on the ground. The mascot outside the cone. A dotted path.
+    // The first panel that is about them and not about the house.
+    const { hand, box, panel } = env;
+    const ax = box.x + box.w * 0.72, ay = box.y + box.h * 0.20;
+    strokePoly(c, [[ax, ay], [ax - box.w * 0.30, box.y + box.h * 0.80], [ax + box.w * 0.18, box.y + box.h * 0.86], [ax, ay]],
+      { hand, weight: WEIGHTS.medium, seed: panel.seed, closed: true });
+    for (let i = 0; i < 5; i++) {
+      strokePoly(c, [[ax - box.w * (0.05 + i * 0.05), ay + box.h * (0.18 + i * 0.12)],
+        [ax - box.w * (0.02 + i * 0.05), ay + box.h * (0.26 + i * 0.12)]],
+      { hand, weight: WEIGHTS.hairline, color: PALETTE.inkSoft, seed: panel.seed + 10 + i });
+    }
+    drawMascot(c, box.x + box.w * 0.18, box.y + box.h * 0.78, box.h * 0.38, { hand, pose: 'watching', seed: panel.seed + 20 });
+    const path = [];
+    for (let i = 0; i <= 16; i++) {
+      const t = i / 16;
+      path.push(box.x + box.w * (0.18 + t * 0.52), box.y + box.h * (0.86 - Math.sin(t * Math.PI) * 0.18));
+    }
+    strokePath(c, path, { hand, weight: WEIGHTS.thin, color: PALETTE.inkSoft, dash: [5, 6], seed: panel.seed + 30, step: 8 });
+  },
+
+  'horizontal-shape'(c, env) {
+    /*
+     * Panel 4.9. The mascot standing over a horizontal shape. The shape is not a joist. It has
+     * shoes, and a double-headed dimension arrow reading 1.78 m. The manual measured him.
+     * Lay it out as an ordinary panel. No zoom, no hold, no emphasis of any kind.
+     */
+    const { hand, box, panel } = env;
+    const y = box.y + box.h * 0.62;
+    const len = box.w * 0.62;
+    drawHorizontalShape(c, box.x + box.w * 0.52, y, len, { hand, seed: panel.seed });
+    drawMascot(c, box.x + box.w * 0.24, y - 4, box.h * 0.44, { hand, pose: 'standing-over', seed: panel.seed + 10 });
+    arrowDouble(c, box.x + box.w * 0.52 - len / 2, y + 44, box.x + box.w * 0.52 + len / 2, y + 44,
+      { hand, seed: panel.seed + 20, witness: 18 });
+    drawText(c, '1.78', box.x + box.w * 0.52, y + 56, 15,
+      { align: 'center', hand, weight: WEIGHTS.hairline, seed: panel.seed + 24, color: PALETTE.inkSoft });
+  },
+
+  /* ── Night Five. COMPLICIT. It stops pretending this is only carpentry. ──────────── */
+  'two-persons'(c, env) {
+    // THIS STEP REQUIRES TWO PERSONS. Two mascots, one at each end of a wall panel. Both in
+    // Marit's hand. Both drawn twenty-two years ago.
+    const { hand, box, panel } = env;
+    const y = box.y + box.h * 0.50;
+    const marit = HANDS.marit;
+    this._part(c, 'wallNorth', box.x + box.w / 2, y - box.h * 0.10, box.w * 0.70, { hand: marit, seed: panel.seed, fitH: box.h * 0.34 });
+    drawMascot(c, box.x + box.w * 0.16, y + box.h * 0.30, box.h * 0.40, { hand: marit, pose: 'hand-raised', seed: panel.seed + 10 });
+    drawMascot(c, box.x + box.w * 0.84, y + box.h * 0.30, box.h * 0.40, { hand: marit, pose: 'hand-raised', seed: panel.seed + 12 });
+    warnTriangle(c, box.x + box.w * 0.50, box.y + box.h * 0.86, 30, { hand, seed: panel.seed + 20, color: this._accent() });
+    hardwareCallout(c, box.x + box.w * 0.50, box.y + box.h * 0.14, 2, { hand, seed: panel.seed + 24, r: 19 });
+  },
+
+  sequence(c, env) {
+    // G5. Step 7 top-left, step 2 bottom-right. A panel installed early blocks arm access to
+    // the bracket behind it, and the diagram only hints at that.
+    const { hand, box, panel } = env;
+    const fig = panel.figures[0];
+    if (fig) this._drawFigure(c, fig, { x: box.x, y: box.y + box.h * 0.10, w: box.w, h: box.h * 0.58 }, env);
+    stepCircle(c, box.x + box.w * 0.14, box.y + box.h * 0.10, 7, { hand, seed: panel.seed, r: 17 });
+    stepCircle(c, box.x + box.w * 0.86, box.y + box.h * 0.72, 2, { hand, seed: panel.seed + 2, r: 17, dashed: true });
+    // The inset: a hand, a bolt behind a panel, and a red slash-circle. You cannot reach it later.
+    const ix = box.x + box.w * 0.62, iy = box.y + box.h * 0.82;
+    strokePoly(c, [[ix - 70, iy - 46], [ix + 70, iy - 46], [ix + 70, iy + 34], [ix - 70, iy + 34], [ix - 70, iy - 46]],
+      { hand, weight: WEIGHTS.thin, color: PALETTE.inkSoft, seed: panel.seed + 10, closed: true });
+    strokePoly(c, [[ix - 40, iy - 34], [ix - 40, iy + 24]], { hand, weight: WEIGHTS.heavy, seed: panel.seed + 12 });
+    strokePath(c, circlePts(ix + 22, iy - 6, 9, 12), { hand, weight: WEIGHTS.medium, seed: panel.seed + 14 });
+    arrowStraight(c, ix - 20, iy - 6, ix + 10, iy - 6, { hand, seed: panel.seed + 16, size: 10 });
+    slashCircle(c, ix + 4, iy - 6, 30, { hand, seed: panel.seed + 18, color: this._accent() });
+  },
+
+  'erased-second'(c, env) {
+    /*
+     * Panel 5.4. The second figure: erased, redrawn, erased, redrawn smaller. Three ghosts under
+     * the final line. No arrows, no numbers, no article number and no instruction.
+     * It should not be in a manual at all. Do not score it, do not lock input, do not slow time.
+     */
+    const { hand, box, panel } = env;
+    const feet = box.y + box.h * 0.72;
+    const marit = HANDS.marit;
+    drawMascot(c, box.x + box.w * 0.34, feet, box.h * 0.46, { hand: marit, pose: 'standing-neutral', seed: panel.seed });
+    const ghosts = [
+      { x: 0.66, h: 0.46, a: 0.16 },
+      { x: 0.63, h: 0.38, a: 0.13 },
+      { x: 0.615, h: 0.31, a: 0.11 },
+    ];
+    for (let i = 0; i < ghosts.length; i++) {
+      const g = ghosts[i];
+      c.save();
+      c.globalAlpha = g.a;
+      drawMascot(c, box.x + box.w * g.x, feet, box.h * g.h,
+        { hand, pose: 'standing-neutral', seed: panel.seed + 20 + i, weight: WEIGHTS.medium });
+      c.restore();
+    }
+    // The final line: smaller. 0.62× scale. It is not an adult. Nobody remarks on it.
+    drawMascot(c, box.x + box.w * 0.60, feet, box.h * 0.46 * 0.62,
+      { hand, pose: 'standing-neutral', seed: panel.seed + 40 });
+  },
+
+  counterweight(c, env) {
+    // The counterweight, drawn as a dotted standing human outline, with the "approximate" tilde
+    // and no number at all.
+    const { hand, box, panel } = env;
+    const y = box.y + box.h * 0.34;
+    this._part(c, 'wallNorth', box.x + box.w * 0.40, y, box.w * 0.52, { hand, seed: panel.seed, fitH: box.h * 0.26 });
+    arrowCurved(c, box.x + box.w * 0.16, y + box.h * 0.16, box.w * 0.20, -Math.PI * 0.86, -Math.PI * 0.2,
+      { hand, seed: panel.seed + 10 });
+    const cx = box.x + box.w * 0.78, cy = box.y + box.h * 0.74;
+    drawMascot(c, cx, cy, box.h * 0.40, { hand, pose: 'arms-at-sides', seed: panel.seed + 20, dotted: true, weight: WEIGHTS.medium });
+    drawText(c, '~', cx - 46, cy - box.h * 0.22, 22, { hand, weight: WEIGHTS.thin, seed: panel.seed + 30, color: PALETTE.inkSoft });
+    strokePoly(c, [[cx - 74, cy + 8], [cx + 74, cy + 8]], { hand, weight: WEIGHTS.thin, color: PALETTE.inkSoft, dash: [6, 5], seed: panel.seed + 32 });
+  },
+
+  /* ── Night Six. WRONG. Not sinister-wrong. Broken-wrong, which is worse. ─────────── */
+  'out-of-order'(c, env) {
+    // Step 14 before step 9. Step 9 does not appear.
+    const { hand, box, panel } = env;
+    const fig = panel.figures[0];
+    if (fig) this._drawFigure(c, fig, { x: box.x, y: box.y + box.h * 0.18, w: box.w, h: box.h * 0.70 }, env);
+    stepCircle(c, box.x + box.w * 0.20, box.y + box.h * 0.08, 14, { hand, seed: panel.seed, r: 17 });
+    stepCircle(c, box.x + box.w * 0.52, box.y + box.h * 0.10, 15, { hand, seed: panel.seed + 2, r: 17 });
+    stepCircle(c, box.x + box.w * 0.82, box.y + box.h * 0.08, 16, { hand, seed: panel.seed + 4, r: 17 });
+    arrowStraight(c, box.x + box.w * 0.26, box.y + box.h * 0.08, box.x + box.w * 0.46, box.y + box.h * 0.10, { hand, seed: panel.seed + 6 });
+    arrowStraight(c, box.x + box.w * 0.58, box.y + box.h * 0.10, box.x + box.w * 0.76, box.y + box.h * 0.08, { hand, seed: panel.seed + 8 });
+  },
+
+  'phantom-article'(c, env) {
+    /*
+     * Panel 6.5. A confident arrow, an empty slot, and article 0000-000: the only number in the
+     * manual with no year in it. It is not in the world. It has never been in the world.
+     * Never hint it. Never acknowledge the search.
+     */
+    const { hand, box, panel } = env;
+    const sx = box.x + box.w * 0.60, sy = box.y + box.h * 0.46;
+    strokePoly(c, [[sx - 58, sy - 34], [sx + 58, sy - 34], [sx + 58, sy + 34], [sx - 58, sy + 34], [sx - 58, sy - 34]],
+      { hand, weight: WEIGHTS.medium, dash: [7, 6], seed: panel.seed, closed: true });
+    arrowStraight(c, box.x + box.w * 0.16, sy, sx - 74, sy, { hand, seed: panel.seed + 4, size: 16, weight: WEIGHTS.heavy });
+    drawText(c, '0000-000', sx, sy + 62, 19, { align: 'center', hand, weight: WEIGHTS.thin, seed: panel.seed + 8 });
+    // The parts bracket. Inside it, nothing.
+    strokePoly(c, [[sx - 92, sy - 54], [sx - 100, sy - 54], [sx - 100, sy + 54], [sx - 92, sy + 54]],
+      { hand, weight: WEIGHTS.medium, seed: panel.seed + 12 });
+    strokePoly(c, [[sx + 92, sy - 54], [sx + 100, sy - 54], [sx + 100, sy + 54], [sx + 92, sy + 54]],
+      { hand, weight: WEIGHTS.medium, seed: panel.seed + 14 });
+  },
+
+  errata(c, env) {
+    /*
+     * G6. The step the errata slip corrects. Without the slip the manual is confidently, serenely
+     * incorrect and the join caps at w = 0.35. With it, a red correction stamps over the figure.
+     */
+    const { hand, box, panel } = env;
+    const er = this.def.errataFull;
+    const found = !!this.state?.toolsFound?.includes?.(er?.slipId) || !!this.state?.storyFlags?.foundErrataSlip;
+    const part = this.def.parts.find((p) => p.id === er?.partId) ?? this.def.parts[0];
+    const y = box.y + box.h * 0.42;
+    if (!part) return;
+    // As printed — wrong, and drawn with total confidence.
+    this._part(c, part.type, box.x + box.w * 0.34, y, box.w * 0.34, {
+      hand, seed: panel.seed, fitH: box.h * 0.42,
+      yaw: er?.printedTransform?.yaw ?? Math.PI, mirror: !!er?.printedTransform?.mirror,
+    });
+    stepCircle(c, box.x + box.w * 0.34, box.y + box.h * 0.12, panel.step ?? 6, { hand, seed: panel.seed + 2, r: 17 });
+    arrowStraight(c, box.x + box.w * 0.34, box.y + box.h * 0.19, box.x + box.w * 0.34, box.y + box.h * 0.28,
+      { hand, seed: panel.seed + 4 });
+    if (found) {
+      slashCircle(c, box.x + box.w * 0.34, y, box.w * 0.21, { hand, seed: panel.seed + 10, color: this._accent() });
+      this._part(c, part.type, box.x + box.w * 0.74, y, box.w * 0.34, {
+        hand, seed: panel.seed + 20, fitH: box.h * 0.42, color: this._accent(),
+        yaw: er?.correctTransform?.yaw ?? 0, mirror: false,
+      });
+      arrowStraight(c, box.x + box.w * 0.52, y, box.x + box.w * 0.60, y, { hand, seed: panel.seed + 22, color: this._accent() });
+      tickMark(c, box.x + box.w * 0.90, y - box.h * 0.20, 18, { hand, seed: panel.seed + 24, color: this._accent() });
+    }
+  },
+
+  'kitchen-elevation'(c, env) {
+    /*
+     * Panel 6.8. A wall elevation in perfect Marit line — a window over a sink, four pencil marks
+     * on a doorframe at ascending heights — with a bunk bed drawn over the top of it in a
+     * scratched hand, and erased. The ghost stays.
+     * He is trying to make his mother's house fit a camp. It doesn't.
+     */
+    const { box, panel } = env;
+    const marit = HANDS.marit;
+    const ansel = HANDS.ansel;
+    const x0 = box.x + box.w * 0.10, x1 = box.x + box.w * 0.90;
+    const yTop = box.y + box.h * 0.14, yBot = box.y + box.h * 0.82;
+    strokePoly(c, [[x0, yTop], [x1, yTop], [x1, yBot], [x0, yBot], [x0, yTop]],
+      { hand: marit, weight: WEIGHTS.heavy, seed: panel.seed, closed: true });
+    const wx = x0 + (x1 - x0) * 0.30, wy = yTop + (yBot - yTop) * 0.26;
+    const ww = (x1 - x0) * 0.26, wh = (yBot - yTop) * 0.26;
+    strokePoly(c, [[wx - ww / 2, wy - wh / 2], [wx + ww / 2, wy - wh / 2], [wx + ww / 2, wy + wh / 2], [wx - ww / 2, wy + wh / 2], [wx - ww / 2, wy - wh / 2]],
+      { hand: marit, weight: WEIGHTS.medium, seed: panel.seed + 4, closed: true });
+    strokePoly(c, [[wx, wy - wh / 2], [wx, wy + wh / 2]], { hand: marit, weight: WEIGHTS.thin, seed: panel.seed + 6 });
+    strokePoly(c, [[wx - ww / 2, wy], [wx + ww / 2, wy]], { hand: marit, weight: WEIGHTS.thin, seed: panel.seed + 8 });
+    // The sink under it. The rectangle missing from its splash-back is on his face.
+    this._part(c, 'sink', wx, wy + wh * 0.98, ww * 1.1, { hand: marit, seed: panel.seed + 10, fitH: wh * 0.9 });
+    // The doorframe, with its four pencil marks. Nothing is dimensioned. Nothing is explained.
+    const dxx = x0 + (x1 - x0) * 0.76;
+    this._part(c, 'doorframe', dxx, (yTop + yBot) / 2 + 10, (x1 - x0) * 0.22,
+      { hand: marit, seed: panel.seed + 20, fitH: (yBot - yTop) * 0.84 });
+    // The bunk bed, in his hand, over the top of hers. Erased. The ghost stays.
+    c.save();
+    c.globalAlpha = HANDS.ansel.ghostAlpha;
+    const bx = x0 + (x1 - x0) * 0.34, by = yTop + (yBot - yTop) * 0.62;
+    const bw = (x1 - x0) * 0.44, bh = (yBot - yTop) * 0.44;
+    strokePoly(c, [[bx - bw / 2, by + bh / 2], [bx + bw / 2, by + bh / 2]], { hand: ansel, weight: WEIGHTS.heavy, seed: panel.seed + 30 });
+    strokePoly(c, [[bx - bw / 2, by - bh / 2], [bx + bw / 2, by - bh / 2]], { hand: ansel, weight: WEIGHTS.heavy, seed: panel.seed + 32 });
+    for (const s of [-1, 1]) {
+      strokePoly(c, [[bx + s * bw / 2, by - bh / 2 - 26], [bx + s * bw / 2, by + bh / 2 + 20]],
+        { hand: ansel, weight: WEIGHTS.medium, seed: panel.seed + 34 + s });
+    }
+    strokePoly(c, [[bx - bw / 2, by], [bx + bw / 2, by]], { hand: ansel, weight: WEIGHTS.thin, seed: panel.seed + 38 });
+    c.restore();
+  },
+
+  alone(c, env) {
+    // Panel 6.9. The figure, alone, centre of an otherwise empty page. Not doing anything.
+    const { hand, box, panel } = env;
+    drawMascot(c, box.x + box.w * 0.5, box.y + box.h * 0.72, box.h * 0.44,
+      { hand, pose: 'arms-at-sides', seed: panel.seed });
+  },
+
+  /* ── Night Seven. GONE. ──────────────────────────────────────────────────────────── */
+  blank(_c, _env) {
+    // A blank spread. Both pages. No rule, no number, no mascot. It is paper and it is blank.
+    // Do not add an empty state. Do not fade anything in. The wipe already played and it failed.
+  },
+
+  'last-page'(c, env) {
+    /*
+     * The last page. A dotted outline of a small seated figure, in a chair, at a table.
+     * Child-sized. Marit's hand, 1962, on the last page she finished. Dotted, in this manual's
+     * own grammar (G3), means: present, but occluded in this view.
+     * Above it, the parts bracket, and inside the bracket, nothing.
+     */
+    const { box, panel } = env;
+    const marit = HANDS.marit;
+    const cx = box.x + box.w * 0.5, cy = box.y + box.h * 0.62;
+    strokePoly(c, [[cx - 120, cy - 30], [cx + 120, cy - 30]], { hand: marit, weight: WEIGHTS.medium, seed: panel.seed });
+    strokePoly(c, [[cx - 104, cy - 30], [cx - 104, cy + 78]], { hand: marit, weight: WEIGHTS.medium, seed: panel.seed + 2 });
+    strokePoly(c, [[cx + 104, cy - 30], [cx + 104, cy + 78]], { hand: marit, weight: WEIGHTS.medium, seed: panel.seed + 4 });
+    this._part(c, 'chair', cx - 46, cy + 26, 96, { hand: marit, seed: panel.seed + 10, fitH: 118, dotted: true, weight: WEIGHTS.medium });
+    drawMascot(c, cx - 46, cy + 60, 116, {
+      hand: marit, pose: 'seated', seed: panel.seed + 20, dotted: true, weight: WEIGHTS.medium, ignoreHandScale: true,
+    });
+    const by = box.y + box.h * 0.24;
+    strokePoly(c, [[cx - 60, by - 26], [cx - 70, by - 26], [cx - 70, by + 26], [cx - 60, by + 26]],
+      { hand: marit, weight: WEIGHTS.medium, seed: panel.seed + 30 });
+    strokePoly(c, [[cx + 60, by - 26], [cx + 70, by - 26], [cx + 70, by + 26], [cx + 60, by + 26]],
+      { hand: marit, weight: WEIGHTS.medium, seed: panel.seed + 32 });
+    // The telephone inset — the parody "contact customer service" — and the payphone in situ,
+    // 160 m away, with a dotted path from the front door to it. The one mark in his hand.
+    const ansel = HANDS.ansel;
+    telephoneGlyph(c, box.x + box.w * 0.86, box.y + box.h * 0.12, 26, { hand: ansel, seed: panel.seed + 40 });
+    const path = [];
+    for (let i = 0; i <= 18; i++) {
+      const t = i / 18;
+      path.push(cx + 40 + (box.w * 0.34) * t, by + 120 - (box.h * 0.30) * t + Math.sin(t * 3.1) * 12);
+    }
+    strokePath(c, path, { hand: ansel, weight: WEIGHTS.thin, color: PALETTE.inkSoft, dash: [5, 6], seed: panel.seed + 42, step: 8 });
+  },
+
+  'ending-a'(c, env) {
+    // ENDING A only. The only red mark the manual has ever aimed at the player, and the only
+    // judgement it has ever passed.
+    const { box, panel } = env;
+    const ansel = HANDS.ansel;
+    drawMascot(c, box.x + box.w * 0.5, box.y + box.h * 0.74, box.h * 0.46,
+      { hand: ansel, pose: 'arms-at-sides', seed: panel.seed, mouth: true });
+    strokePoly(c, [[box.x + box.w * 0.14, box.y + box.h * 0.18], [box.x + box.w * 0.86, box.y + box.h * 0.86]],
+      { hand: ansel, weight: WEIGHTS.heavy * 1.4, color: this._accent(), seed: panel.seed + 10 });
+  },
+
+  'end-card'(c, env) {
+    // Over black: the finished house, exactly as the player built it, with a tick beside it.
+    const { hand, box, panel } = env;
+    RENDERERS.cover.call(this, c, env);
+    tickMark(c, box.x + box.w * 0.86, box.y + box.h * 0.46, 26, { hand, seed: panel.seed + 60 });
+  },
+
+  'grab-warning'(c, env) { this._drawGrabWarning(c, env); },
+};
+
+Blueprint.prototype._renderers = RENDERERS;
+
+export default Blueprint;

@@ -55,6 +55,30 @@ const HEX = {
   fogNear:     0x2a3a44,   // fog.near — scene.fog colour
 };
 
+/**
+ * Radiance gains, linear.
+ *
+ * The hexes above are ART_DIRECTION display-value anchors — the colour the sky should
+ * READ as. They are not radiances. AgX is extremely flat in the shadows (a 5x change in
+ * linear input moves the encoded output about one tenth), so the dome has to be authored
+ * an order of magnitude below its target hex or the night sky comes out as dusk. These
+ * numbers were set by reading back the framebuffer at toneMappingExposure 0.62.
+ *
+ * Ratios matter more than absolutes: horizon / zenith ~= 3.4, cloud-core / clear-sky ~= 0.5,
+ * moon aureole / zenith ~= 30, moon disc / zenith ~= 1500.
+ */
+const GAIN = {
+  sky: 0.155,
+  ground: 0.10,
+  moonGlow: 0.30,
+  cloudDark: 0.085,
+  cloudLit: 0.10,
+  cloudSilver: 0.55,
+  milkyWay: 0.022,
+  aurora: 0.055,
+  lightning: 0.75,
+};
+
 /** Moon geometry. The real moon is 0.53deg; we run it ~3x for cinematic read. */
 const MOON_ANGULAR_RADIUS = 0.0275;   // radians (~1.58deg)
 
@@ -232,10 +256,20 @@ void main() {
 }
 `;
 
+// NB: do NOT '#include <colorspace_pars_fragment>' or '#include <tonemapping_pars_fragment>'
+// here. For a ShaderMaterial (not RawShaderMaterial) WebGLProgram ALREADY injects the
+// colorspace transfer functions + linearToOutputTexel into the fragment prefix, and it injects
+// the whole tonemapping pars chunk too whenever the material is toneMapped and the renderer has
+// a tone mapping mode. Including either again is a duplicate-function-body compile error that a
+// JS parse can never see — it only shows up as VALIDATE_STATUS false at draw time.
+//
+// This material is toneMapped:false ON PURPOSE. Postprocessing.js owns the output transform:
+// it forces renderer.toneMapping = NoToneMapping and applies AgX exactly once at the end of the
+// post chain. The dome therefore writes LINEAR HDR RADIANCE into the HDR MRT. Tone mapping here
+// would double-apply the curve and flatten the moon and the stars, which is the whole shot.
+// Likewise there is no dither here: the composite pass does the triangular blue-noise dither
+// after ITS sRGB encode, which is the only place a display-space dither is meaningful.
 const SKY_FRAG = /* glsl */`
-#include <tonemapping_pars_fragment>
-#include <colorspace_pars_fragment>
-
 varying vec3 vDir;
 
 uniform vec3  uSkyDeep;
@@ -423,18 +457,16 @@ void main() {
   // Dawn: the sky lifts, desaturates and goes flat. Still cold — nothing in nature is warm.
   float dawn = smoothstep(0.80, 1.0, uNightPhase);
   if (dawn > 0.0) {
-    vec3 dawnCol = mix(uSkyHorizon * 1.5, vec3(0.055, 0.072, 0.090), rDepth * 0.5);
+    vec3 dawnCol = uSkyHorizon * mix(2.2, 7.0, rDepth);
     col = mix(col, max(col, dawnCol * (0.35 + 0.85 * rDepth)), dawn);
   }
 
+  // LINEAR HDR out. No tone map, no encode of our own — linearToOutputTexel is injected by
+  // WebGLProgram and is the identity for the linear float MRT the scene renders into, and the
+  // real AgX + grade + dither happen once, in Postprocessing's composite pass.
   gl_FragColor = vec4(max(col, vec3(0.0)), 1.0);
 
-  #include <tonemapping_fragment>
   #include <colorspace_fragment>
-
-  // Dither AFTER encoding — a 12-bit-deep gradient across 1000 px bands without this.
-  float dth = scHash21(gl_FragCoord.xy + fract(uTime) * 137.0) - 0.5;
-  gl_FragColor.rgb += dth * (1.5 / 255.0);
 }
 `;
 
@@ -505,10 +537,9 @@ void main() {
 }
 `;
 
+// Same rule as the dome: no manual tonemapping/colorspace pars (WebGLProgram injects them), and
+// toneMapped:false so the stars stay linear HDR until the single AgX in the composite pass.
 const STAR_FRAG = /* glsl */`
-#include <tonemapping_pars_fragment>
-#include <colorspace_pars_fragment>
-
 varying vec3 vCol;
 varying float vSpike;
 
@@ -532,7 +563,6 @@ void main() {
 
   gl_FragColor = vec4(vCol * a, 1.0);
 
-  #include <tonemapping_fragment>
   #include <colorspace_fragment>
 }
 `;
@@ -771,18 +801,18 @@ export class Sky {
     this._domeGeo = new THREE.SphereGeometry(900, segs, Math.max(16, segs >> 1));
 
     this._uniforms = {
-      uSkyDeep:      { value: lin(HEX.skyDeep) },
-      uSkyHorizon:   { value: lin(HEX.skyHorizon) },
-      uSkyGround:    { value: lin(HEX.skyGround) },
-      uMoonGlow:     { value: lin(HEX.moonGlow) },
+      uSkyDeep:      { value: lin(HEX.skyDeep).multiplyScalar(GAIN.sky) },
+      uSkyHorizon:   { value: lin(HEX.skyHorizon).multiplyScalar(GAIN.sky) },
+      uSkyGround:    { value: lin(HEX.skyGround).multiplyScalar(GAIN.ground) },
+      uMoonGlow:     { value: lin(HEX.moonGlow).multiplyScalar(GAIN.moonGlow) },
       uMoonBody:     { value: lin(HEX.moonBody) },
-      uMilkyWay:     { value: lin(HEX.milkyWay) },
-      uCloudDark:    { value: lin(HEX.cloudDark) },
-      uCloudLit:     { value: lin(HEX.cloudLit) },
-      uCloudSilver:  { value: lin(HEX.cloudSilver) },
-      uAuroraLo:     { value: lin(HEX.auroraLo) },
-      uAuroraHi:     { value: lin(HEX.auroraHi) },
-      uLightningCol: { value: lin(HEX.lightning) },
+      uMilkyWay:     { value: lin(HEX.milkyWay).multiplyScalar(GAIN.milkyWay) },
+      uCloudDark:    { value: lin(HEX.cloudDark).multiplyScalar(GAIN.cloudDark) },
+      uCloudLit:     { value: lin(HEX.cloudLit).multiplyScalar(GAIN.cloudLit) },
+      uCloudSilver:  { value: lin(HEX.cloudSilver).multiplyScalar(GAIN.cloudSilver) },
+      uAuroraLo:     { value: lin(HEX.auroraLo).multiplyScalar(GAIN.aurora) },
+      uAuroraHi:     { value: lin(HEX.auroraHi).multiplyScalar(GAIN.aurora) },
+      uLightningCol: { value: lin(HEX.lightning).multiplyScalar(GAIN.lightning) },
 
       uMoonDir:      { value: this.moonDirection.clone() },
       uMoonT:        { value: new THREE.Vector3(1, 0, 0) },
@@ -818,7 +848,10 @@ export class Sky {
       depthTest: false,
       transparent: false,
       fog: false,
-      toneMapped: true,
+      // Postprocessing owns the output transform (renderer.toneMapping = NoToneMapping, AgX once
+      // in the composite). toneMapped:false stops WebGLProgram injecting the tonemapping pars
+      // chunk, which our shader must not duplicate, and keeps the dome linear HDR.
+      toneMapped: false,
     });
 
     this.dome = new THREE.Mesh(this._domeGeo, this.skyMaterial);
@@ -916,7 +949,8 @@ export class Sky {
       depthWrite: false,
       depthTest: true,
       fog: false,
-      toneMapped: true,
+      // Linear HDR out; AgX is applied once, in Postprocessing. See the dome material.
+      toneMapped: false,
     });
 
     this.stars = new THREE.Points(g, this.starMaterial);

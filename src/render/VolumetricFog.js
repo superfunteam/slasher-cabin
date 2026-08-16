@@ -79,8 +79,8 @@ const _v2 = new THREE.Vector2();
 const _v3a = new THREE.Vector3();
 const _v3b = new THREE.Vector3();
 const _v3c = new THREE.Vector3();
-const _mat4 = new THREE.Matrix4();
 const _col = new THREE.Color();
+const _colB = new THREE.Color();
 
 const MAX_LOCALS = 3;
 const TERRAIN_TEX = 128;          // texels per side of the mist-floor window
@@ -273,8 +273,8 @@ float densityAt(vec3 p, out float mistAmt) {
 
   float band = sat((top - p.y) / max(uMist.y, 0.04));
   band *= sat((p.y - floorY + 1.30) * 1.5);
-  float patch = smoothstep(0.28, 0.88, n);
-  mistAmt = band * (0.30 + 0.90 * patch) * mult;
+  float clump = smoothstep(0.28, 0.88, n);
+  mistAmt = band * (0.30 + 0.90 * clump) * mult;
 
   return base + uMist.z * mistAmt;
 }
@@ -501,14 +501,30 @@ export class VolumetricFog {
     this.stats = { width: 0, height: 0, steps: 0, scale: 1, standalone: true, cpuMs: 0 };
 
     this._scale = 0.5;
+    this._effScale = 0.5;
     this._steps = 24;
     this._locals = 2;
     this._historyAmount = 0.88;
 
+    /**
+     * Hard ceilings on buffer area, independent of DPR.  A retina 1080p canvas is a 3840x2160
+     * drawing buffer; a full-res HDR fog buffer there is 66 MB and 8.3 M raymarched pixels,
+     * which is not a 2.5 ms pass on any laptop.  These caps keep the budget honest while still
+     * letting the tier ask for "full".
+     */
+    this.maxFogPixels = 1.35e6;
+    this.maxDepthPixels = 2.15e6;
+
     this._fw = 1; this._fh = 1;
+    this._dw = 1; this._dh = 1;
     this._rw = 1; this._rh = 1;
 
     this._frame = 0;
+    this._renderedFrame = -1;
+    this._ownsDepth = true;
+    this._blitScene = null;
+    this._terrCenterPending = null;
+    this._cand = [];
     this._time = 0;
     this._standalone = true;
     this._extAge = 0;
@@ -704,11 +720,30 @@ export class VolumetricFog {
     } catch { /* fall back to CSS px */ }
 
     this._rw = dw; this._rh = dh;
-    const fw = Math.max(8, Math.round(dw * this._scale));
-    const fh = Math.max(8, Math.round(dh * this._scale));
 
-    if (fw === this._fw && fh === this._fh && this.target && this._depthRT) return;
+    // Effective scale = the tier's ask, clamped by the area cap.
+    let scale = this._scale;
+    const area = dw * dh;
+    if (area * scale * scale > this.maxFogPixels) {
+      scale = Math.sqrt(this.maxFogPixels / Math.max(area, 1));
+    }
+    scale = Math.min(1, Math.max(0.15, scale));
+    this._effScale = scale;
+
+    const fw = Math.max(8, Math.round(dw * scale));
+    const fh = Math.max(8, Math.round(dh * scale));
+
+    // Depth prepass: full drawing buffer, but never past its own cap, and never below the fog.
+    let ds = 1;
+    if (area > this.maxDepthPixels) ds = Math.sqrt(this.maxDepthPixels / area);
+    const pw = Math.max(fw, Math.round(dw * ds));
+    const ph = Math.max(fh, Math.round(dh * ds));
+
+    if (fw === this._fw && fh === this._fh && pw === this._dw && ph === this._dh
+        && this.target && this._depthRT) return;
+
     this._fw = fw; this._fh = fh;
+    this._dw = pw; this._dh = ph;
 
     const opts = {
       minFilter: THREE.LinearFilter,
@@ -730,7 +765,7 @@ export class VolumetricFog {
       this._history.texture.name = 'VolumetricFog.history';
     }
 
-    this._allocDepthRT(dw, dh);
+    this._allocDepthRT(pw, ph);
 
     if (this._marchMat) {
       this._marchMat.uniforms.tHistory.value = this._history ? this._history.texture : this._whiteTex;
@@ -738,14 +773,14 @@ export class VolumetricFog {
     if (this._compositeMat) {
       this._compositeMat.uniforms.tFog.value = this.target.texture;
       this._compositeMat.uniforms.uFogTexel.value.set(0.5 / fw, 0.5 / fh);
-      const up = this._scale < 0.999 ? 1 : 0;
+      const up = (fw < dw - 1 || fh < dh - 1) ? 1 : 0;
       if (this._compositeMat.defines.UPSAMPLE !== up) {
         this._compositeMat.defines.UPSAMPLE = up;
         this._compositeMat.needsUpdate = true;
       }
     }
 
-    this.stats.width = fw; this.stats.height = fh; this.stats.scale = this._scale;
+    this.stats.width = fw; this.stats.height = fh; this.stats.scale = scale;
   }
 
   dispose() {
@@ -1039,7 +1074,7 @@ export class VolumetricFog {
 
       uFogA: { value: new THREE.Vector4(0.016, -1.0, 1 / 4.4, 150) },
       uFogB: { value: new THREE.Vector4(0.62, 0.92, 1.15, 0.55) },
-      uFogNear: { value: new THREE.Vector3().setFromColor?.(_col) ?? new THREE.Vector3() },
+      uFogNear: { value: new THREE.Vector3() },
       uFogFar: { value: new THREE.Vector3() },
       uFogLit: { value: new THREE.Vector3() },
 
@@ -1441,14 +1476,20 @@ export class VolumetricFog {
     const hg = Math.max(0.05, Math.min(0.9, P.hg - f * 0.24));
     u.uFogB.value.set(hg, P.albedo, P.ambient * (0.75 + f * 0.9), P.mistTint);
 
-    // colours: thicker fog lifts and cools, dawn warms
-    const dawn = Math.max(0, (nightPhase - 0.85) / 0.15);
-    _col.setHex(PAL.near).lerp(_col.clone().setHex(PAL.nearThick), f);
-    if (dawn > 0) _col.lerp(_v3c.set(0, 0, 0) && _col.clone().setHex(PAL.dawnNear), dawn);
+    // colours: thicker fog lifts and cools, dawn warms.  No allocation — two module scratches.
+    const dawn = Math.min(1, Math.max(0, (nightPhase - 0.85) / 0.15));
+    _col.setHex(PAL.near);
+    _colB.setHex(PAL.nearThick);
+    _col.lerp(_colB, f);
+    if (dawn > 0) { _colB.setHex(PAL.dawnNear); _col.lerp(_colB, dawn); }
     u.uFogNear.value.set(_col.r, _col.g, _col.b);
+
     _col.setHex(PAL.far);
-    if (dawn > 0) _col.lerp(_col.clone().setHex(PAL.dawnFar), dawn);
+    _colB.setHex(PAL.farThick);
+    _col.lerp(_colB, f);
+    if (dawn > 0) { _colB.setHex(PAL.dawnFar); _col.lerp(_colB, dawn); }
     u.uFogFar.value.set(_col.r, _col.g, _col.b);
+
     _col.setHex(PAL.lit);
     u.uFogLit.value.set(_col.r, _col.g, _col.b);
 
@@ -1499,7 +1540,7 @@ export class VolumetricFog {
       cu.tDepth.value = depthTex || this._whiteTex;
       cu.uNearFar.value.set(camera.near, camera.far);
       cu.uRevDepth.value = reversed;
-      cu.uFogTexel.value.set(1 / Math.max(1, this._fw), 1 / Math.max(1, this._fh));
+      cu.uFogTexel.value.set(0.5 / Math.max(1, this._fw), 0.5 / Math.max(1, this._fh));
     }
   }
 

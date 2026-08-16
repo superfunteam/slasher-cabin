@@ -101,8 +101,13 @@ export class Engine {
     this._bindEvents();
     this.resize();
 
-    // The screenshot/critic harness talks to the game through this.
+    // The screenshot/critic harness talks to the game through these. Exposed HERE, in the
+    // constructor, rather than at the end of boot(): a system that throws during init leaves
+    // boot() unfinished, and an inspector that cannot reach ctx in exactly that case is
+    // useless precisely when it is most needed.
     globalThis.__SLASHER__ = this;
+    globalThis.__ENGINE__ = this;
+    globalThis.__CTX__ = this.ctx;
   }
 
   // ------------------------------------------------------------- systems
