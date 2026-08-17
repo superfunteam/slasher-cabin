@@ -57,8 +57,13 @@ export const SHOTS = {
     timeOfNight: 0.28, rain: 0.1, fog: 0.4, lantern: false,
   },
   'lake': {
-    desc: 'From the dock across the lake. Water, reflection, and distance fog.',
-    from: 'dock', offset: [0, 0, -6], at: 'dock', aim: [-30, 8, -110], eye: 1.8,
+    desc: 'From the shore across the lake. Water, reflection, and distance fog.',
+    // Stands BACK from the dock on the shore rather than on it. Sitting at the dock landmark
+    // put the eye under the deck planking — Terrain.heightAt there returns the ground beneath
+    // the structure, not the deck surface, so eye+1.8 landed below the boards and the shot was
+    // a picture of the underside of a jetty. Never place a camera by a landmark that has
+    // walkable geometry above it.
+    from: 'dock', offset: [8, 0, 14], at: 'dock', aim: [-30, 6, -110], eye: 1.8,
     timeOfNight: 0.5, rain: 0.0, fog: 0.6, lantern: false,
   },
   'forest-deep': {
