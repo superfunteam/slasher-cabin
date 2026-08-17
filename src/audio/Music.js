@@ -1782,25 +1782,52 @@ export class Music {
   }
 
   /**
-   * Read `public/audio/manifest.json`. Returns false — quietly, at debug level — for a 404,
-   * a dev server answering with the SPA's index.html, an offline load, a `file://` origin, a
-   * CSP block, or a manifest with no `music` array.
+   * The parsed `audio/manifest.json`, or null.
+   *
+   * Prefers the copy `AudioEngine` already has: registration order is Audio → Music, so by
+   * the time we get here its fetch is in flight or done, and awaiting it costs nothing but
+   * saves a duplicate round trip for a document we both read. Falls back to fetching it
+   * ourselves whenever AudioEngine is absent, disposed, or came back empty-handed — Music
+   * runs standalone (it will build its own AudioContext) and must not depend on it.
+   * @returns {Promise<object|null>}
    */
-  async _loadMusicManifest() {
+  async _readManifestJson() {
+    const engine = this.ctx?.systems?.get?.('Audio') ?? null;
+    if (engine && typeof engine.manifestReady === 'function') {
+      try {
+        const shared = await engine.manifestReady();
+        if (shared && typeof shared === 'object') return shared;
+      } catch { /* fall through and fetch our own */ }
+    }
+    return this._fetchManifestJson();
+  }
+
+  /**
+   * Read `public/audio/manifest.json`. Returns null — quietly, at debug level — for a 404,
+   * a dev server answering with the SPA's index.html, an offline load, a `file://` origin, a
+   * CSP block, or a body that will not parse.
+   */
+  async _fetchManifestJson() {
     let res;
     try {
       // `no-cache` (revalidate), not `force-cache`: a dev server answers a not-yet-existing
       // path with index.html, and a forced cache would pin that HTML for the session.
       res = await fetch(siteUrl('audio/manifest.json'), { cache: 'no-cache' });
     } catch {
-      return false;
+      return null;
     }
-    if (!res || !res.ok) return false;
+    if (!res || !res.ok) return null;
     const type = res.headers?.get?.('content-type') ?? '';
-    if (type && type.indexOf('json') < 0) return false;   // the SPA fallback, not a manifest
+    if (type && type.indexOf('json') < 0) return null;   // the SPA fallback, not a manifest
+    try { return await res.json(); } catch { return null; }
+  }
 
-    let json;
-    try { json = await res.json(); } catch { return false; }
+  /**
+   * Index the score beds out of the manifest. Returns false — quietly — when there is no
+   * manifest, or it carries no `music` array.
+   */
+  async _loadMusicManifest() {
+    const json = await this._readManifestJson();
     const list = Array.isArray(json?.music) ? json.music : null;
     if (!list || list.length === 0) return false;
 
@@ -1831,6 +1858,30 @@ export class Music {
   }
 
   /**
+   * May we speculatively fetch this score bed right now?
+   *
+   * AudioEngine owns the loading-tier policy for every generated asset and answers this when
+   * it is there. When it is NOT there the old code skipped the check entirely and fetched
+   * unconditionally — the two halves of one policy disagreeing about which way to fail, and
+   * the wrong way round: AudioEngine's own bed path fails closed.
+   *
+   * The fix is a local rule rather than a blanket refusal, because Music genuinely runs
+   * standalone (it builds its own AudioContext when AudioEngine has none) and a hard `false`
+   * would leave that configuration with no recorded score for the whole session. At the menu
+   * we hold off — that is the window the preloader is assembling the title screen in, and the
+   * title is silent until a gesture anyway. Once the game is under way, load normally.
+   *
+   * A shut gate is never a failure and is never written off: the scheduler asks again on the
+   * next bar, and until then the synthesized score — a complete score on its own — carries
+   * the mood alone.
+   */
+  _mayFetchBed(id) {
+    const gate = this.ctx?.systems?.get?.('Audio') ?? null;
+    if (gate && typeof gate.mayFetchGenerated === 'function') return gate.mayFetchGenerated(id);
+    return (this.ctx?.state?.phase ?? 'menu') !== 'menu';
+  }
+
+  /**
    * The decoded buffer for `id`, or null. A miss starts exactly one background load and
    * returns null immediately — the caller keeps synthesizing and asks again next tick.
    */
@@ -1849,8 +1900,7 @@ export class Music {
     // `mayFetchGenerated`). A shut gate is not a failure and is never written off: the
     // scheduler asks again on the next bar, and until then the synthesized score — which is
     // a complete score on its own — carries the mood alone.
-    const gate = this.ctx?.systems?.get?.('Audio') ?? null;
-    if (gate && typeof gate.mayFetchGenerated === 'function' && !gate.mayFetchGenerated(id)) return null;
+    if (!this._mayFetchBed(id)) return null;
 
     const p = (async () => {
       try {

@@ -284,6 +284,9 @@ export class VoiceBank {
     this._ownsContext = false;
     this._busOwned = true;
     this._disposed = false;
+    // Settled when the deferred half of init() has finished (or given up). Boot never awaits
+    // it; it exists so a test or a probe can, without polling `available`.
+    this._ready = Promise.resolve();
 
     // Line table, built from the manifest and enriched from Script.js when it exists.
     this._lines = new Map();          // id -> entry
@@ -343,12 +346,38 @@ export class VoiceBank {
 
   // ------------------------------------------------------------------- lifecycle
 
+  /**
+   * Boot does not wait on the network.
+   *
+   * `Engine.initSystems()` awaits each system's `init()` one at a time, and VoiceBank is 21st
+   * of 24 — so the `await` that used to be here put a real round trip for `vo/manifest.json`
+   * (15,224 B) in front of Postprocessing, HUD, BlueprintUI and Menu, all of which sit inside
+   * the preloader's `systems` unit and therefore in front of the title reveal itself. Measured
+   * on 127.0.0.1: the request started at 6,433 ms and `systems-ready` stamped at 6,516.6 ms.
+   * AudioEngine and Music both deliberately decline to await their manifests; this was the one
+   * module that did.
+   *
+   * Nothing downstream needs it synchronously. Every public entry point already gates on
+   * `this.available`, which stays false until setup finishes, and no VO line can be heard
+   * before the build phase — minutes later.
+   */
   async init() {
+    if (this._disposed) return;
+    this._ready = this._setup();
+    // Never swallow an error in init(): if setup dies, say so loudly, with the stack.
+    this._ready.catch((e) => {
+      Log.error('VoiceBank setup failed — voice disabled, game otherwise unaffected.', e);
+    });
+  }
+
+  /** The deferred half of `init()`. Resolves when the bank is usable, or gives up quietly. */
+  async _setup() {
     if (this._disposed) return;
 
     // 1. The manifest. Missing or empty is the DEFAULT state of a fresh clone, not an error.
     //    Debug level only: this must never look like something went wrong, because nothing did.
     const manifest = await this._fetchManifest();
+    if (this._disposed) return;          // torn down while we were on the network
     if (!manifest) {
       Log.debug('VoiceBank: no VO manifest — voice disabled, game unaffected.');
       return;
@@ -357,6 +386,7 @@ export class VoiceBank {
     // 2. Story data is optional and may still be a stub. Guarded dynamic import so a broken
     //    or half-written Script.js can never take audio down.
     this._Script = await this._loadScript();
+    if (this._disposed) return;
 
     this._buildIndex(manifest);
     if (this._lines.size === 0) {
@@ -1301,8 +1331,14 @@ export class VoiceBank {
     if (typeof linesFor === 'function') {
       try {
         const night = this.ctx?.state?.night ?? 1;
-        const res = linesFor.call(this._Script, category, { speaker, night, category });
-        const picked = this._firstUsable(res);
+        // `Script.linesFor(category, night)` takes the night as a NUMBER (Script.js: the
+        // guard is `night >= 0 && night <= 7`). This used to hand it an options OBJECT, and
+        // `{...} >= 0` is false — so `n` fell to 0, which is Script's "any night" bucket, and
+        // every night window in the script was silently ignored. The camp was using Night-3
+        // and Night-6 dialogue on Night 1. NightManager calls the same function correctly
+        // with a number, which is what made this one call the anomaly.
+        const res = linesFor.call(this._Script, category, night);
+        const picked = this._firstUsable(res, speaker);
         if (picked) return picked;
       } catch { /* Script is optional — fall through to the manifest index */ }
     }
@@ -1330,7 +1366,16 @@ export class VoiceBank {
     return best;
   }
 
-  _firstUsable(res) {
+  /**
+   * First usable line in Script's answer, preferring `speaker` when one is asked for.
+   *
+   * The preference is a two-pass scan, NOT a filter: if nobody in the list belongs to that
+   * speaker we fall back to the whole list, exactly as before. `Script.linesFor()` selects by
+   * category and night only, so without this pass a camper could deliver another camper's
+   * line — but tightening it into a hard filter would trade one wrong voice for silence, and
+   * silence is the worse failure.
+   */
+  _firstUsable(res, speaker = null) {
     if (!res) return null;
     if (typeof res === 'string') return this._usableEntry(res);
     if (Array.isArray(res)) {
@@ -1338,10 +1383,14 @@ export class VoiceBank {
       if (n === 0) return null;
       // Deterministic rotate-then-scan: no allocation, no shuffle, seeded.
       const off = Math.floor(this._rand.next() * n);
-      for (let i = 0; i < n; i++) {
-        const item = res[(i + off) % n];
-        const e = this._usableEntry(typeof item === 'string' ? item : item?.id);
-        if (e) return e;
+      for (let pass = speaker ? 0 : 1; pass < 2; pass++) {
+        for (let i = 0; i < n; i++) {
+          const item = res[(i + off) % n];
+          const e = this._usableEntry(typeof item === 'string' ? item : item?.id);
+          if (!e) continue;
+          if (pass === 0 && e.speaker !== speaker) continue;
+          return e;
+        }
       }
       return null;
     }
