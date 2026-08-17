@@ -193,7 +193,8 @@ const T = {
   interactRange: 2.6,       // m. No document states a reach; this is a long arm plus half a step.
   interactRayEvery: 3,      // frames — ARCHITECTURE §12 raycast budget
   setDownTime: 2.1,         // s, GAME_DESIGN §4.1 "Set down (2.1 s, silent)"
-  lanternHoldTime: 0.30,    // s before a lantern press becomes a hood instead of a toggle
+  // (the lantern tap-vs-hold threshold lives in Flashlight.TUNING.tapSeconds — Flashlight owns
+  //  the `lantern` action end to end. Player deliberately holds no lantern timing constant.)
 
   // --- fear (Player-owned; no document assigns these, so they are named and commented)
   fearRise: 1.6,            // /s toward target — fright arrives fast
@@ -301,6 +302,25 @@ function angleDelta(a, b) {
 function yawFromDir(dx, dz) { return Math.atan2(-dx, -dz); }
 
 /**
+ * GAME_DESIGN §17, the opening frame. At 0:14 the manual lowers and "Ahead: six squares chalked
+ * on cleared ground […] and pallet A 12 m away with six pier blocks on it." That sequence — and
+ * every beat up to 5:00 — only exists if the player starts AT the plot.
+ *
+ * The offset is from `Terrain.buildSiteCenter` (the single source of truth for where the plot is,
+ * which `CabinSite.center` also derives from), never a second hardcoded world coordinate: a
+ * literal here silently desyncs the moment the pad moves. `SPAWN_FALLBACK` is the old constant,
+ * used only if Terrain is missing entirely.
+ *
+ * +Z is south of the pad. The chalked rectangle is 6.40 m along X by 3.20 m along Z, so standing
+ * 9 m south on the flat pad (Terrain.buildPad.half = 12) and looking north puts its long face
+ * across the frame at roughly 40° of a 72° FOV, near edge 7.4 m, far edge 10.6 m. The small
+ * downward pitch drops it into the middle of the frame rather than the very bottom.
+ */
+const SPAWN_OFFSET = Object.freeze({ x: 0, z: 9.0 });
+const SPAWN_PITCH = -6 * Math.PI / 180;
+const SPAWN_FALLBACK = Object.freeze({ x: 0, z: 6, yaw: 0 });
+
+/**
  * ART §9.2's "1/f pink noise, 0.5–9 Hz band". Paul Kellet's economy pink filter, driven by a
  * seeded Rand so the frame is reproducible for the screenshot harness, then band-limited by a
  * one-pole high-pass and one-pole low-pass. `calibrate()` measures the filter's own RMS once so
@@ -373,8 +393,10 @@ export class Player {
      * `Physics.moveCapsule(position, …)`. The eye is at `position.y + eyeHeight`.
      * `eyePosition` is published separately for anything that wants the head.
      */
-    this.position = new THREE.Vector3(0, 0, 6);
-    this.eyePosition = new THREE.Vector3(0, T.standEye, 6);
+    // Placeholder only. `init()` calls `_applySpawn()`, which puts the player at the build site
+    // (GAME_DESIGN §17) derived from Terrain.buildSiteCenter. Nothing should read this before init.
+    this.position = new THREE.Vector3(SPAWN_FALLBACK.x, 0, SPAWN_FALLBACK.z);
+    this.eyePosition = new THREE.Vector3(SPAWN_FALLBACK.x, T.standEye, SPAWN_FALLBACK.z);
     this.velocity = new THREE.Vector3();
 
     /** Unit forward direction the player is AIMING (not the lagged render view). */
@@ -473,8 +495,6 @@ export class Player {
 
     this._dropHeld = 0;
     this._setDownHeld = 0;
-    this._lanternHeld = 0;
-    this._lanternHooded = false;
     this._interactHeldAtRelease = 0;
     this._surfaceTick = 0;
 
@@ -513,6 +533,9 @@ export class Player {
     this._tremorPitch.calibrate();
 
     if (ctx?.scene) ctx.scene.add(this.handAnchor);
+
+    // Stand the player in front of the chalked plot before anything samples the ground.
+    this._applySpawn();
 
     // Start on the ground wherever the terrain actually is.
     const h = this._groundHeight(this.position.x, this.position.z);
@@ -566,6 +589,46 @@ export class Player {
       };
       canvas.addEventListener('click', this._onCanvasClick);
     }
+  }
+
+  /**
+   * GAME_DESIGN §17 — put the player at the build site, looking at the chalked layout.
+   *
+   * Derived from `Terrain.buildSiteCenter` so there is exactly one authority on where the plot
+   * is. If Terrain is missing (a stripped harness, a failed module) we fall back to the old
+   * origin constant rather than crashing — the game is still playable, just not the §17 opening.
+   * Ground height is applied by the caller, which runs after this.
+   */
+  _applySpawn() {
+    let x = SPAWN_FALLBACK.x;
+    let z = SPAWN_FALLBACK.z;
+    let yaw = SPAWN_FALLBACK.yaw;
+
+    const c = this._sys('Terrain')?.buildSiteCenter;
+    if (c && Number.isFinite(c.x) && Number.isFinite(c.z)) {
+      x = c.x + SPAWN_OFFSET.x;
+      z = c.z + SPAWN_OFFSET.z;
+      yaw = yawFromDir(c.x - x, c.z - z);   // face the centre of the plot
+      Log.debug(
+        `Player spawn: (${x.toFixed(1)}, ${z.toFixed(1)}), ` +
+        `${Math.hypot(SPAWN_OFFSET.x, SPAWN_OFFSET.z).toFixed(1)} m from the build site, ` +
+        `yaw ${(yaw * 180 / Math.PI).toFixed(1)}°.`
+      );
+    } else {
+      Log.warn('Player: no Terrain.buildSiteCenter — spawning at the fallback origin (GAME_DESIGN §17 opening will not read).');
+    }
+
+    this.position.set(x, this.position.y, z);
+    this.velocity.set(0, 0, 0);
+
+    this.aimYaw = this.viewYaw = this.bodyYaw = yaw;
+    this.aimPitch = this.viewPitch = SPAWN_PITCH;
+    this._aimYawVel = this._aimPitchVel = 0;
+    this._viewYawVel = this._viewPitchVel = 0;
+    this._bodyYawVel = 0;
+
+    const cp = Math.cos(this.aimPitch);
+    this.lookAt.set(-Math.sin(yaw) * cp, Math.sin(this.aimPitch), -Math.cos(yaw) * cp);
   }
 
   _resetForNight() {
@@ -1140,19 +1203,12 @@ export class Player {
     this._setDownHeld = this._holdVerb(input, 'throwPart', dt, this._setDownHeld, false);
 
     // ---------------------------------------------------------------- lantern (GAME_DESIGN §4.1)
-    const lanternDown = !!input.isDown?.('lantern');
-    if (lanternDown) {
-      this._lanternHeld += dt;
-      if (this._lanternHeld >= T.lanternHoldTime && !this._lanternHooded) {
-        this._lanternHooded = true;
-        this._setLanternHood(true);
-      }
-    }
-    if (input.wasReleased?.('lantern')) {
-      if (this._lanternHooded) { this._lanternHooded = false; this._setLanternHood(false); }
-      else if (this._lanternHeld < T.lanternHoldTime) this._toggleLantern();
-      this._lanternHeld = 0;
-    }
+    // NOT HANDLED HERE. `Flashlight` reads the `lantern` action itself (Flashlight._readInput):
+    // it tracks its own key-down edge, discriminates tap from hold against TUNING.tapSeconds,
+    // toggles on a tap release and hoods/unhoods on a hold. Player used to do the same thing,
+    // so one 140 ms tap of F ran toggle() TWICE in the same frame — ignite and douse at an
+    // identical performance.now(), lantern ending off. Hooding survived only because setHood()
+    // is idempotent. One owner per input. Do not re-add a lantern branch to this method.
   }
 
   /**
@@ -1173,25 +1229,6 @@ export class Player {
       held = 0;
     }
     return held;
-  }
-
-  _toggleLantern() {
-    const fl = this._sys('Flashlight');
-    if (!fl) return;
-    try {
-      if (typeof fl.toggle === 'function') fl.toggle();
-      else if ('on' in fl) fl.on = !fl.on;
-    } catch (e) { Log.once('player:lantern', 'Player: Flashlight.toggle() threw.', e); }
-  }
-
-  _setLanternHood(hooded) {
-    const fl = this._sys('Flashlight');
-    if (!fl) return;
-    try {
-      if (typeof fl.setHood === 'function') fl.setHood(hooded);
-      else if ('hoodLevel' in fl) fl.hoodLevel = hooded ? 1 : 0;
-      else if ('hooded' in fl) fl.hooded = hooded;
-    } catch (e) { Log.once('player:hood', 'Player: Flashlight hood call threw.', e); }
   }
 
   // ===============================================================================================

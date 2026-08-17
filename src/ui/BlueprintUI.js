@@ -950,7 +950,10 @@ function drawBlood(c, w, h, scale, night, seed) {
  * page number does not. Wordless, and it does two jobs.
  */
 function drawProgressBar(c, pw, index, total, o) {
-  const n = Math.max(1, total);
+  // Twelve cells is the widest the bottom margin can carry at 1U each; a longer night collapses to
+  // twelve and the filled count scales, which still reads as "how much of tonight is left".
+  const n = clamp(Math.max(1, total), 1, 12);
+  if (total > n) index = Math.round((index / Math.max(1, total - 1)) * (n - 1));
   const cell = U * 0.86, gap = U * 0.30;
   const wTot = n * cell + (n - 1) * gap;
   const x0 = (pw - wTot) / 2;
@@ -977,7 +980,9 @@ function drawProgressBar(c, pw, index, total, o) {
 function drawFastenerRing(c, pw, held, required, o) {
   const n = clamp(Math.round(required), 0, 12);
   if (n <= 0) return;
-  const y = PAGE.H - PAGE.margin - U * 0.4;
+  // One line above the progress bar, so the two gauges never share a baseline (the bar can run to
+  // twelve cells on a four-page night and the ring to twelve dots on a full pocket).
+  const y = PAGE.H - PAGE.margin - U * 2.2;
   const x = PAGE.margin + U * 1.2;
   bagCount(c, x, y - U * 0.6, U * 0.9, 0, { hand: o.hand, seed: o.seed + 61 });
   const r = U * 0.30, gap = U * 0.86;
@@ -1660,9 +1665,12 @@ function drawMark(c, mark, pw, ph, o) {
  * ════════════════════════════════════════════════════════════════════════════════════════ */
 
 const CSS = `
-.scb-root{position:fixed;inset:0;pointer-events:none;z-index:60;overflow:hidden;
-  perspective:1500px;perspective-origin:50% 46%;opacity:0;
-  transition:opacity 140ms linear;contain:strict}
+/* NB: 'contain:strict' implies size containment, and Chrome then resolves this fixed inset:0 box
+   to 0×0 — which puts the sheet off the top-left corner of the screen with a 0×0 hit box and no
+   visible page at all. Layout/paint/style containment gives the same isolation without the trap. */
+.scb-root{position:fixed;inset:0;width:100vw;height:100vh;pointer-events:none;z-index:60;
+  overflow:hidden;perspective:1500px;perspective-origin:50% 46%;opacity:0;
+  transition:opacity 140ms linear;contain:layout paint style}
 .scb-root[data-vis="1"]{opacity:1}
 .scb-fold{position:absolute;left:50%;top:46%;transform-style:preserve-3d;
   will-change:transform;transform-origin:50% 100%}
@@ -1743,6 +1751,7 @@ export class BlueprintUI {
     this._master = null;         // composite + annotations, sliced to the leaves
     this._artCache = new Map();  // index -> canvas. STORY §3.4 caps this at 3.
     this._fibre = null;
+    this._probe = null;          // tiny downsample used to tell a drawn page from an empty one
 
     // --- geometry
     this._sheetW = 0;
@@ -1784,8 +1793,11 @@ export class BlueprintUI {
       this._fibre = bakeFibreTile(this._rand);
       Log.debug('BlueprintUI ready.');
     } catch (e) {
-      // A manual that cannot draw must still not take the game down.
-      Log.once('bpui:init', 'BlueprintUI: init failed — the manual will be inert.', e);
+      // A manual that cannot draw must still not take the game down — but a SILENT catch here is
+      // how this module lost `_layout`, `_bake`, `update` and `resize` for a whole build. If init
+      // ever throws again it is going to say so, at error level, with the stack.
+      Log.error('BlueprintUI: init failed — the manual will be inert.', e);
+      Log.error('BlueprintUI init stack:', e?.stack ?? '(no stack)');
     }
   }
 
@@ -1931,13 +1943,24 @@ export class BlueprintUI {
     keep(b.on('story:beat', (p) => this._onBeat(p)));
     keep(b.on('settings:changed', (p) => this._onSettings(p)));
 
-    // Page turns on keys Input does not name as actions. `input:key` is canonical and public, so
-    // this never reaches into Input's private sets.
+    // The toggle, and the page turns. `input:key` is canonical and public, so this never reaches
+    // into Input's private sets.
+    //
+    // HUD also owns this key (ARCHITECTURE §5) and emits `ui:blueprint-open/close` — but only
+    // after asking us what state we think we are in, and `input:key` is dispatched from the DOM
+    // event, which is strictly before HUD's next update(). So by the time HUD polls
+    // `wasPressed('blueprint')` we have already toggled, it agrees with us, and it does not emit.
+    // If we are disabled or absent, it emits and the two handlers above catch it. Either way the
+    // page toggles exactly once.
     keep(b.on('input:key', (p) => {
-      if (!p?.down || this._phase === 'closed' || this._phase === 'closing') return;
-      if (p.code === 'ArrowRight' || p.code === 'BracketRight') this.nextPanel();
-      else if (p.code === 'ArrowLeft' || p.code === 'BracketLeft') this.prevPanel();
-      else if (p.code === 'Escape') this.close();
+      if (!p?.down) return;
+      const code = p.code;
+      // Input.BINDINGS.blueprint === ['Tab', 'KeyB'].
+      if (code === 'Tab' || code === 'KeyB') { this.toggle(); return; }
+      if (this._phase === 'closed' || this._phase === 'closing') return;
+      if (code === 'ArrowRight' || code === 'BracketRight') this.nextPanel();
+      else if (code === 'ArrowLeft' || code === 'BracketLeft') this.prevPanel();
+      else if (code === 'Escape') this.close();
     }));
   }
 
@@ -2189,6 +2212,562 @@ export class BlueprintUI {
     if (this.isOpen) this.close();
     this._artCache.clear();
     this._bakedFor = -1;
+  }
+
+  /* ══════════════════════════════════════════════════════════════════════════════════════
+   * 9. GEOMETRY — the sheet has to have a size before anything can be drawn on it
+   *
+   * The three .scb-face canvases are created by _buildDom() at the HTML default 300×150. Until
+   * this runs they are 300×150 with a 0×0 CSS box, which is exactly what "the manual opens and
+   * nothing is there" looks like from the outside.
+   * ════════════════════════════════════════════════════════════════════════════════════ */
+
+  /**
+   * ART §13.1 — page height 62% of the viewport, centred, max-width 44rem, ratio 1:1.414.
+   * Sizes: the sheet box, the drop shadow, the three leaf boxes, the three leaf canvases, and the
+   * master/composite backing stores. Idempotent; safe to call every resize.
+   */
+  _layout() {
+    if (!this.root || this._leaves.length < 3) return false;
+
+    const vw = Math.max(320, this.ctx?.width || globalThis.innerWidth || 1280);
+    const vh = Math.max(240, this.ctx?.height || globalThis.innerHeight || 720);
+
+    let h = Math.round(vh * 0.62);
+    let w = Math.round(h * (PAGE.W / PAGE.H));
+    const maxW = Math.min(704, Math.round(vw * 0.88));    // 44rem, and never wider than the window
+    if (w > maxW) { w = maxW; h = Math.round(w * (PAGE.H / PAGE.W)); }
+    if (h > vh * 0.94) { h = Math.round(vh * 0.94); w = Math.round(h * (PAGE.W / PAGE.H)); }
+    w = Math.max(120, w); h = Math.max(170, h);
+
+    // ART §13 draws the manual at 2× DPR. This is a 2D overlay, not part of the WebGL frame
+    // budget, so it follows the display rather than `dprCap` (which exists to protect fill rate);
+    // `quality:'low'` is the one tier that drops it to 1×.
+    let q = 'ultra';
+    try { q = String(this.settings?.get?.('quality') ?? 'ultra'); } catch { /* default */ }
+    const dev = Math.max(1, Number(globalThis.devicePixelRatio) || 1);
+    const dpr = clamp(Math.min(q === 'low' ? 1 : 2, dev), 1, 2);
+
+    const mw = Math.max(8, Math.round(w * dpr));
+    const mh = Math.max(8, Math.round(h * dpr));
+    // Integer cuts so the three leaf slices tile the master exactly — a rounding error here is a
+    // 1 px seam of world showing through a fold, every frame.
+    const cut1 = Math.round(mw / 3);
+    const cut2 = Math.round((mw * 2) / 3);
+    const cuts = [0, cut1, cut2, mw];
+
+    const changed = (mw !== this._bakedW) || (mh !== (this._master?.height ?? -1));
+
+    // The root is `position:fixed;inset:0`, but a viewport that reports 0×0 (an offscreen or
+    // not-yet-laid-out tab, which is exactly the case in the screenshot harness) collapses it and
+    // takes the whole sheet off the top-left corner with it. `ctx.width/height` is the size the
+    // renderer actually drew at, so drive the box and the fold's centre from that instead of from
+    // percentages of a box we cannot trust.
+    this.root.style.width = `${vw}px`;
+    this.root.style.height = `${vh}px`;
+    if (this._fold) {
+      this._fold.style.left = `${Math.round(vw / 2)}px`;
+      this._fold.style.top = `${Math.round(vh * 0.46)}px`;
+    }
+    if (this._sheet) {
+      this._sheet.style.width = `${mw / dpr}px`;
+      this._sheet.style.height = `${mh / dpr}px`;
+    }
+    if (this._shadow) {
+      this._shadow.style.width = `${mw / dpr}px`;
+      this._shadow.style.height = `${mh / dpr}px`;
+    }
+
+    const origins = ['100% 50%', '50% 50%', '0% 50%'];   // hinge axes: the two creases
+    for (let i = 0; i < 3; i++) {
+      const lf = this._leaves[i];
+      const sx0 = cuts[i], sx1 = cuts[i + 1];
+      const sw = Math.max(1, sx1 - sx0);
+      lf.x0 = sx0;
+      lf.x1 = sx1;
+      lf.el.style.left = `${sx0 / dpr}px`;
+      lf.el.style.width = `${sw / dpr}px`;
+      lf.el.style.height = `${mh / dpr}px`;
+      lf.el.style.transformOrigin = origins[i];
+      if (lf.canvas.width !== sw) lf.canvas.width = sw;
+      if (lf.canvas.height !== mh) lf.canvas.height = mh;
+      lf.canvas.style.width = '100%';
+      lf.canvas.style.height = '100%';
+    }
+
+    this._sheetW = w;
+    this._sheetH = h;
+    this._pxScale = dpr;
+    this._pageScale = mh / PAGE.H;
+
+    if (changed) { this._bakedFor = -1; this._artCache.clear(); }
+    if (this._phase === 'closed') this._setPose('closed', 0);
+    return true;
+  }
+
+  /**
+   * ART §13.8's unfold, as two CSS transitions and nothing per-frame. `ms === 0` snaps.
+   * @param {'closed'|'open'} pose
+   */
+  _setPose(pose, ms) {
+    const open = pose === 'open';
+    const d = Math.max(0, ms | 0);
+    const ease = open ? 'cubic-bezier(0.16,1,0.30,1)' : 'cubic-bezier(0.45,0,0.85,0.55)';
+    const tr = d > 0 ? `transform ${d}ms ${ease}` : 'none';
+
+    if (this._fold) {
+      this._fold.style.transition = tr;
+      this._fold.style.transform = open
+        ? 'translateZ(0px) rotateX(0deg) scale(1)'
+        : 'translateZ(-140px) rotateX(54deg) scale(0.90)';
+    }
+    // Left leaf hinges on the 33.3% crease, right leaf on the 66.6% crease. The centre leaf never
+    // moves — it is the panel you are actually reading.
+    const angles = open ? [0, 0, 0] : [-112, 0, 112];
+    for (let i = 0; i < this._leaves.length; i++) {
+      const lf = this._leaves[i];
+      lf.el.style.transition = tr;
+      lf.el.style.transform = `rotateY(${angles[i]}deg)`;
+      if (lf.shade) lf.shade.style.opacity = open ? '1' : '0';
+    }
+    if (this._shadow) this._shadow.style.opacity = open ? '1' : '0';
+  }
+
+  _reducedMotion() {
+    try {
+      if (this.settings?.get?.('reducedMotion')) return true;
+      return !!globalThis.matchMedia?.('(prefers-reduced-motion: reduce)')?.matches;
+    } catch { return false; }
+  }
+
+  /* ── the systems this one leans on, all optional ───────────────────────────────────── */
+
+  _blueprint() {
+    try { return this.ctx?.systems?.get?.('Blueprint') ?? null; } catch { return null; }
+  }
+
+  _night() { return clamp(Math.round(this.state?.night ?? this.ctx?.state?.night ?? 1), 1, 7); }
+
+  /** GAME_DESIGN §16.2 — the accent is the only hue on the page, so it is the only one to swap. */
+  _accent() {
+    let cb = 'none';
+    try { cb = String(this.settings?.get?.('colorblind') ?? 'none'); } catch { /* default */ }
+    return ACCENT_CB[cb] ?? PAL.red;
+  }
+
+  /** GAME_DESIGN §16.2 — `manualContrast` raises the stock luminance. */
+  _paperColour() {
+    let hi = false;
+    try { hi = !!this.settings?.get?.('manualContrast'); } catch { /* default */ }
+    return hi ? PAL.paperLit : PAL.paper;
+  }
+
+  /** GAME_DESIGN §6.6 — held vs required, straight off BuildSystem's pocket. */
+  _fasteners() {
+    let held = 0, req = 0;
+    try {
+      const bs = this.ctx?.systems?.get?.('BuildSystem') ?? null;
+      held = Math.max(0, Math.round(Number(bs?.pocket?.fasteners) || 0));
+      // TODO(api): BuildSystem has no published per-stage fastener requirement yet. Until it does,
+      // the ring shows the pocket against the §6.6 cap, which is honest and never lies upward.
+      const r = Number(bs?.stageFastenersRequired ?? bs?.fastenersRequired);
+      req = Number.isFinite(r) && r > 0 ? Math.round(r) : (held > 0 ? clamp(held + 2, 4, 12) : 0);
+    } catch { /* the manual simply has nothing to say */ }
+    return { held: clamp(held, 0, 12), req: clamp(req, 0, 12) };
+  }
+
+  /* ══════════════════════════════════════════════════════════════════════════════════════
+   * 10. THE BAKE — art, then paper furniture, then annotations, then three slices
+   * ════════════════════════════════════════════════════════════════════════════════════ */
+
+  /**
+   * Draw page `index` all the way to the three leaf canvases. Runs entirely inside the 900 ms
+   * hand-wipe, which is the one piece of engineering luck in this file.
+   * @returns {boolean} true when pixels landed on the leaves
+   */
+  _bake(index) {
+    if (this._disposed || !this.root || this._leaves.length < 3) return false;
+    if (this._sheetW <= 0 || this._pageScale <= 0) this._layout();
+    const dpr = this._pxScale || 1;
+    const mw = Math.max(8, Math.round(this._sheetW * dpr));
+    const mh = Math.max(8, Math.round(this._sheetH * dpr));
+    if (!(mw > 8 && mh > 8)) return false;
+
+    const idx = clamp(Math.round(index) || 0, 0, Math.max(0, this.panelCount - 1));
+
+    // ── 1. the art layer, cached per page. STORY §3.4 caps the cache at three.
+    let art = this._artCache.get(idx);
+    if (!art || art.width !== mw || art.height !== mh) {
+      art = makeCanvas(mw, mh);
+      if (!art) return false;
+      const ac = art.getContext('2d', { alpha: false, willReadFrequently: false });
+      if (!ac) return false;
+      this._paintArt(ac, mw, mh, idx);
+      this._artCache.set(idx, art);
+      while (this._artCache.size > 3) {
+        const k = this._artCache.keys().next().value;
+        if (k === idx) break;
+        this._artCache.delete(k);
+      }
+    }
+    this._art = art;
+
+    // ── 2. the composite: the art plus the paper's biography, clipped to a real sheet edge.
+    if (!this._composite || this._composite.width !== mw || this._composite.height !== mh) {
+      this._composite = makeCanvas(mw, mh);
+    }
+    const cc = this._composite?.getContext('2d', { alpha: true, willReadFrequently: false });
+    if (!cc) return false;
+    cc.setTransform(1, 0, 0, 1, 0, 0);
+    cc.globalAlpha = 1;
+    cc.globalCompositeOperation = 'source-over';
+    cc.clearRect(0, 0, mw, mh);
+    cc.drawImage(art, 0, 0, mw, mh);
+    this._paintFurniture(cc, mw, mh, idx);
+
+    // The irregular sheet edge. The creases are internal to the master so they stay dead straight.
+    cc.save();
+    cc.globalCompositeOperation = 'destination-in';
+    cc.fillStyle = '#ffffff';
+    paperPath(cc, mw, mh, { top: true, right: true, bottom: true, left: true },
+      hashInt(this._seed ^ (this._night() * 7919)), NIGHT_PAPER[this._night()].wear);
+    cc.fill();
+    cc.restore();
+
+    this._bakedFor = idx;
+    this._bakedW = mw;
+    this._marksDirty = true;
+    this._composeAnnotations();
+    return true;
+  }
+
+  /**
+   * The diagram itself. `Blueprint` owns this drawing; we only own the paper around it. If it is
+   * not in the build — or it hands back a page with no ink on it — the fallback generator in §6
+   * draws the night instead, so the manual is never blank.
+   */
+  _paintArt(c, mw, mh, idx) {
+    const paper = this._paperColour();
+    c.setTransform(1, 0, 0, 1, 0, 0);
+    c.globalAlpha = 1;
+    c.globalCompositeOperation = 'source-over';
+    c.fillStyle = paper;
+    c.fillRect(0, 0, mw, mh);
+
+    let drawn = false;
+    const bp = this._blueprint();
+    if (bp && typeof bp.renderPanel === 'function') {
+      try { drawn = bp.renderPanel(idx, c, mw, mh) === true; }
+      catch (e) { Log.once('bpui:renderPanel', 'BlueprintUI: Blueprint.renderPanel threw.', e); drawn = false; }
+      if (drawn && !this._hasInk(c, mw, mh)) {
+        Log.once('bpui:emptypanel', 'BlueprintUI: Blueprint.renderPanel produced an empty page — using the fallback manual.');
+        drawn = false;
+      }
+    }
+    if (drawn) return;
+
+    // Fallback. Page units, centred, letterboxed by the sheet's own A4 ratio (so never letterboxed).
+    c.setTransform(1, 0, 0, 1, 0, 0);
+    c.fillStyle = paper;
+    c.fillRect(0, 0, mw, mh);
+    const s = mh / PAGE.H;
+    c.save();
+    c.translate((mw - PAGE.W * s) / 2, 0);
+    c.scale(s, s);
+    try {
+      fallbackPage(c, PAGE.W, PAGE.H, this._night(), idx, {
+        seed: this._seed, accent: this._accent(), paper,
+      });
+    } catch (e) {
+      Log.once('bpui:fallback', 'BlueprintUI: fallback page failed.', e);
+    }
+    c.restore();
+  }
+
+  /**
+   * Is there actually a drawing on this canvas? Downsample to a probe and count ink. ART §13.5's
+   * lightest page is 4.4% coverage; anything under 0.35% is a page that did not get drawn.
+   */
+  _hasInk(src, mw, mh) {
+    const pw = 200, ph = Math.max(8, Math.round((mh / mw) * 200));
+    if (!this._probe || this._probe.height !== ph) this._probe = makeCanvas(pw, ph);
+    const p = this._probe;
+    if (!p) return true;
+    const pc = p.getContext('2d', { alpha: false, willReadFrequently: true });
+    if (!pc) return true;
+    try {
+      pc.setTransform(1, 0, 0, 1, 0, 0);
+      pc.fillStyle = '#ffffff';
+      pc.fillRect(0, 0, pw, ph);
+      pc.drawImage(src.canvas ?? src, 0, 0, pw, ph);
+      const d = pc.getImageData(0, 0, pw, ph).data;
+      let dark = 0;
+      for (let i = 0; i < d.length; i += 4) {
+        if (d[i] + d[i + 1] + d[i + 2] < 560) dark++;
+      }
+      return dark >= Math.round(pw * ph * 0.0035);
+    } catch { return true; }
+  }
+
+  /**
+   * The paper's biography: fibre, the two creases, the photocopy generation, the damp, the blood,
+   * the fastener ring and the progress bar. None of this is content and all of it is the manual.
+   */
+  _paintFurniture(c, mw, mh, idx) {
+    const n = this._night();
+    const paper = NIGHT_PAPER[n];
+    const scale = mh / PAGE.H;
+    const seed = hashInt(this._seed ^ Math.imul(n, 0x9e3779b1) ^ (idx * 7919));
+
+    // Fibre, three octaves, ±1.8% luminance. One 128² tile, patterned.
+    if (this._fibre) {
+      try {
+        const pat = c.createPattern(this._fibre, 'repeat');
+        if (pat) {
+          c.save();
+          c.globalAlpha = 0.05;
+          c.fillStyle = pat;
+          c.fillRect(0, 0, mw, mh);
+          c.restore();
+        }
+      } catch { /* pattern from an OffscreenCanvas is not universal; the page survives without it */ }
+    }
+
+    // ART §13.1 — two vertical creases, at 33.3% and 66.6%, and they catch light.
+    const lit = 1;
+    drawCrease(c, mw / 3, mh, scale, paper.creaseWear, lit);
+    drawCrease(c, (mw * 2) / 3, mh, scale, paper.creaseWear, lit);
+
+    drawEdgeDarkening(c, mw, mh, scale, paper.edge);
+    drawBlood(c, mw, mh, scale, n, seed + 77);
+
+    // The two wordless gauges, in page units.
+    const hand = NIGHT_PAPER[n].hand === 'ansel' ? HANDS.ansel : HANDS.marit;
+    c.save();
+    c.translate((mw - PAGE.W * scale) / 2, 0);
+    c.scale(scale, scale);
+    try {
+      drawProgressBar(c, PAGE.W, idx, Math.max(1, this.panelCount), { hand, seed: seed + 301 });
+      const f = this._fasteners();
+      if (f.req > 0) drawFastenerRing(c, PAGE.W, f.held, f.req, { hand, seed: seed + 401 });
+    } catch (e) {
+      Log.once('bpui:gauges', 'BlueprintUI: gauge draw failed.', e);
+    }
+    c.restore();
+  }
+
+  /**
+   * master = composite + the annotation layer, then sliced to the three leaves. Cheap enough to
+   * run on a `build:place`, which is exactly when it has to.
+   */
+  _composeAnnotations() {
+    const src = this._composite;
+    if (!src) return false;
+    const mw = src.width, mh = src.height;
+    if (!this._master || this._master.width !== mw || this._master.height !== mh) {
+      this._master = makeCanvas(mw, mh);
+    }
+    const c = this._master?.getContext('2d', { alpha: true, willReadFrequently: false });
+    if (!c) return false;
+    c.setTransform(1, 0, 0, 1, 0, 0);
+    c.globalAlpha = 1;
+    c.globalCompositeOperation = 'source-over';
+    c.clearRect(0, 0, mw, mh);
+    c.drawImage(src, 0, 0);
+
+    const scale = mh / PAGE.H;
+    const pw = mw / scale;
+    const accent = this._accent();
+    c.save();
+    c.scale(scale, scale);
+    for (const m of this._marks.values()) {
+      try { drawMark(c, m, pw, PAGE.H, { accent, hand: HANDS.ansel }); }
+      catch (e) { Log.once('bpui:mark', 'BlueprintUI: annotation failed.', e); }
+    }
+    // STORY §3.4's Ending A: one red diagonal, revealed along its own stroke path. The only
+    // judgement the manual ever passes, and the only mark it ever aims at the player.
+    if (this._endingActive && this._endingDiagonal > 0.001) {
+      const t = clamp01(this._endingDiagonal);
+      ink(c, [PAGE.margin, PAGE.margin,
+        PAGE.margin + (pw - PAGE.margin * 2) * t,
+        PAGE.margin + (PAGE.H - PAGE.margin * 2) * t],
+      { weight: W.heavy, color: accent, hand: HANDS.ansel, seed: 0x1d1a });
+    }
+    c.restore();
+
+    this._slice();
+    this._marksDirty = false;
+    return true;
+  }
+
+  /** Copy the master into the three leaf canvases, 1:1, no scaling, no seam. */
+  _slice() {
+    const m = this._master;
+    if (!m) return;
+    for (let i = 0; i < this._leaves.length; i++) {
+      const lf = this._leaves[i];
+      const c = lf.ctx;
+      if (!c) continue;
+      const sw = Math.max(1, lf.x1 - lf.x0);
+      if (lf.canvas.width !== sw || lf.canvas.height !== m.height) {
+        lf.canvas.width = sw;
+        lf.canvas.height = m.height;
+      }
+      c.setTransform(1, 0, 0, 1, 0, 0);
+      c.globalAlpha = 1;
+      c.globalCompositeOperation = 'source-over';
+      c.clearRect(0, 0, sw, m.height);
+      c.drawImage(m, lf.x0, 0, sw, m.height, 0, 0, sw, m.height);
+    }
+  }
+
+  /* ══════════════════════════════════════════════════════════════════════════════════════
+   * 11. THE FRAME — ARCHITECTURE §3's system shape
+   * ════════════════════════════════════════════════════════════════════════════════════ */
+
+  /**
+   * The phase machine, the bounce light, the fuse gauge. No allocation on the steady-state path:
+   * the only objects made here are event payloads on a phase transition.
+   */
+  update(dt, elapsed) {
+    if (this._disposed) return;
+    const ms = clamp(Number(dt) || 0, 0, 0.1) * 1000;
+    this._t += ms;
+
+    switch (this._phase) {
+      case 'wipe':
+        // GAME_DESIGN §4.4 — 900 ms, never skippable. The bake already happened inside it.
+        if (this._t >= WIPE_MS) {
+          this._phase = 'unfold';
+          this._t = 0;
+          if (this._bakedFor < 0) { try { this._bake(this._pageIndex); } catch (e) { Log.once('bpui:latebake', 'BlueprintUI: late bake failed.', e); } }
+          if (this.root) this.root.dataset.vis = '1';
+          this._setPose('open', this._reducedMotion() ? 0 : UNFOLD_MS);
+          this._lightTarget = 1;
+          this.bus?.emit('audio:sfx', { id: 'ui.page', volume: 1, rate: 0.92 });
+        }
+        break;
+
+      case 'unfold':
+        if (this._t >= UNFOLD_MS) { this._phase = 'open'; this._t = 0; }
+        break;
+
+      case 'open':
+        this._lightTarget = 1;
+        if (this._marksDirty) this._composeAnnotations();
+        if (this._endingActive && this._endingDiagonal < 1) {
+          this._endingDiagonal = clamp01(this._endingDiagonal + ms / 700);
+          this._marksDirty = true;
+        }
+        this._pollT += ms;
+        if (this._pollT >= 125) { this._pollT = 0; this._pollFuse(); }
+        break;
+
+      case 'closing':
+        if (this._t >= (this._reducedMotion() ? 200 : CLOSE_MS)) {
+          this._phase = 'closed';
+          this._t = 0;
+          if (this.root) this.root.dataset.vis = '0';
+        }
+        break;
+
+      default:
+        this._lightTarget = 0;
+        break;
+    }
+
+    // ART §13.8 — the bounce rides in over the unfold and dies over 0.12 s. Never a visibility
+    // toggle: Three recompiles every program when the scene's light count changes.
+    const tgt = this._lightTarget;
+    // Linear, not exponential: §13.8 gives the fall an exact duration (0.12 s) and an exponential
+    // never actually arrives. Up over the unfold, down over LIGHT_OUT_MS, and it lands on zero.
+    const tau = tgt > this.illumination ? UNFOLD_MS : LIGHT_OUT_MS;
+    const step = tau > 0 ? ms / tau : 1;
+    this.illumination = tgt > this.illumination
+      ? Math.min(tgt, this.illumination + step)
+      : Math.max(tgt, this.illumination - step);
+    if (this.light) this.light.intensity = this.illumination * PAGE_LIGHT.intensity;
+
+    // TODO(api): Campers computes §9.2's `lum` itself and has no hook for a non-Flashlight source.
+    // `lumBonus` is published for it (and for anything else that wants the number); when Campers
+    // learns to add `ctx.systems.get('BlueprintUI')?.lumBonus`, reading costs a third of T3's
+    // warning, per LUM_BONUS's derivation. Nothing here reaches into Campers to do it for them.
+    const player = this.ctx?.systems?.get?.('Player') ?? null;
+    if (player && typeof player.setSpeedScale === 'function') {
+      const want = this.speedMultiplier;
+      if (want !== this._playerSpeedApplied) {
+        this._playerSpeedApplied = want;
+        try { player.setSpeedScale(want, 'blueprint'); } catch { /* degrade */ }
+      }
+    }
+    void elapsed;
+  }
+
+  /**
+   * GAME_DESIGN §9.6 — the page's trailing edge is the PROVOKE fuse gauge, the only timing UI in
+   * the game. Nothing publishes a fuse yet, so the bar stays hidden rather than lying.
+   */
+  _pollFuse() {
+    let f = 0;
+    try {
+      const s = this.ctx?.systems;
+      const c = s?.get?.('Campers') ?? null;
+      const nm = s?.get?.('NightManager') ?? null;
+      const v = Number(c?.provokeFuse ?? nm?.provokeFuse ?? nm?.fuse);
+      if (Number.isFinite(v)) f = clamp01(v);
+    } catch { /* no fuse in this build */ }
+    this._fuseFrac = f;
+    if (!this._fuse) return;
+    const shown = Math.round(f * 100);
+    if (shown === this._fuseShown) return;
+    this._fuseShown = shown;
+    this._fuse.style.height = `${shown}%`;
+    this._fuse.style.opacity = f > 0.001 ? '1' : '0';
+  }
+
+  resize(width, height) {
+    if (this._disposed || !this.root) return;
+    void width; void height;
+    this._layout();
+    this._bakedFor = -1;
+    this._artCache.clear();
+    if (this.isOpen) {
+      try { this._bake(this._pageIndex); }
+      catch (e) { Log.once('bpui:resizebake', 'BlueprintUI: resize bake failed.', e); }
+    }
+  }
+
+  dispose() {
+    if (this._disposed) return;
+    this._disposed = true;
+
+    for (const off of this._unsubs) { try { off(); } catch { /* ignore */ } }
+    this._unsubs.length = 0;
+    for (const t of this._timers) { try { clearTimeout(t); } catch { /* ignore */ } }
+    this._timers.length = 0;
+
+    if (this.light) {
+      if (this.light.parent) this.light.parent.remove(this.light);
+      try { this.light.dispose?.(); } catch { /* ignore */ }
+    }
+    if (this._lightTarget3?.parent) this._lightTarget3.parent.remove(this._lightTarget3);
+    this.light = null;
+    this._lightTarget3 = null;
+    this.lights.length = 0;
+    this.illumination = 0;
+
+    for (const lf of this._leaves) {
+      if (lf.canvas) { lf.canvas.width = 1; lf.canvas.height = 1; }
+    }
+    this._leaves.length = 0;
+    this._artCache.clear();
+    this._marks.clear();
+    this._art = this._composite = this._master = this._fibre = this._probe = null;
+
+    if (this.root?.parentNode) this.root.parentNode.removeChild(this.root);
+    if (this._style?.parentNode) this._style.parentNode.removeChild(this._style);
+    this.root = this._style = this._fold = this._sheet = this._shadow = this._fuse = null;
+    this._phase = 'closed';
   }
 
 }

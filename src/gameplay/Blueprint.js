@@ -401,30 +401,42 @@ function rayHitsConvex(planes, px, py, pz, eps) {
  * ════════════════════════════════════════════════════════════════════════════════════════ */
 
 const PART_TYPES = {
-  pier: { accepts: 'pier', mass: 34, cls: 'D', dims: [0.46, 0.42, 0.46], build: () => ({
-    solids: [makeTaper(0.46, 0.34, 0.42, 0.46)],
-    details: [[[-0.16, 0.21, 0.23], [0.16, 0.21, 0.23]]],
+  pier: { accepts: 'pier', mass: 34, cls: 'D', dims: [0.52, 0.40, 0.52], build: () => ({
+    solids: [makeTaper(0.52, 0.40, 0.40, 0.52)],
+    details: [[[-0.17, 0.20, 0.20], [0.17, 0.20, 0.20]]],
   }) },
-  beam: { accepts: 'beam', len: 3.2, mass: 62, cls: 'D', dims: [3.2, 0.14, 0.14], build: () => ({
-    solids: [makeBox(3.2, 0.14, 0.14, 'x')],
-    details: boltMarks(3.2, 0.071, 4),
+  beam: { accepts: 'beam', len: 3.2, mass: 62, cls: 'D', dims: [3.2, 0.22, 0.22], build: () => ({
+    solids: [makeBox(3.2, 0.22, 0.22, 'x')],
+    // The half-lap notch is cut on ONE end only. It is the whole of G1's failure mode, and it is
+    // the only mark on the page that says which way round a sill goes.
+    details: boltMarks(3.2, 0.111, 4).concat([
+      [[1.38, 0.111, -0.11], [1.38, 0.111, 0.11]],
+      [[1.38, 0.111, 0.11], [1.60, 0.111, 0.11]],
+      [[1.38, 0.0, -0.11], [1.38, 0.111, -0.11]],
+    ]),
   }) },
-  beamShort: { accepts: 'beam', len: 2.6, mass: 48, cls: 'D', dims: [2.6, 0.14, 0.14], build: () => ({
-    solids: [makeBox(2.6, 0.14, 0.14, 'x')],
-    details: boltMarks(2.6, 0.071, 3),
+  beamShort: { accepts: 'beam', len: 2.6, mass: 48, cls: 'D', dims: [2.6, 0.22, 0.22], build: () => ({
+    solids: [makeBox(2.6, 0.22, 0.22, 'x')],
+    details: boltMarks(2.6, 0.111, 3),
   }) },
-  post: { accepts: 'post', len: 2.4, mass: 41, cls: 'D', dims: [0.14, 2.4, 0.14], build: () => ({
-    solids: [makeBox(0.14, 2.4, 0.14, 'y')],
+  post: { accepts: 'post', len: 2.4, mass: 41, cls: 'D', dims: [0.18, 2.4, 0.18], build: () => ({
+    solids: [makeBox(0.18, 2.4, 0.18, 'y')],
     // Chamfered top — the only thing that tells you which way up it goes at 2.2 m by lantern.
-    details: [[[-0.07, 1.14, 0.07], [0.07, 1.20, 0.07]], [[-0.07, 1.14, -0.07], [0.07, 1.20, -0.07]]],
+    details: [[[-0.09, 1.14, 0.09], [0.09, 1.20, 0.09]], [[-0.09, 1.14, -0.09], [0.09, 1.20, -0.09]],
+      // The brace mortise, cut on two faces only: half the yaw candidates are wrong.
+      [[-0.09, 0.86, 0.09], [-0.09, 1.02, 0.09], [0.02, 1.02, 0.09], [0.02, 0.86, 0.09], [-0.09, 0.86, 0.09]]],
   }) },
-  joist: { accepts: 'joist', len: 2.6, mass: 24, cls: 'C', dims: [2.6, 0.235, 0.05], build: () => ({
-    solids: [makeBox(2.6, 0.235, 0.05, 'x')],
-    details: boltMarks(2.6, 0.026, 2),
+  stud: { accepts: 'post', len: 2.4, mass: 22, cls: 'C', dims: [0.09, 2.4, 0.14], build: () => ({
+    solids: [makeBox(0.09, 2.4, 0.14, 'y')],
+    details: [[[-0.045, 1.10, 0.07], [0.045, 1.10, 0.07]], [[-0.045, -1.10, 0.07], [0.045, -1.10, 0.07]]],
   }) },
-  truss: { accepts: 'truss', len: 4.0, mass: 55, cls: 'D', dims: [4.0, 1.15, 0.07], build: () => {
-    const span = 4.0, rise = 1.15, t = 0.09;
-    const solids = [makeBox(span, t, 0.07, 'x')];
+  joist: { accepts: 'joist', len: 3.2, mass: 24, cls: 'C', dims: [3.2, 0.24, 0.08], build: () => ({
+    solids: [makeBox(3.2, 0.24, 0.08, 'x')],
+    details: boltMarks(3.2, 0.041, 2),
+  }) },
+  truss: { accepts: 'truss', len: 4.0, mass: 55, cls: 'D', dims: [4.0, 1.10, 0.14], build: () => {
+    const span = 4.0, rise = 1.10, t = 0.14;
+    const solids = [makeBox(span, t, 0.09, 'x')];
     const half = span / 2;
     for (const sgn of [-1, 1]) {
       const len = Math.hypot(half, rise);
@@ -439,16 +451,44 @@ const PART_TYPES = {
       }
       solids.push(finaliseSolid(raf));
     }
-    solids.push(makeBox(t, rise, 0.07, 'y'));
-    for (let i = 0; i < solids[solids.length - 1].verts.length / 3; i++) {
-      solids[solids.length - 1].verts[i * 3 + 1] += rise / 2;
+    // King post.
+    const king = makeBox(0.09, rise, 0.09, 'y');
+    shift(king, 0, rise / 2, 0);
+    solids.push(king);
+    /*
+     * WEBBING. The keyart truss is not two rafters and a post — it is a fink, and the two
+     * diagonals are what make it read as a truss rather than a triangle at 90 px. Each web runs
+     * from the bottom chord at ±half/2 up to the rafter's midpoint.
+     */
+    for (const sgn of [-1, 1]) {
+      const ax = sgn * half * 0.50, ay = 0;
+      const bx = sgn * half * 0.50, by = rise * 0.50;
+      const wl = Math.hypot(bx - ax, by - ay) || 0.01;
+      const wang = Math.atan2(by - ay, bx - ax);
+      const web = makeBox(wl, 0.07, 0.07, 'x');
+      const wc = Math.cos(wang), ws = Math.sin(wang);
+      for (let i = 0; i < web.verts.length / 3; i++) {
+        const x = web.verts[i * 3], y = web.verts[i * 3 + 1];
+        web.verts[i * 3] = x * wc - y * ws + (ax + bx) / 2;
+        web.verts[i * 3 + 1] = x * ws + y * wc + (ay + by) / 2;
+      }
+      solids.push(finaliseSolid(web));
+      const dl = Math.hypot(sgn * half * 0.50, rise * 0.50);
+      const dang = Math.atan2(rise * 0.50, -sgn * half * 0.50);
+      const dia = makeBox(dl, 0.07, 0.07, 'x');
+      const dc = Math.cos(dang), ds = Math.sin(dang);
+      for (let i = 0; i < dia.verts.length / 3; i++) {
+        const x = dia.verts[i * 3], y = dia.verts[i * 3 + 1];
+        dia.verts[i * 3] = x * dc - y * ds + sgn * half * 0.25;
+        dia.verts[i * 3 + 1] = x * ds + y * dc + rise * 0.25;
+      }
+      solids.push(finaliseSolid(dia));
     }
-    finaliseSolid(solids[solids.length - 1]);
     return { solids, details: [] };
   } },
-  ridge: { accepts: 'ridge', len: 5.14, mass: 71, cls: 'D', dims: [5.14, 0.16, 0.16], build: () => ({
-    solids: [makeBox(5.14, 0.16, 0.16, 'x')],
-    details: boltMarks(5.14, 0.081, 6),
+  ridge: { accepts: 'ridge', len: 4.8, mass: 71, cls: 'D', dims: [4.8, 0.22, 0.30], build: () => ({
+    solids: [makeBox(4.8, 0.22, 0.30, 'x')],
+    details: boltMarks(4.8, 0.111, 6),
   }) },
   panel: { accepts: 'panel', mass: 33, cls: 'D', dims: [1.2, 2.4, 0.02], build: () => ({
     solids: [makeBox(1.2, 2.4, 0.02, 'y')],
@@ -585,7 +625,12 @@ export { PART_TYPES };
  * Script is absent. The footprint is STORY §4.2 landmark 1: 11.6 × 7.8 m, long axis E–W.
  * ════════════════════════════════════════════════════════════════════════════════════════ */
 
-const FOOT = { hx: 5.8, hz: 3.9, wall: 2.4, ridge: 4.1 };
+/*
+ * The cabin, in CabinSite's plot-local metres, verbatim from `src/world/CabinSite.js`'s `P`.
+ * The diagram is only a puzzle if these are the numbers the player is standing in front of.
+ * (v1 carried 11.6 x 7.8 — the *plot*, not the building — and drew a cabin nobody was building.)
+ */
+const FOOT = { hx: 3.20, hz: 1.60, wall: 2.40, deck: 0.62, plate: 3.09, ridge: 4.19 };
 
 /** Fallback night table — identical numbers to Script.nights, used when Script is missing. */
 const NIGHTS_FALLBACK = [
@@ -681,9 +726,74 @@ function articleNumber(rand, qty) {
 }
 
 /**
+ * CabinSite's `partId` is the member's ROLE ('PIER', 'STUD', 'CHAIR_LEG'), reused across every
+ * slot in a run. This maps that role onto the drawable solid in the part library above, so the
+ * lines on the page are the edges of the member the player is about to pick up.
+ */
+const SITE_PART_TYPE = Object.freeze({
+  PIER: 'pier', SILL: 'beam', POST: 'post', STUD: 'stud', BRACKET: 'bracket',
+  TRUSS: 'truss', RIDGE: 'ridge', PIN: 'fastener', BATTEN: 'batten', SHINGLE: 'shingle',
+  PANEL_N: 'wallNorth', PANEL: 'panel', DOOR: 'door', HINGE: 'hinge', SINK: 'sink',
+  FLUE: 'flue', DOORFRAME: 'doorframe', BOARD: 'board', JOIST: 'joist', SHIM: 'shim',
+  HEARTH: 'hearth', GUSSET: 'gusset', STAKE: 'stake',
+  CHAIR_LEG: 'chair', CHAIR_SEAT: 'chair', CHAIR_BACK: 'chair', CHAIR_ARM: 'chair',
+});
+
+/** Fallback when a role is unknown: pick a library part that accepts the same type. */
+const ACCEPTS_FALLBACK = Object.freeze({
+  pier: 'pier', beam: 'beam', post: 'post', joist: 'joist', truss: 'truss', ridge: 'ridge',
+  panel: 'panel', board: 'board', batten: 'batten', shingle: 'shingle', door: 'door',
+  fitting: 'sink', bracket: 'bracket', hinge: 'hinge', fastener: 'fastener', shim: 'shim',
+  chair: 'chair', stake: 'stake',
+});
+
+function siteTypeFor(m) {
+  const role = String(m?.partId ?? '').toUpperCase();
+  const byRole = SITE_PART_TYPE[role];
+  if (byRole && PART_TYPES[byRole]) return byRole;
+  const byAccepts = ACCEPTS_FALLBACK[m?.acceptsType ?? ''];
+  if (byAccepts && PART_TYPES[byAccepts]) return byAccepts;
+  return 'beam';
+}
+
+/** A finite unit 3-vector from CabinSite's `_dir` / `_out`, or null. */
+function normOf(v) {
+  if (!Array.isArray(v) || v.length < 3) return null;
+  const l = Math.hypot(v[0], v[1], v[2]);
+  if (!(l > 1e-6)) return null;
+  return [v[0] / l, v[1] / l, v[2] / l];
+}
+
+/**
+ * GAME_DESIGN §8.4 — `graphDepth` is the part's depth in the `requires` DAG, and it is what makes
+ * deeper parts fly further so the assembly order reads outward-in with no numbering at all.
+ */
+function computeGraphDepth(slots) {
+  const byId = new Map();
+  for (const s of slots) byId.set(s.id, s);
+  const seen = new Map();
+  const depth = (id, guard) => {
+    if (seen.has(id)) return seen.get(id);
+    if (guard.has(id)) return 0;              // a cycle in someone else's data is not our crash
+    guard.add(id);
+    const s = byId.get(id);
+    let d = 0;
+    if (s && Array.isArray(s.requires)) {
+      for (const r of s.requires) {
+        if (byId.has(r)) d = Math.max(d, 1 + depth(r, guard));
+      }
+    }
+    guard.delete(id);
+    seen.set(id, d);
+    return d;
+  };
+  for (const s of slots) s.graphDepth = Math.min(6, depth(s.id, new Set()));
+}
+
+/**
  * Slot layout. `CabinSite.js` owns the authoritative transforms; these are the diagram's own
- * plot-local metres and are offered as a proposal. If CabinSite publishes slots, forNight()
- * adopts its positions instead (see `_adoptCabinSite`).
+ * plot-local metres and are offered as a proposal used only when CabinSite is not in the build
+ * (headless tests, the golden-image tool). See `_slotsFromSite` for the real path.
  */
 function layoutNight(n, rand) {
   const slots = []; const parts = [];
@@ -1409,8 +1519,202 @@ function drawRoutedArrow(c, grid, ax, ay, bx, by, opt = {}) {
  * are the actual edges of the actual part, occluded by the actual geometry it will sit behind.
  * ════════════════════════════════════════════════════════════════════════════════════════ */
 
-const HLR_SAMPLES = 16;
+/**
+ * 4 mm. A point this far in front of a face counts as in front of it, which is what lets a
+ * solid hide its OWN back edges (true hidden-line removal, not a wireframe) without the faces it
+ * is flush against — a sill sitting on a pier — eating its silhouette.
+ */
 const HLR_EPS = 0.004;
+/** Far bound on the ray toward the viewer, in metres. The plot is 6.4 m across. */
+const HLR_FAR = 1e3;
+
+/* ── The BSP (GAME_DESIGN §8.3) ────────────────────────────────────────────────────────────
+ *
+ * §8.3: "Build a BSP tree of the stage's assembled hull, in figure space, once per stage. Each
+ * part's silhouette edges are clipped against the BSP."
+ *
+ * The tree partitions FIGURE SPACE PROJECTED — the (u,v) page plane — with axis-aligned splitting
+ * planes, median-split, straddlers duplicated into both children. That is the partition that
+ * matters: two solids can only occlude one another if their silhouettes overlap on the page, so
+ * a page-plane BSP is the one that actually rejects work. Depth is kept as the third coordinate
+ * and resolved exactly at the leaves.
+ *
+ * The clip itself is EXACT, not sampled. v1 took 16 samples along each edge and bisected the
+ * boundaries four times, which quantised every occlusion boundary to ~1/256 of an edge and drew
+ * visible stubs of hidden line at the joints. For a convex solid the hidden set of a segment is a
+ * single interval and it is computable in closed form — see `hiddenInterval`.
+ */
+const BSP_LEAF = 6;
+const BSP_MAX_DEPTH = 12;
+
+function bspBuild(items, depth) {
+  if (items.length <= BSP_LEAF || depth >= BSP_MAX_DEPTH) return { items };
+  let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+  for (const it of items) {
+    if (it.x0 < x0) x0 = it.x0; if (it.x1 > x1) x1 = it.x1;
+    if (it.y0 < y0) y0 = it.y0; if (it.y1 > y1) y1 = it.y1;
+  }
+  const axis = (x1 - x0) >= (y1 - y0) ? 0 : 1;
+  const centres = items.map((it) => (axis ? (it.y0 + it.y1) : (it.x0 + it.x1)) * 0.5);
+  centres.sort((a, b) => a - b);
+  const split = centres[centres.length >> 1];
+  const left = []; const right = [];
+  for (const it of items) {
+    const lo = axis ? it.y0 : it.x0;
+    const hi = axis ? it.y1 : it.x1;
+    if (hi <= split) left.push(it);
+    else if (lo >= split) right.push(it);
+    else { left.push(it); right.push(it); }
+  }
+  // A split that separates nothing is worse than a leaf.
+  if (!left.length || !right.length || left.length === items.length || right.length === items.length) {
+    return { items };
+  }
+  return { axis, split, left: bspBuild(left, depth + 1), right: bspBuild(right, depth + 1) };
+}
+
+/** Every occluding solid in the stage's assembled hull, indexed by page-plane silhouette. */
+function buildOccluderBSP(instances) {
+  const items = [];
+  for (const inst of instances) {
+    // G3: a part marked hidden is drawn dotted THROUGH the occluder, and never occludes.
+    if (inst.occlude === false || inst.dotted) continue;
+    for (const q of inst.solids) {
+      items.push({ q, inst, x0: q.sx0, y0: q.sy0, x1: q.sx1, y1: q.sy1, stamp: -1 });
+    }
+  }
+  return { root: bspBuild(items, 0), count: items.length };
+}
+
+let _bspStamp = 0;
+function bspQuery(node, x0, y0, x1, y1, stamp, out) {
+  if (!node) return out;
+  if (node.items) {
+    for (const it of node.items) {
+      if (it.stamp === stamp) continue;
+      if (x1 < it.x0 || x0 > it.x1 || y1 < it.y0 || y0 > it.y1) continue;
+      it.stamp = stamp;
+      out.push(it);
+    }
+    return out;
+  }
+  const lo = node.axis ? y0 : x0;
+  const hi = node.axis ? y1 : x1;
+  if (lo < node.split) bspQuery(node.left, x0, y0, x1, y1, stamp, out);
+  if (hi > node.split) bspQuery(node.right, x0, y0, x1, y1, stamp, out);
+  return out;
+}
+
+/* Scratch for the (s,t) polygon clip. Bake-time only; never touched from update(). */
+let _cpA = new Float64Array(64);
+let _cpB = new Float64Array(64);
+
+/**
+ * The exact interval of `s` ∈ [0,1] along A→B that is hidden behind convex solid `q`.
+ *
+ * A point P(s) is hidden iff the ray P(s) + t·view (t ≥ eps, toward the viewer) enters the solid.
+ * Each of the solid's half-spaces n·p ≤ d becomes one linear inequality in (s, t):
+ *
+ *     (n·(B−A))·s + (n·view)·t  ≤  d − n·A
+ *
+ * so the feasible (s,t) set is a convex polygon. Clip the rectangle [0,1] × [eps, FAR] against
+ * every half-space; the surviving polygon's s-extent IS the hidden interval, because the
+ * projection of a convex set onto an axis is a single interval. No sampling, no bisection.
+ *
+ * @returns {[number,number]|null}
+ */
+function hiddenInterval(q, ax, ay, az, bx, by, bz, eps) {
+  const dx = bx - ax, dy = by - ay, dz = bz - az;
+  const vx = PROJ.view[0], vy = PROJ.view[1], vz = PROJ.view[2];
+  let n = 4;
+  _cpA[0] = 0; _cpA[1] = eps;
+  _cpA[2] = 1; _cpA[3] = eps;
+  _cpA[4] = 1; _cpA[5] = HLR_FAR;
+  _cpA[6] = 0; _cpA[7] = HLR_FAR;
+  let src = _cpA, dst = _cpB;
+  const planes = q.planes;
+  for (let i = 0; i < planes.length; i++) {
+    const pl = planes[i];
+    const a = pl[0] * dx + pl[1] * dy + pl[2] * dz;
+    const b = pl[0] * vx + pl[1] * vy + pl[2] * vz;
+    const cc = pl[3] - (pl[0] * ax + pl[1] * ay + pl[2] * az);
+    let m = 0;
+    for (let k = 0; k < n; k++) {
+      const s0 = src[k * 2], t0 = src[k * 2 + 1];
+      const j = (k + 1) % n;
+      const s1 = src[j * 2], t1 = src[j * 2 + 1];
+      const f0 = a * s0 + b * t0 - cc;
+      const f1 = a * s1 + b * t1 - cc;
+      const in0 = f0 <= 1e-12, in1 = f1 <= 1e-12;
+      if (in0) { dst[m * 2] = s0; dst[m * 2 + 1] = t0; m++; }
+      if (in0 !== in1) {
+        const den = f0 - f1;
+        const u = Math.abs(den) < 1e-18 ? 0 : f0 / den;
+        dst[m * 2] = s0 + (s1 - s0) * u;
+        dst[m * 2 + 1] = t0 + (t1 - t0) * u;
+        m++;
+      }
+      if (m > 28) break;   // a convex clip cannot really reach this; the guard is for NaN input
+    }
+    n = m;
+    if (n < 3) return null;
+    const t = src; src = dst; dst = t;
+  }
+  let s0 = Infinity, s1 = -Infinity;
+  for (let k = 0; k < n; k++) {
+    const s = src[k * 2];
+    if (s < s0) s0 = s;
+    if (s > s1) s1 = s;
+  }
+  if (!(s1 > s0 + 1e-6)) return null;
+  return [Math.max(0, s0), Math.min(1, s1)];
+}
+
+/* Reused across every edge of a figure. Bake-time only. */
+const _cand = [];
+const _hid = [];
+
+/**
+ * Visible sub-segments of a 3D segment, exactly clipped against the stage's BSP. Pushes
+ * [ax,ay,az,bx,by,bz] runs into `out`.
+ */
+function hlrSegment(bsp, ax, ay, az, bx, by, bz, out) {
+  const pax = projX(ax, ay, az, 1), pay = projY(ax, ay, az, 1);
+  const pbx = projX(bx, by, bz, 1), pby = projY(bx, by, bz, 1);
+  const bx0 = Math.min(pax, pbx), bx1 = Math.max(pax, pbx);
+  const by0 = Math.min(pay, pby), by1 = Math.max(pay, pby);
+  _cand.length = 0;
+  bspQuery(bsp.root, bx0, by0, bx1, by1, ++_bspStamp, _cand);
+
+  _hid.length = 0;
+  // If the solid's nearest point is behind the segment's least-near point it cannot hide any of
+  // it. One comparison rejects most of what the BSP hands back.
+  const dLeast = Math.min(depthOf(ax, ay, az), depthOf(bx, by, bz));
+  for (let i = 0; i < _cand.length; i++) {
+    const q = _cand[i].q;
+    if (q.dMax <= dLeast + HLR_EPS) continue;
+    const iv = hiddenInterval(q, ax, ay, az, bx, by, bz, HLR_EPS);
+    if (iv) _hid.push(iv);
+  }
+  if (!_hid.length) {
+    out.push([ax, ay, az, bx, by, bz]);
+    return out;
+  }
+  _hid.sort((p, r) => p[0] - r[0]);
+  let cursor = 0;
+  const emit = (t0, t1) => {
+    if (t1 - t0 < 0.006) return;                        // shorter than a pen nib; drop it
+    out.push([ax + (bx - ax) * t0, ay + (by - ay) * t0, az + (bz - az) * t0,
+      ax + (bx - ax) * t1, ay + (by - ay) * t1, az + (bz - az) * t1]);
+  };
+  for (const [h0, h1] of _hid) {
+    if (h0 > cursor) emit(cursor, h0);
+    if (h1 > cursor) cursor = h1;
+    if (cursor >= 1) break;
+  }
+  if (cursor < 1) emit(cursor, 1);
+  return out;
+}
 
 /** One part, placed. Holds transformed solids for HLR and its projected polylines for drawing. */
 function makeInstance(part, slot, offset, opt = {}) {
@@ -1433,66 +1737,19 @@ function makeInstance(part, slot, offset, opt = {}) {
   };
 }
 
-/** Is this 3D point occluded by anything other than `skip`? */
-function pointHidden(occluders, skip, px, py, pz) {
-  const sx = projX(px, py, pz, 1), sy = projY(px, py, pz, 1), d = depthOf(px, py, pz);
-  for (let o = 0; o < occluders.length; o++) {
-    const inst = occluders[o];
-    if (inst === skip || !inst.occlude || inst.dotted) continue;
-    const sol = inst.solids;
-    for (let s = 0; s < sol.length; s++) {
-      const q = sol[s];
-      // Cheap rejects first: outside the silhouette box, or entirely behind the sample.
-      if (sx < q.sx0 || sx > q.sx1 || sy < q.sy0 || sy > q.sy1) continue;
-      if (q.dMax <= d + HLR_EPS) continue;
-      if (rayHitsConvex(q.planes, px, py, pz, HLR_EPS)) return true;
-    }
-  }
-  return false;
-}
-
-/** Visible sub-segments of a 3D segment, clipped against every occluding solid. */
-function hlrSegment(occluders, skip, ax, ay, az, bx, by, bz, out) {
-  const vis = new Array(HLR_SAMPLES + 1);
-  for (let i = 0; i <= HLR_SAMPLES; i++) {
-    const t = i / HLR_SAMPLES;
-    vis[i] = !pointHidden(occluders, skip,
-      ax + (bx - ax) * t, ay + (by - ay) * t, az + (bz - az) * t);
-  }
-  // Runs of visible samples become sub-segments; boundaries refined by bisection.
-  let i = 0;
-  while (i <= HLR_SAMPLES) {
-    while (i <= HLR_SAMPLES && !vis[i]) i++;
-    if (i > HLR_SAMPLES) break;
-    const start = i;
-    while (i <= HLR_SAMPLES && vis[i]) i++;
-    const end = i - 1;
-    let t0 = start / HLR_SAMPLES, t1 = end / HLR_SAMPLES;
-    if (start > 0) t0 = refine(t0 - 1 / HLR_SAMPLES, t0);
-    if (end < HLR_SAMPLES) t1 = refine(t1 + 1 / HLR_SAMPLES, t1);
-    if (t1 - t0 > 0.004) {
-      out.push([ax + (bx - ax) * t0, ay + (by - ay) * t0, az + (bz - az) * t0,
-        ax + (bx - ax) * t1, ay + (by - ay) * t1, az + (bz - az) * t1]);
-    }
-  }
-  return out;
-
-  function refine(tHidden, tVisible) {
-    let lo = tHidden, hi = tVisible;
-    for (let k = 0; k < 4; k++) {
-      const m = (lo + hi) / 2;
-      const hid = pointHidden(occluders, skip,
-        ax + (bx - ax) * m, ay + (by - ay) * m, az + (bz - az) * m);
-      if (hid) lo = m; else hi = m;
-    }
-    return hi;
-  }
-}
-
-/** Project every instance to page-unit polylines with HLR applied. */
+/**
+ * Project every instance to page-unit polylines with hidden-line removal applied.
+ *
+ * The BSP is built over the WHOLE instance set including the part being drawn, so a solid hides
+ * its own back edges: the 4 mm epsilon means a point on the near face has the ray leaving the
+ * solid immediately (t < eps, not hidden) while a point on the far face has it crossing the whole
+ * body (t > eps, hidden). That is the difference between the keyart's clean flat-pack solids and
+ * v1's wireframe boxes, and it costs one comparison.
+ */
 function projectInstances(instances, scale) {
   const segs3 = [];
   const out = [];
+  const bsp = buildOccluderBSP(instances);
   for (const inst of instances) {
     const polys = [];
     for (const s of inst.solids) {
@@ -1500,11 +1757,11 @@ function projectInstances(instances, scale) {
         segs3.length = 0;
         const ax = s.verts[ia * 3], ay = s.verts[ia * 3 + 1], az = s.verts[ia * 3 + 2];
         const bx = s.verts[ib * 3], by = s.verts[ib * 3 + 1], bz = s.verts[ib * 3 + 2];
-        if (inst.dotted) {
+        if (inst.dotted || !bsp.count) {
           polys.push([projX(ax, ay, az, scale), projY(ax, ay, az, scale), projX(bx, by, bz, scale), projY(bx, by, bz, scale)]);
           continue;
         }
-        hlrSegment(instances, inst, ax, ay, az, bx, by, bz, segs3);
+        hlrSegment(bsp, ax, ay, az, bx, by, bz, segs3);
         for (const g of segs3) {
           polys.push([projX(g[0], g[1], g[2], scale), projY(g[0], g[1], g[2], scale),
             projX(g[3], g[4], g[5], scale), projY(g[3], g[4], g[5], scale)]);
@@ -1538,7 +1795,7 @@ function bboxOfDrawn(drawn) {
   return { x0, y0, x1, y1 };
 }
 
-function partExtent(d) {
+function partBox(d) {
   let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
   for (const p of d.polys) {
     for (let i = 0; i < p.length; i += 2) {
@@ -1546,9 +1803,84 @@ function partExtent(d) {
       if (p[i + 1] < y0) y0 = p[i + 1]; if (p[i + 1] > y1) y1 = p[i + 1];
     }
   }
-  if (!isFinite(x0)) return 0;
-  return Math.max(x1 - x0, y1 - y0);
+  return isFinite(x0) ? { x0, y0, x1, y1 } : null;
 }
+
+function partExtent(d) {
+  const b = partBox(d);
+  return b ? Math.max(b.x1 - b.x0, b.y1 - b.y0) : 0;
+}
+
+/** Centre of a drawn part in figure page units, or null when nothing survived HLR. */
+function partCentre(d) {
+  const b = partBox(d);
+  return b ? [(b.x0 + b.x1) / 2, (b.y0 + b.y1) / 2] : null;
+}
+
+/**
+ * The part's ASSEMBLY AXIS — the direction it travels the last 1.4 m into its slot, and therefore
+ * the direction the exploded view flies it out along.
+ *
+ * CabinSite publishes it as `_out` (adopted onto `slot.normal`). When it is absent, or degenerate
+ * for this member, it is derived from the member's own long axis: a horizontal member goes in
+ * downward or outward through the wall it belongs to, an upright goes in from above.
+ */
+function explodeAxis(slot, part) {
+  const n = normOf(slot.normal);
+  if (n) return n;
+  const dims = part?.dims ?? [1, 1, 1];
+  const upright = dims[1] > dims[0] && dims[1] > dims[2];
+  if (upright) return [0, 1, 0];                             // a post: it drops in from above
+  /*
+   * No published normal. Derive one: a member sitting on the footprint's edge belongs to a wall
+   * and leaves through that wall; anything inboard leaves upward. Deterministic, and it keeps the
+   * headless golden renders honest even with CabinSite out of the build.
+   */
+  const { hx, hz } = FOOT;
+  const ez = Math.abs(Math.abs(slot.position.z) - hz);
+  const ex = Math.abs(Math.abs(slot.position.x) - hx);
+  if (Math.min(ex, ez) > 0.45) return [0, 1, 0];
+  if (ez <= ex) return [0, 0, slot.position.z < 0 ? -1 : 1];
+  return [slot.position.x < 0 ? -1 : 1, 0, 0];
+}
+
+/**
+ * §8.4's "secondary slot axis" — where a collision between two exploded parts gets pushed.
+ * The member's own length is the obvious free direction; anything perpendicular to the explode
+ * axis will do, so long as it is stable and not the explode axis itself.
+ */
+function secondaryAxis(slot, primary) {
+  const along = normOf(slot.along);
+  const cand = along && Math.abs(along[0] * primary[0] + along[1] * primary[1] + along[2] * primary[2]) < 0.9
+    ? along
+    : (Math.abs(primary[1]) > 0.9 ? [1, 0, 0] : [0, 1, 0]);
+  // Gram–Schmidt against the explode axis so the push never doubles the explode distance.
+  const dot = cand[0] * primary[0] + cand[1] * primary[1] + cand[2] * primary[2];
+  const v = [cand[0] - primary[0] * dot, cand[1] - primary[1] * dot, cand[2] - primary[2] * dot];
+  return normOf(v) ?? [1, 0, 0];
+}
+
+/**
+ * Every page whose subject is the assembly, and which therefore reads `panel.figures[0]`.
+ * If a renderer below dereferences `panel.figures[0]`, its kind belongs in here.
+ */
+const FIGURE_KINDS = new Set([
+  'exploded', 'mirror', 'brace-sequence', 'collapsed', 'sequence', 'out-of-order',
+]);
+
+/**
+ * The slot the "do NOT do this" panel is about: a member that can genuinely be seated the wrong
+ * way round (a candidate ring wider than its own symmetry, so exactly one candidate is right), or
+ * failing that the night's errata slot. A pier is a squared boulder and can never be wrong, so a
+ * figure of nothing but piers gets no cross-out — the manual does not warn you about the
+ * impossible, which is the joke and also the design.
+ */
+function crossOutSlot(install) {
+  return install.find((s) => (s.yawCandidates ?? 1) > 1 && (s.symmetryOrder ?? 4) === 1)
+    ?? install.find((s) => s.errata)
+    ?? null;
+}
+function willCrossOut(install) { return !!crossOutSlot(install); }
 
 /* ══════════════════════════════════════════════════════════════════════════════════════════
  * 10. PAGE PACKING — shelf-first guillotine over 3–8 figures per spread.
@@ -1556,6 +1888,16 @@ function partExtent(d) {
 
 function packPage(figures, box) {
   if (!figures.length) return true;
+  /*
+   * One figure IS the page. v1 gave it its natural rect at the top-left of the cell and left the
+   * bottom two-thirds of the sheet blank — every generated assembly panel in the game drew a
+   * postage stamp in the corner of an A4 page. A lone figure gets the whole cell and the fit
+   * scale magnifies it into that.
+   */
+  if (figures.length === 1) {
+    figures[0].rect = { x: box.x, y: box.y, w: box.w, h: box.h };
+    return true;
+  }
   const order = figures.slice().sort((a, b) => (b.natural.h * b.natural.w) - (a.natural.h * a.natural.w));
   const shelves = [];
   let cy = box.y;
@@ -1575,15 +1917,24 @@ function packPage(figures, box) {
     // Close the shelf when it is full so the next figure starts a new one.
     if (shelf.x > box.x + box.w - 60) { cy = shelf.y + shelf.h + 22; }
   }
-  // Vertical justification pass.
-  let y = box.y;
+  // Justification. Shelves are centred horizontally and the stack is centred vertically, so a
+  // half-empty spread reads as a laid-out page rather than as a page that ran out.
   let total = 0;
   for (const s of shelves) total += s.h + 22;
   const slackY = Math.max(0, box.h - total);
-  const pad = shelves.length > 1 ? slackY / shelves.length : slackY / 2;
+  let y = box.y + slackY / 2;
   for (const s of shelves) {
-    for (const f of s.items) { f.rect.y = y + (s.h - f.rect.h) / 2; }
-    y += s.h + 22 + pad;
+    let used = 0;
+    for (const f of s.items) used += f.rect.w + 14;
+    used = Math.max(0, used - 14);
+    const dx = Math.max(0, (box.w - used) / 2);
+    let x = box.x + dx;
+    for (const f of s.items) {
+      f.rect.x = x;
+      f.rect.y = y + (s.h - f.rect.h) / 2;
+      x += f.rect.w + 14;
+    }
+    y += s.h + 22;
   }
   return total <= box.h * 1.02;
 }
@@ -1666,8 +2017,10 @@ export class Blueprint {
     const t0 = (typeof performance !== 'undefined' ? performance.now() : 0);
     const rand = new Rand(hashInt(this._seed ^ Math.imul(night, 0x9e3779b1)));
     const sn = this._nightDef(night);
-    const { parts, slots } = layoutNight(night, rand);
-    this._adoptCabinSite(night, slots);
+    const site = this._slotsFromSite(night, rand);
+    const { parts, slots } = site ?? layoutNight(night, rand);
+    if (!site) computeGraphDepth(slots);
+    this._restage(slots, sn.stages);
 
     const shortfalls = this._chooseShortfalls(night, slots, rand);
     const errata = this._chooseErrata(night, slots, rand);
@@ -1715,6 +2068,17 @@ export class Blueprint {
       if (slot) m.tier = 1;
     }
 
+    /*
+     * THE FIGURES. GAME_DESIGN §8.1 makes `Stage.figures` a required field and v1 emitted `[]` for
+     * every stage of every night — perfect metadata describing a drawing that did not exist. This
+     * is the drawing: real solids at real plot-local metres, exploded along each part's own
+     * assembly axis, hidden-line-removed against the assembled hull, packed onto a page.
+     */
+    for (const stage of def.stages) {
+      stage.figures = this._stageFigures(def, stage);
+      stage.page = this._stagePage(def, stage);
+    }
+
     def.panels = this._buildPanels(def, rand);
     for (const p of def.panels) def.authorship[p.id] = p.authorship;
 
@@ -1743,15 +2107,103 @@ export class Blueprint {
     };
   }
 
-  /** CabinSite owns the plot. If it publishes slots, its transforms win over the proposal. */
-  _adoptCabinSite(night, slots) {
+  /**
+   * CabinSite owns the plot, so when it is in the build the diagram is built FROM it rather than
+   * merely nudged toward it. Every slot the player will actually stand in front of becomes a slot
+   * in the manual, at the same plot-local metres, with the same yaw, the same dependency graph,
+   * the same hidden flags and the same article numbers.
+   *
+   * v1 asked CabinSite only for `position`, matched on ids that never matched (`P-01` against
+   * `S-01`, `PIER-01` against `PIER`), and silently kept drawing its own invented layout. The
+   * page and the plot were two different buildings, which is exactly the correspondence the
+   * puzzle is made of.
+   *
+   * Coordinate contract (CabinSite.js header): `Slot.position` / `Slot.rotation` are PLOT-LOCAL —
+   * the diagram's own space. `px/py/pz` and `slotWorldTransform()` are WORLD. We take plot-local.
+   *
+   * @returns {{parts:object[], slots:object[]}|null} null when CabinSite is not in the build.
+   */
+  _slotsFromSite(night, rand) {
     const cs = this.ctx?.systems?.get?.('CabinSite');
-    const published = (typeof cs?.slotsForNight === 'function' ? cs.slotsForNight(night) : cs?.slots) ?? null;
-    if (!published || !published.length) return;
-    for (const s of slots) {
-      const m = published.find?.((p) => p?.id === s.id || p?.partId === s.partId);
+    if (!cs) return null;
+    let published = null;
+    try {
+      published = (typeof cs.slotsForNight === 'function' ? cs.slotsForNight(night) : null)
+        ?? (Array.isArray(cs.slots) ? cs.slots.filter((s) => (s?.night | 0) === night) : null);
+    } catch (e) {
+      Log.once('bp:site', 'Blueprint: CabinSite.slotsForNight threw — drawing the proposal instead.', e);
+      return null;
+    }
+    if (!published || !published.length) return null;
+
+    const parts = []; const slots = [];
+    const seenId = new Set();
+    let n = 0;
+    for (const m of published) {
       const pos = m?.transform?.position ?? m?.position;
-      if (pos && typeof pos.x === 'number') { s.position = { x: pos.x, y: pos.y ?? s.position.y, z: pos.z }; s.fromCabinSite = true; }
+      if (!pos || !Number.isFinite(pos.x) || !Number.isFinite(pos.z)) continue;
+      const type = siteTypeFor(m);
+      const t = PART_TYPES[type] ?? PART_TYPES.beam;
+      n++;
+      // CabinSite reuses one `partId` across a run of identical members (six slots all reading
+      // 'PIER'). The manual needs to call them out individually, so the slot id disambiguates.
+      const pid = `${String(m.partId ?? type).toUpperCase()}@${m.id}`;
+      if (seenId.has(m.id)) continue;
+      seenId.add(m.id);
+      parts.push({
+        id: pid, type, acceptsType: m.acceptsType ?? t.accepts, mass: t.mass, carryClass: t.cls,
+        length: Number.isFinite(m._len) && m._len > 0.05 ? m._len : (t.len ?? t.dims[0]),
+        dims: t.dims, siteRole: m.partId ?? null,
+        articleNo: m.article ?? articleNumber(rand),
+        label: m.group ?? null,
+      });
+      slots.push({
+        id: m.id, kind: m.kind ?? 'fixed', stage: Math.max(1, m.stage | 0 || 1),
+        acceptsType: m.acceptsType ?? t.accepts, partId: pid,
+        position: { x: pos.x, y: Number.isFinite(pos.y) ? pos.y : 0, z: pos.z },
+        yaw: Number.isFinite(m.yaw) ? m.yaw : (m.rotation?.y ?? 0),
+        axis: m.axis ?? 'y',
+        // `_out` is the member's own "away from the structure" unit vector: the assembly axis.
+        normal: normOf(m._out) ?? [0, 1, 0],
+        along: normOf(m._dir) ?? [1, 0, 0],
+        yawCandidates: m.yawCandidates ?? 4,
+        symmetryOrder: m.symmetryOrder ?? 4,
+        requires: Array.isArray(m.requires) ? m.requires.slice() : [],
+        fasteners: m.fasteners | 0,
+        ratedMass: m.ratedMass ?? 180,
+        mirrorOf: m.mirrorOf ?? null,
+        hidden: !!m.hidden,
+        errata: !!m.errata,
+        graphDepth: 0,
+        mirror: !!m.mirrorOf,
+        obstruction: m.obstruction ?? null,
+        hardware: m.hardware ?? null,
+        fromCabinSite: true,
+      });
+    }
+    if (!slots.length) return null;
+    // `requires` is a DAG over slot ids; graphDepth is what §8.4 explodes along.
+    computeGraphDepth(slots);
+    Log.debug(`Blueprint N${night}: adopted ${slots.length}/${n} CabinSite slots.`);
+    return { parts, slots };
+  }
+
+  /**
+   * The fallback layout is authored one stage at a time; CabinSite packs its own slots with
+   * `stage = min(k, 1 + floor(i*k/len))`, which is also `BuildSystem.packStages`. Match it, or
+   * the night's last stage comes out with zero slots and zero figures — which is precisely how
+   * Night One shipped a stage 3 that was `{slots: 0, figures: 0}`.
+   */
+  _restage(slots, stageCount) {
+    const k = Math.max(1, stageCount | 0);
+    const byStage = new Map();
+    for (const s of slots) {
+      const g = byStage.get(s.stage) ?? [];
+      g.push(s); byStage.set(s.stage, g);
+    }
+    if (byStage.size >= k) return;
+    for (let i = 0; i < slots.length; i++) {
+      slots[i].stage = Math.min(k, 1 + Math.floor((i * k) / slots.length));
     }
   }
 
@@ -1940,34 +2392,107 @@ export class Blueprint {
       // not something a 1962 manual would print, so non-numeric ids get a plain sheet number.
       displayId: /^[0-9]+\.[0-9]+$/.test(String(o.id)) ? String(o.id) : `${def.night}.${o.sheetNo ?? 0}`,
     };
-    if (p.kind === 'exploded') p.figures = this._buildFigures(def, p);
+    /*
+     * Every page that reads `panel.figures[0]` gets one. v1 built figures for `kind: 'exploded'`
+     * alone, so `mirror`, `sequence`, `collapsed`, `brace-sequence` and `out-of-order` — five of
+     * the seven grammars' signature pages — silently took their `if (fig)` fallback branch and
+     * drew a stub. FIGURE_KINDS is the list of pages whose subject IS the assembly.
+     */
+    if (FIGURE_KINDS.has(p.kind)) p.figures = this._buildFigures(def, p);
     return p;
   }
 
-  /** Exploded axonometric figures for one stage. This is the puzzle. */
+  /* ── FIGURES — the drawing itself ──────────────────────────────────────────────────── */
+
+  /**
+   * Exploded axonometric figures for one panel's stage. This is the puzzle: real solids at real
+   * plot-local metres, exploded along each part's own assembly axis, hidden-line removed against
+   * the assembled hull, with the arrow vocabulary that says what to DO with them.
+   */
   _buildFigures(def, panel) {
-    const stage = panel.stage;
-    const stageSlots = def.slots.filter((s) => s.stage === stage);
-    if (!stageSlots.length) return [];
+    const f = this._makeFigure(def, panel.stage, {
+      id: `${panel.id}-f1`,
+      authorship: panel.authorship ?? 'marit',
+      stepNumber: panel.step, dashed: !!panel.dashedStep,
+      glyphs: panel.glyphs ?? [], seed: panel.seed,
+    });
+    return f ? [f] : [];
+  }
+
+  /** GAME_DESIGN §8.1 — `Stage.figures`. Required, and empty in every build before this one. */
+  _stageFigures(def, stage) {
+    const f = this._makeFigure(def, stage.index, {
+      id: `N${def.night}.S${stage.index}`,
+      authorship: (def.voice?.anselShare ?? 0) > 0.5 ? 'ansel' : 'marit',
+      stepNumber: stage.index, dashed: false, glyphs: [],
+      seed: (hashStr(`${def.night}:stage:${stage.index}`) * 1e6) | 0,
+    });
+    return f ? [f] : [];
+  }
+
+  /** GAME_DESIGN §8.1 — `Stage.page`: the guillotine packer's result for this stage's figures. */
+  _stagePage(def, stage) {
+    const box = {
+      x: PAGE.margin, y: PAGE.margin,
+      w: PAGE.W - PAGE.margin * 2, h: PAGE.H - PAGE.margin * 2 - PAGE.footer,
+    };
+    const fits = packPage(stage.figures, box);
+    return {
+      width: PAGE.W, height: PAGE.H, box, fits, spread: false,
+      rects: stage.figures.map((f) => ({
+        figureId: f.id,
+        x: f.rect?.x ?? box.x, y: f.rect?.y ?? box.y,
+        w: f.rect?.w ?? f.natural.w, h: f.rect?.h ?? f.natural.h,
+      })),
+    };
+  }
+
+  /**
+   * One Figure, in the shape GAME_DESIGN §8.1 mandates:
+   *
+   *   Figure = { id, projection, parts: [{ partId, explodeVector, silhouettePx }],
+   *              arrows: [Arrow], stepNumber, dashed, glyphs, authorship }
+   *
+   * plus the rasterisation payload `_drawFigure` consumes (`drawn`, `leaders`, `bbox`, `natural`).
+   * @returns {object|null} null only when the stage has no slots at all.
+   */
+  _makeFigure(def, stageIndex, o) {
+    const stageSlots = def.slots.filter((s) => s.stage === stageIndex);
+    if (!stageSlots.length) return null;
     const partOf = (id) => def.parts.find((p) => p.id === id);
-    const mirrored = def.grammars.includes('G2') && def.night === 2;
+    const mirrored = def.grammars.includes('G2') && def.night === 2
+      && stageSlots.some((s) => s.mirror);
 
     /*
-     * A flat-pack panel draws a SUB-ASSEMBLY, not the building. Six identical piers spread over
-     * 11.6 m would put every part at 20 px and turn the page into confetti, so the figure draws
-     * two or three representatives and states the real count with a ×N call-out — which is also
-     * exactly what STORY §3.6 says the manual starts doing out loud on Night Three.
+     * A flat-pack panel draws a SUB-ASSEMBLY. The cabin is 6.40 x 3.20 m, so a stage of six piers
+     * fits on the page in full and is drawn in full — that correspondence between the page and
+     * the plot is the whole puzzle. Only a run long enough to turn the page into confetti gets
+     * thinned to representatives plus a ×N call-out (which is also what STORY §3.6 says the
+     * manual starts doing out loud on Night Three).
      */
-    const groups = new Map();
-    for (const s of stageSlots) {
-      if (mirrored && s.mirror) continue;
-      const p = partOf(s.partId);
-      if (!p) continue;
-      const g = groups.get(p.type) ?? [];
-      g.push(s);
-      groups.set(p.type, g);
-    }
-    const MAX_REP = 3;
+    const collect = (dropMirrored) => {
+      const g = new Map();
+      for (const s of stageSlots) {
+        if (dropMirrored && s.mirror) continue;
+        const p = partOf(s.partId);
+        if (!p) continue;
+        const list = g.get(p.type) ?? [];
+        list.push(s);
+        g.set(p.type, list);
+      }
+      return g;
+    };
+    /*
+     * G2 draws the left bay and lets the mirror axis stand in for the right. But a stage whose
+     * slots are ALL on the mirrored side has nothing left after that filter, and a figure of
+     * nothing is the bug this whole pass exists to kill. When the filter would empty the stage,
+     * the stage is simply not a mirror page.
+     */
+    let groups = collect(mirrored);
+    let isMirror = mirrored;
+    if (!groups.size) { groups = collect(false); isMirror = false; }
+    if (!groups.size) return null;
+    const MAX_REP = stageSlots.length > 12 ? 4 : 8;
     const install = [];
     const counts = [];
     for (const [type, list] of groups) {
@@ -1975,16 +2500,17 @@ export class Blueprint {
       for (let i = 0; i < take; i++) install.push(list[Math.floor(i * list.length / take)]);
       counts.push({ type, total: list.length, shown: take });
     }
+    if (!install.length) return null;
 
     // Context: the already-placed parts nearest the sub-assembly, so the join reads in situ.
     let cx0 = 0, cy0 = 0, cz0 = 0;
     for (const s of install) { cx0 += s.position.x; cy0 += s.position.y; cz0 += s.position.z; }
     cx0 /= install.length; cy0 /= install.length; cz0 /= install.length;
-    const context = def.slots.filter((s) => s.stage < stage)
+    const context = def.slots.filter((s) => s.stage < stageIndex)
       .sort((a, b) => (
         Math.hypot(a.position.x - cx0, a.position.y - cy0, a.position.z - cz0)
         - Math.hypot(b.position.x - cx0, b.position.y - cy0, b.position.z - cz0)))
-      .slice(0, 4);
+      .slice(0, 8);
 
     const instances = [];
     for (const s of context) {
@@ -1992,35 +2518,75 @@ export class Blueprint {
       if (p) instances.push(makeInstance(p, s, null, { occlude: true }));
     }
 
-    const exploded = [];
+    /*
+     * EXPLODE VECTORS — GAME_DESIGN §8.4, verbatim: `slotNormal × (1.4 + 0.3 × graphDepth)` in
+     * figure space, where graphDepth is the part's depth in the `requires` DAG. Deeper parts fly
+     * further, so the assembly order reads outward-in with no numbering at all.
+     *
+     * The slot normal is CabinSite's `_out` — the member's own "away from the structure" axis —
+     * so a sill flies out through the wall it belongs to and a pier flies straight up, which is
+     * what makes the leader line legible as a path the part travels rather than as decoration.
+     * v1 used a normal that defaulted to [0,1,0] for every slot, so everything went up.
+     */
+    const parts = [];
+    const placed = [];
     for (const s of install) {
       const p = partOf(s.partId);
       if (!p) continue;
-      const nrm = s.normal ?? [0, 1, 0];
+      const nrm = explodeAxis(s, p);
       const d = 1.4 + 0.3 * (s.graphDepth ?? 0);
       let off = [nrm[0] * d, nrm[1] * d, nrm[2] * d];
-      // Collision resolution: push along the secondary slot axis, 0.15 m steps, max 6.
+      // Collision resolution: push along the SECONDARY slot axis, 0.15 m steps, max 6 (§8.4).
+      const sec = secondaryAxis(s, nrm);
+      let px = 0, py = 0;
       for (let it = 0; it < 6; it++) {
-        const px = projX(s.position.x + off[0], s.position.y + off[1], s.position.z + off[2], NOMINAL_SCALE);
-        const py = projY(s.position.x + off[0], s.position.y + off[1], s.position.z + off[2], NOMINAL_SCALE);
+        px = projX(s.position.x + off[0], s.position.y + off[1], s.position.z + off[2], NOMINAL_SCALE);
+        py = projY(s.position.x + off[0], s.position.y + off[1], s.position.z + off[2], NOMINAL_SCALE);
         let clash = false;
-        for (const e of exploded) if (Math.hypot(px - e.px, py - e.py) < 34) { clash = true; break; }
-        if (!clash) { exploded.push({ px, py }); break; }
-        off = [off[0] + 0.15, off[1] + 0.05, off[2] + 0.15];
+        for (const e of placed) if (Math.hypot(px - e.px, py - e.py) < 26) { clash = true; break; }
+        if (!clash) break;
+        off = [off[0] + sec[0] * 0.15, off[1] + sec[1] * 0.15, off[2] + sec[2] * 0.15];
       }
+      placed.push({ px, py });
       const hidden = !!s.hidden;
-      instances.push(makeInstance(p, s, off, {
-        occlude: !hidden, dotted: hidden, mirror: false,
-      }));
-      instances[instances.length - 1].isInstall = true;
-      instances[instances.length - 1].explode = off;
+      const inst = makeInstance(p, s, off, { occlude: !hidden, dotted: hidden, mirror: false });
+      inst.isInstall = true;
+      inst.explode = off;
+      instances.push(inst);
+      parts.push({
+        partId: p.id, slotId: s.id, type: p.type, articleNo: p.articleNo,
+        explodeVector: [off[0], off[1], off[2]],
+        axis: [nrm[0], nrm[1], nrm[2]],
+        graphDepth: s.graphDepth ?? 0,
+        hidden, fasteners: s.fasteners | 0,
+        seatedAt: [s.position.x, s.position.y, s.position.z],
+        silhouettePx: 0,          // filled below, once the page fit is known
+      });
+    }
+    if (!parts.length) return null;
+
+    /*
+     * THE SEAT. The part drawn again, faintly, where it is going — Script's own caption for panel
+     * 1.3 is "a pier block descending into a chalked square on the ground... the square in the
+     * drawing is the square on the ground". Without it the leader line points at nothing and the
+     * first stage of a night (which has no already-placed context to land on) reads as parts
+     * floating over blank paper. It never occludes and it is never counted for legibility.
+     */
+    for (const s of install) {
+      const p = partOf(s.partId);
+      if (!p) continue;
+      const seat = makeInstance(p, s, null, { occlude: false, dotted: true });
+      seat.isSeat = true;
+      instances.push(seat);
     }
 
     const drawn = projectInstances(instances, NOMINAL_SCALE);
     this.stats.hlrSegments += drawn.reduce((a, d) => a + d.polys.length, 0);
     const bbox = bboxOfDrawn(drawn);
 
-    // Leader lines: dashed, from the exploded part back to where it goes.
+    // Leader lines: dashed, from the exploded part all the way back to where it goes. In the
+    // keyart these run the full height of the sheet and they are the only thing tying the layers
+    // together, so they are drawn under everything and never shortened.
     const leaders = [];
     for (const d of drawn) {
       if (!d.inst.isInstall || !d.inst.explode) continue;
@@ -2035,52 +2601,70 @@ export class Blueprint {
     }
 
     /*
-     * BJØRN, 1.7 m in the same projection, standing on the ground at the assembly's near-left
-     * corner. He is the scale reference AND the "you are here" indicator: he always faces the
-     * −Z screen axis, so matching your own view of the plot to his is G1.
-     * He is omitted from panels of small hardware, where a 1.7 m man beside a 0.14 m hinge would
-     * shrink the hinge rather than explain it — real manuals do the same.
+     * THE LEGIBILITY INVARIANT (GAME_DESIGN §8.4). A part whose silhouette would land under 40 px
+     * at the page's fit scale does not get shrunk and it does not get dropped: it is promoted to a
+     * magnified detail call-out with a leader back to where it goes.
+     *
+     * Two passes, and the order matters. v1 always reserved the call-out column before deciding
+     * what to promote, so the column shrank the assembly view enough to push borderline parts
+     * (every pier on Night One) into the very column they had created. Measure with the whole
+     * cell first; only if something genuinely fails does the column exist at all.
      */
-    let mx = Infinity, mz = -Infinity, spanX = 0, spanY = 0;
+    const cellW = PAGE.W - PAGE.margin * 2, cellH = PAGE.H - PAGE.margin * 2 - PAGE.footer;
+    const extents = new Map();
+    for (const d of drawn) if (d.inst.isInstall) extents.set(d, partExtent(d));
+
+    const measure = (bb, reserve) => {
+      const nat = { w: (bb.x1 - bb.x0) + 46, h: (bb.y1 - bb.y0) + 52 };
+      return { nat, fit: Math.min((cellW - reserve) / Math.max(1, nat.w), cellH / Math.max(1, nat.h)) };
+    };
+
+    /*
+     * BJØRN, 1.7 m in the same projection, on the ground at the near-right of the plot — where the
+     * keyart puts him. He is the scale reference AND the "you are here" indicator: he always faces
+     * the −Z screen axis, so matching your own view of the plot to his is G1. He is dropped from a
+     * figure he would cost legibility on, because a 1.7 m man beside a 0.14 m hinge shrinks the
+     * hinge rather than explaining it — real manuals do the same.
+     */
+    let mx = -Infinity, mz = Infinity, my = Infinity;
     for (const inst of instances) {
       for (const s of inst.solids) {
         for (let i = 0; i < s.verts.length / 3; i++) {
-          mx = Math.min(mx, s.verts[i * 3]);
-          mz = Math.max(mz, s.verts[i * 3 + 2]);
+          mx = Math.max(mx, s.verts[i * 3]);
+          my = Math.min(my, s.verts[i * 3 + 1]);
+          mz = Math.min(mz, s.verts[i * 3 + 2]);
         }
       }
     }
-    spanX = (bbox.x1 - bbox.x0) / NOMINAL_SCALE;
-    spanY = (bbox.y1 - bbox.y0) / NOMINAL_SCALE;
-    const showMascot = Math.max(spanX, spanY) >= 1.2 && isFinite(mx);
-    const mascot = showMascot ? {
-      x: projX(mx - 1.1, 0, mz + 0.7, NOMINAL_SCALE),
-      y: projY(mx - 1.1, 0, mz + 0.7, NOMINAL_SCALE),
-      h: 1.7 * NOMINAL_SCALE,
-    } : null;
-    const b = mascot ? {
-      x0: Math.min(bbox.x0, mascot.x - 40), y0: Math.min(bbox.y0, mascot.y - mascot.h - 10),
-      x1: Math.max(bbox.x1, mascot.x + 40), y1: Math.max(bbox.y1, mascot.y + 10),
-    } : { ...bbox };
-
     /*
-     * THE LEGIBILITY INVARIANT (GAME_DESIGN §8.4). A part whose silhouette would land under
-     * 40 px at the page's fit scale does not get shrunk and it does not get dropped: it is
-     * promoted to a magnified detail call-out with a leader back to where it goes. That is what
-     * a real flat-pack sheet does with a hinge, and it is the only answer that keeps both the
-     * invariant and the assembly view.
+     * He is drawn in PAGE units at the figure's lower-right corner (`_drawFigure`), not inside the
+     * figure's own bbox, and he is sized `1.7 m × the figure's draw scale` so he stays a true
+     * scale reference. Putting him inside the bbox is what cost Night One its legibility: six
+     * 0.52 m piers plus a 1.7 m man in one bounding box drops the fit far enough to push every
+     * pier under the 40 px floor and into a call-out column. The invariant is binding; his
+     * position is not.
      */
-    const natural = { w: (b.x1 - b.x0) + 46, h: (b.y1 - b.y0) + 52 };
-    const cellW = PAGE.W - PAGE.margin * 2, cellH = PAGE.H - PAGE.margin * 2 - PAGE.footer;
-    // Assume the call-out column is present when deciding what to promote into it, so a
-    // borderline part cannot be demoted by the very column it created.
-    const fit = Math.min(1, (cellW - MIN_SILHOUETTE * 2.6) / natural.w, cellH / natural.h);
+    const mascot = (isFinite(mx) && (bbox.x1 - bbox.x0) / NOMINAL_SCALE >= 1.2)
+      ? { metres: 1.7, corner: 'near-right', anchor: [mx, my, mz] }
+      : null;
+    const b = { ...bbox };
+    /*
+     * If a "do NOT do this" panel is going to exist, its strip is part of the figure and has to be
+     * in the box the fit is computed from — otherwise it is drawn off the bottom of the cell,
+     * which is how you ship a red cross-out nobody ever sees.
+     */
+    if (willCrossOut(install)) b.y1 += MIN_SILHOUETTE * 1.35 + 26;
+
+    // Pass 1 — no column reserved.
+    let m = measure(b, 0);
+    const failing = [];
+    for (const [d, ext] of extents) if (ext * m.fit < MIN_SILHOUETTE) failing.push(d);
+    // Pass 2 — only if pass 1 actually failed does the call-out column come into existence.
     const insets = [];
-    let minSil = Infinity;
-    for (const d of drawn) {
-      if (!d.inst.isInstall) continue;
-      const ext = partExtent(d);
-      if (ext * fit < MIN_SILHOUETTE) {
+    if (failing.length) {
+      m = measure(b, MIN_SILHOUETTE * 2.6);
+      for (const [d, ext] of extents) {
+        if (ext * m.fit >= MIN_SILHOUETTE) continue;
         const s = d.inst.slot;
         const type = d.inst.part.type;
         if (!insets.some((q) => q.type === type)) {
@@ -2093,24 +2677,152 @@ export class Blueprint {
           });
         }
         d.inset = true;
-      } else {
-        minSil = Math.min(minSil, ext);
       }
     }
+    const natural = m.nat;
+    let minSil = Infinity;
+    for (const [d, ext] of extents) if (!d.inset) minSil = Math.min(minSil, ext);
     if (!isFinite(minSil)) {
       // Every part in this stage is small hardware: the figure IS the detail. Scale to the floor.
-      minSil = MIN_SILHOUETTE / Math.max(fit, 1e-3);
+      minSil = MIN_SILHOUETTE / Math.max(m.fit, 1e-3);
       natural.w = Math.min(cellW, natural.w);
       natural.h = Math.min(cellH, natural.h);
     }
+    // §8.1's `silhouettePx`: what this part will actually measure on a 1080p page. Not a promise,
+    // a measurement — `checkLegibility()` asserts against these.
+    for (const p of parts) {
+      const d = drawn.find((q) => q.inst.isInstall && q.inst.partId === p.partId);
+      p.silhouettePx = d ? Math.round((extents.get(d) ?? 0) * m.fit * 10) / 10 : 0;
+      p.inset = !!d?.inset;
+    }
 
-    const fig = {
-      id: `${panel.id}-f1`, kind: 'exploded', stage, drawn, leaders, mascot, bbox: b, minSil, insets,
-      counts, mirrored, hiddenCount: install.filter((s) => s.hidden).length,
-      natural,
-      stepNumber: panel.step, dashed: panel.dashedStep,
+    const arrows = this._buildArrows(def, { install, parts, drawn, leaders, counts, bbox: b, mirrored: isMirror });
+
+    return {
+      // ── GAME_DESIGN §8.1's Figure ──
+      id: o.id, kind: 'exploded', stage: stageIndex,
+      projection: {
+        kind: 'dimetric', angles: [7, 42],
+        axisX: [PROJ.ax[0], PROJ.ax[1]], axisY: [PROJ.ay[0], PROJ.ay[1]], axisZ: [PROJ.az[0], PROJ.az[1]],
+        view: [PROJ.view[0], PROJ.view[1], PROJ.view[2]],
+        scale: NOMINAL_SCALE, fit: m.fit, hlr: 'bsp',
+      },
+      parts, arrows,
+      stepNumber: o.stepNumber ?? null, dashed: !!o.dashed,
+      glyphs: o.glyphs ?? [], authorship: o.authorship ?? 'marit',
+      // ── the rasterisation payload ──
+      drawn, leaders, mascot, bbox: b, minSil, insets, counts, mirrored: isMirror,
+      hiddenCount: install.filter((s) => s.hidden).length,
+      natural, seed: o.seed ?? 1,
     };
-    return [fig];
+  }
+
+  /**
+   * THE ARROW VOCABULARY (ART_DIRECTION §8.5 / GAME_DESIGN §8.4) — the complete closed set, and
+   * the manual's entire imperative mood. There are no verbs in this book; these are the verbs.
+   *
+   *   straight     insert / place    one per exploded part, along its leader
+   *   curved       rotate            where the yaw actually matters (candidates > symmetry)
+   *   double       align             across a run of identical members
+   *   circular     tighten           where the slot takes fasteners
+   *   crossed-out  do NOT do this    in the accent red, and only ever in the accent red
+   *
+   * Coordinates are page units in FIGURE space (the same space as `drawn` and `bbox`), so the
+   * renderer draws them under one transform and BlueprintUI can re-project them if it wants to.
+   */
+  _buildArrows(def, ctxF) {
+    const { install, drawn, leaders, counts, bbox } = ctxF;
+    const arrows = [];
+    // 1. STRAIGHT — insert. The last leg of every leader.
+    for (let i = 0; i < leaders.length; i++) {
+      const L = leaders[i];
+      const dx = L[2] - L[0], dy = L[3] - L[1];
+      const l = Math.hypot(dx, dy) || 1;
+      arrows.push({
+        kind: 'straight', meaning: 'insert', partId: install[i]?.partId ?? null,
+        from: [L[2] - dx / l * 34, L[3] - dy / l * 34],
+        to: [L[2] - dx / l * 9, L[3] - dy / l * 9],
+      });
+    }
+    // 2. CURVED — rotate. Only where the part can genuinely go in the wrong way round: a slot
+    //    whose candidate ring is larger than the part's own symmetry. A pier is a squared boulder
+    //    (k = sym = 4) and never gets one; a sill (k = 2, sym = 1) always does.
+    for (const d of drawn) {
+      if (!d.inst.isInstall) continue;
+      const s = d.inst.slot;
+      if ((s.yawCandidates ?? 4) <= (s.symmetryOrder ?? 4)) continue;
+      const e = partCentre(d);
+      if (!e) continue;
+      const r = Math.max(16, partExtent(d) * 0.42);
+      arrows.push({
+        kind: 'curved', meaning: 'rotate', partId: d.inst.partId,
+        at: [e[0], e[1] - r * 1.15], r, a0: -Math.PI * 0.92, a1: -Math.PI * 0.18,
+      });
+      break;      // one per figure. The manual says a thing once.
+    }
+    // 3. DOUBLE-HEADED — align. Across the longest run of identical members in the stage.
+    const run = counts.slice().sort((a, b) => b.total - a.total)[0];
+    if (run && run.total >= 2) {
+      const of = drawn.filter((d) => d.inst.isInstall && d.inst.part.type === run.type);
+      if (of.length >= 2) {
+        /*
+         * A dimension line is a BASELINE, not a diagonal between two part centres — running it
+         * corner-to-corner across the assembly is the one thing a draughtsman would never do.
+         * Take the run's screen extent along the dominant axis and set the line clear of it, with
+         * unit divisions instead of a numeral (there are no numerals in this book except article
+         * numbers).
+         */
+        let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+        for (const d of of) {
+          const bb = partBox(d);
+          if (!bb) continue;
+          if (bb.x0 < x0) x0 = bb.x0; if (bb.x1 > x1) x1 = bb.x1;
+          if (bb.y0 < y0) y0 = bb.y0; if (bb.y1 > y1) y1 = bb.y1;
+        }
+        if (isFinite(x0)) {
+          const horizontal = (x1 - x0) >= (y1 - y0);
+          // Clear of everything, including the seat ghosts — a dimension line crossing the
+          // subject is a dimension line nobody can read.
+          const base = Math.max(y1, bbox.y1) + 26;
+          const side = Math.min(x0, bbox.x0) - 26;
+          arrows.push({
+            kind: 'double', meaning: 'align', type: run.type,
+            from: horizontal ? [x0, base] : [side, y0],
+            to: horizontal ? [x1, base] : [side, y1],
+            witness: 16,
+            divisions: run.total > 2 ? run.total - 1 : 0,
+          });
+        }
+      }
+    }
+    // 4. CIRCULAR — tighten. At the first join in the stage that takes fasteners.
+    const tight = drawn.find((d) => d.inst.isInstall && (d.inst.slot.fasteners | 0) > 0);
+    if (tight) {
+      const s = tight.inst.slot;
+      arrows.push({
+        kind: 'circular', meaning: 'tighten', slotId: s.id, fasteners: s.fasteners | 0,
+        at: [projX(s.position.x, s.position.y, s.position.z, NOMINAL_SCALE),
+          projY(s.position.x, s.position.y, s.position.z, NOMINAL_SCALE)],
+        r: 22, turns: 0.85,
+      });
+    }
+    /*
+     * 5. CROSSED-OUT — do NOT do this. A second, small drawing of one part in the orientation
+     *    that will not seat, boxed and struck through in the accent red. This is the only red on
+     *    an ordinary page and the only thing in the manual that is ever negative.
+     */
+    const wrongable = crossOutSlot(install);
+    if (wrongable) {
+      const w = MIN_SILHOUETTE * 1.9, h = MIN_SILHOUETTE * 1.35;
+      arrows.push({
+        kind: 'crossed', meaning: 'do-not', slotId: wrongable.id, partId: wrongable.partId,
+        // Bottom-left of the figure, in the strip `_makeFigure` reserved for it.
+        rect: { x: bbox.x0, y: bbox.y1 - h - 2, w, h },
+        wrongYaw: (wrongable.yaw ?? 0) + Math.PI, mirror: !!wrongable.errata,
+      });
+    }
+    void def;
+    return arrows;
   }
 
   /* ── Navigation ────────────────────────────────────────────────────────────────────── */
@@ -2177,14 +2889,24 @@ export class Blueprint {
     const d = (this.def && this.def.night === n) ? this.def : this.forNight(n ?? this.def?.night ?? 1);
     const fails = [];
     const cellW = PAGE.W - PAGE.margin * 2, cellH = PAGE.H - PAGE.margin * 2 - PAGE.footer;
-    for (const p of d.panels) {
-      for (const f of p.figures) {
+    /*
+     * The same arithmetic `_makeFigure` used, or this asserts against a page nobody draws. Two
+     * things v1 got wrong here: it capped the fit at 1x (a figure is allowed to be MAGNIFIED to
+     * clear the floor — that is the entire point of a flat-pack detail), and it measured parts
+     * that had already been promoted into the call-out column, where they are drawn at 58 px by
+     * construction and cannot fail.
+     */
+    const check = (owner, figures) => {
+      for (const f of figures) {
+        if (!f?.natural) continue;
         const col = f.insets && f.insets.length ? MIN_SILHOUETTE * 2.6 : 0;
-        const scale = Math.min(1, (cellW - col) / f.natural.w, cellH / f.natural.h);
+        const scale = Math.min((cellW - col) / Math.max(1, f.natural.w), cellH / Math.max(1, f.natural.h));
         const px = f.minSil * scale;
-        if (px < MIN_SILHOUETTE - 0.5) fails.push({ panel: p.id, figure: f.id, px: Math.round(px) });
+        if (px < MIN_SILHOUETTE - 0.5) fails.push({ owner, figure: f.id, px: Math.round(px) });
       }
-    }
+    };
+    for (const p of d.panels) check(p.id, p.figures);
+    for (const s of d.stages) check(`stage ${s.index}`, s.figures);
     this.stats.legibilityFails = fails.length;
     return fails;
   }
@@ -2359,7 +3081,13 @@ export class Blueprint {
     // make room for them (GAME_DESIGN §8.4).
     const nIns = fig.insets ? Math.min(3, fig.insets.length) : 0;
     const col = nIns ? Math.min(rect.w * 0.34, MIN_SILHOUETTE * 2.6) : 0;
-    const inner = { x: rect.x, y: rect.y, w: Math.max(60, rect.w - col), h: rect.h };
+    // BJØRN stands in the bottom-right corner. Reserve his strip so a wide figure does not get
+    // drawn straight through him — a scale reference you cannot separate from the part is not one.
+    const mReserve = fig.mascot ? Math.min(rect.h * 0.17, 96) : 0;
+    const inner = {
+      x: rect.x, y: rect.y,
+      w: Math.max(60, rect.w - col), h: Math.max(80, rect.h - mReserve),
+    };
     const s = Math.max(0.18, Math.min(inner.w / fig.natural.w, inner.h / fig.natural.h));
     const fcx = (fig.bbox.x0 + fig.bbox.x1) / 2, fcy = (fig.bbox.y0 + fig.bbox.y1) / 2;
     const toPage = (fx, fy) => [inner.x + inner.w / 2 + (fx - fcx) * s, inner.y + inner.h / 2 + (fy - fcy) * s];
@@ -2380,16 +3108,19 @@ export class Blueprint {
 
     for (const d of fig.drawn) {
       const isInstall = !!d.inst.isInstall;
-      const w = (isInstall ? WEIGHTS.heavy : WEIGHTS.medium) * ws;
-      const col = d.inst.red ? this._accent() : PALETTE.ink;
-      const alpha = isInstall ? 1 : 0.78;
+      const isSeat = !!d.inst.isSeat;
+      // Seat outlines are the faintest thing on the page: present, but obviously not the subject.
+      const w = (isInstall ? WEIGHTS.heavy : (isSeat ? WEIGHTS.thin : WEIGHTS.medium)) * ws;
+      const col = d.inst.red ? this._accent() : (isSeat ? PALETTE.inkSoft : PALETTE.ink);
+      const alpha = isInstall ? 1 : (isSeat ? 0.42 : 0.78);
       for (let i = 0; i < d.polys.length; i++) {
         strokePath(c, d.polys[i], {
           hand, weight: w, color: col, alpha,
-          dash: d.inst.dotted ? [3.5 * ws, 4.5 * ws] : null,
+          dash: d.inst.dotted ? (isSeat ? [5 * ws, 5 * ws] : [3.5 * ws, 4.5 * ws]) : null,
           seed: panel.seed + 400 + i * 7, step: 7 * ws,
         });
       }
+      if (isSeat) continue;      // no bolt-hole detail on a ghost
       for (let i = 0; i < d.detailPolys.length; i++) {
         strokePath(c, d.detailPolys[i], {
           hand, weight: WEIGHTS.hairline * ws, color: PALETTE.inkSoft, alpha: alpha * 0.9,
@@ -2398,22 +3129,46 @@ export class Blueprint {
       }
     }
 
-    // Insert arrows on the last leg of each leader.
-    for (let i = 0; i < fig.leaders.length; i++) {
-      const L = fig.leaders[i];
-      const dx = L[2] - L[0], dy = L[3] - L[1];
-      const l = Math.hypot(dx, dy) || 1;
-      arrowStraight(c, L[2] - dx / l * 34, L[3] - dy / l * 34, L[2] - dx / l * 9, L[3] - dy / l * 9,
-        { hand, weight: WEIGHTS.medium * ws, size: 12 * ws, seed: panel.seed + 700 + i });
-    }
-
-    // BJØRN: 1.7 m, in the same projection, facing the −Z screen axis. Match him and you are
-    // standing where the drawing is standing. That is G1.
-    if (fig.mascot) {
-      drawMascot(c, fig.mascot.x, fig.mascot.y, fig.mascot.h, {
-        hand, pose: env.night >= 6 ? 'arms-at-sides' : (env.night >= 3 ? 'standing-neutral' : 'hammer'),
-        seed: panel.seed + 800, weight: WEIGHTS.figure * ws,
-      });
+    /*
+     * THE ARROW VOCABULARY, drawn. `fig.arrows` is the closed set from `_buildArrows`; this is
+     * the only place any of it reaches ink, and there is no sixth form.
+     */
+    const accent = this._accent();
+    for (let i = 0; i < (fig.arrows?.length ?? 0); i++) {
+      const a = fig.arrows[i];
+      const sd = panel.seed + 700 + i * 5;
+      if (a.kind === 'straight') {
+        arrowStraight(c, a.from[0], a.from[1], a.to[0], a.to[1],
+          { hand, weight: WEIGHTS.medium * ws, size: 12 * ws, seed: sd });
+      } else if (a.kind === 'curved') {
+        arrowCurved(c, a.at[0], a.at[1], a.r, a.a0, a.a1,
+          { hand, weight: WEIGHTS.medium * ws, size: 10 * ws, seed: sd });
+      } else if (a.kind === 'double') {
+        arrowDouble(c, a.from[0], a.from[1], a.to[0], a.to[1], {
+          hand, weight: WEIGHTS.thin * ws, size: 9 * ws, seed: sd,
+          witness: a.witness * ws, divisions: a.divisions,
+        });
+      } else if (a.kind === 'circular') {
+        arrowCircular(c, a.at[0], a.at[1], a.r * ws,
+          { hand, weight: WEIGHTS.medium * ws, seed: sd, turns: a.turns });
+      } else if (a.kind === 'crossed') {
+        /*
+         * DO NOT DO THIS. The part again, in the orientation that will not seat, boxed and struck
+         * through in the accent red. It is the only red on an ordinary page.
+         */
+        const r = a.rect;
+        strokePoly(c, [[r.x, r.y], [r.x + r.w, r.y], [r.x + r.w, r.y + r.h], [r.x, r.y + r.h], [r.x, r.y]],
+          { hand, weight: WEIGHTS.thin * ws, color: PALETTE.inkSoft, seed: sd, closed: true });
+        const part = this.def?.parts?.find((p) => p.id === a.partId);
+        if (part) {
+          this._part(c, part.type, r.x + r.w / 2, r.y + r.h / 2, r.w * 0.78, {
+            hand, seed: sd + 3, fitH: r.h * 0.70, weight: WEIGHTS.medium * ws,
+            yaw: a.wrongYaw, mirror: !!a.mirror,
+          });
+        }
+        crossOutBox(c, r.x, r.y, r.w, r.h,
+          { hand, weight: WEIGHTS.heavy * ws, color: accent, seed: sd + 5 });
+      }
     }
 
     /*
@@ -2442,6 +3197,21 @@ export class Blueprint {
       bagIcon(c, fig.bbox.x0 + 22, fig.bbox.y0 + 6, 40 * ws, 8, { hand, seed: panel.seed + 903 });
     }
     c.restore();
+
+    /*
+     * BJØRN. 1.7 m in the same projection and at the same scale as the assembly — so he is a true
+     * scale reference — but positioned in PAGE units at the figure's lower-right, where the keyart
+     * puts him, and therefore costing the assembly nothing. He always faces the −Z screen axis:
+     * match your own view of the plot to his and you are standing where the drawing is standing.
+     * That is G1, and it is the only navigation aid the manual will ever give you.
+     */
+    if (fig.mascot) {
+      const mh = Math.max(34, Math.min(rect.h * 0.34, fig.mascot.metres * NOMINAL_SCALE * s));
+      drawMascot(c, rect.x + rect.w - mh * 0.42 - col, rect.y + rect.h - 4, mh, {
+        hand, pose: env.night >= 6 ? 'arms-at-sides' : (env.night >= 3 ? 'standing-neutral' : 'hammer'),
+        seed: panel.seed + 800, weight: WEIGHTS.figure,
+      });
+    }
 
     /*
      * Magnified detail call-outs, drawn in page units in their reserved column: a circle, the
@@ -2573,13 +3343,13 @@ const RENDERERS = {
     const { hand, box, panel, m } = env;
     const cx = m.pw / 2;
     // The house, three-quarter elevation, in the same projection as everything else.
-    const P = (x, y, z) => [projX(x, y, z, 26), projY(x, y, z, 26)];
-    const { hx, hz, wall, ridge } = FOOT;
+    const P = (x, y, z) => [projX(x, y, z, 56), projY(x, y, z, 56)];
+    const { hx, hz, plate, ridge } = FOOT;
     const corners = [[-hx, hz], [hx, hz], [hx, -hz], [-hx, -hz]];
     const base = corners.map(([x, z]) => P(x, 0, z));
-    const top = corners.map(([x, z]) => P(x, wall, z));
+    const top = corners.map(([x, z]) => P(x, plate, z));
     const rid = [P(-hx, ridge, 0), P(hx, ridge, 0)];
-    const off = [cx, box.y + 320];
+    const off = [cx, box.y + 400];
     const T = (p) => [p[0] + off[0], p[1] + off[1]];
     const so = { hand, weight: WEIGHTS.heavy, seed: panel.seed, step: 7 };
     strokePoly(c, base.map(T).concat([T(base[0])]), { ...so });
@@ -2590,9 +3360,11 @@ const RENDERERS = {
       strokePoly(c, [T(top[i]), T(rid[i === 1 || i === 2 ? 1 : 0])], { ...so, seed: panel.seed + 12 + i });
     }
     // A door and a window. The first domestic shapes in the game.
-    const dq = [P(-0.5, 0, hz), P(0.5, 0, hz), P(0.5, 2.05, hz), P(-0.5, 2.05, hz)];
+    // 0.90 x 2.05 at deck level, 1.10 x 0.86 window: CabinSite's DOOR_W/DOOR_H/WIN_W/WIN_H.
+    const dq = [P(-0.45, FOOT.deck, hz), P(0.45, FOOT.deck, hz),
+      P(0.45, FOOT.deck + 2.05, hz), P(-0.45, FOOT.deck + 2.05, hz)];
     strokePoly(c, dq.map(T).concat([T(dq[0])]), { hand, weight: WEIGHTS.medium, seed: panel.seed + 20, step: 6 });
-    const wq = [P(2.0, 1.1, hz), P(3.2, 1.1, hz), P(3.2, 2.0, hz), P(2.0, 2.0, hz)];
+    const wq = [P(1.30, 1.70, hz), P(2.40, 1.70, hz), P(2.40, 2.56, hz), P(1.30, 2.56, hz)];
     strokePoly(c, wq.map(T).concat([T(wq[0])]), { hand, weight: WEIGHTS.medium, seed: panel.seed + 24, step: 6 });
 
     // HJEM. One word. The player parses it as a product name, the way you parse KALLAX.
