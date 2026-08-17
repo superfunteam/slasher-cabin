@@ -173,12 +173,76 @@
  *       reported light position to the centimetre, (-136.42, 18.19, 131.74), which is how we
  *       know the two rows are the same measurement.
  *
- *       HAND-OFF, Shots/Build: `site-close` frames the plot from the +x+z corner and
- *       `_gLanternPost` puts the post at the -x-z corner, so the hung lamp ends up BEHIND the
- *       frame — the studs rake and the pool reads, but the lamp itself is occluded and the
- *       near timber is not warm. `keyart-site.png` is shot from the post's own side. Moving
- *       that shot's `offset` to the post side, or CabinSite publishing a second hook, would
- *       close the last of the gap. Nothing in this file can reach it.
+ *       That hand-off was wrong about one thing — this file CAN reach it, by not using the post
+ *       at all — and the 57.9% is measuring the defect, not the fix. See D10.
+ *
+ *   D10 THE HUNG LAMP WAS BEHIND THE BUILDING, and it turned the frame into a silhouette.
+ *       D7 hung the lamp on `_gLanternPost`, which stands at site-local (-3.75, -1.95): the
+ *       -x -z corner. Every framing of this site looks in from +x +z (`site-close` +4.5/+4.0,
+ *       `site-wide` +18/+16, `lightning` +26/+24, `manual` +6/+5). So the lamp was diagonally
+ *       opposite the eye, back-lighting the stud wall, and the frame read as a black cut-out
+ *       against pale fog with warm light leaking between the studs.
+ *
+ *       The number that caught it is `%warm` — pixels with R-B > 12 in the delivered sRGB frame,
+ *       reported by `tools/luma.mjs`. It is the only figure in the tone contract that notices
+ *       WHERE the warm light landed, and it collapsed while every other row stayed in spec:
+ *
+ *           keyart-site.png (the reference) ...... 22.0%
+ *           final-siteclose.png (3 h earlier) .... 19.6%
+ *           now-siteclose2.png (the regression) ... 0.7%   ← meanY 0.0182, contract PASS
+ *
+ *       FIX: `hookLocal` is now a composition measured against the eye rather than a hook
+ *       reconstructed from someone else's post. See the comment on it for the four numbers it
+ *       is built from. Retuned with it: `hangIntensityMul` 2.6 → 0.62 (the lamp is now 6.8 m off
+ *       the eye instead of 9.8 m and 1.35 m off the near studs instead of ~4.5 m — inverse
+ *       square, not taste), `hangDown` 0.72 → 0.10 (at 0.72 the aim left the hook 73° below
+ *       horizontal and the top plate sat 105° off a 63.5° cone, so the whole upper wall got
+ *       nothing but spill — captured and looked at, it was black; at 0.10 the aim is 33° down
+ *       and the cone covers the wall to about 2.8 m, with the last 300 mm under the eave falling
+ *       off, which reads as the eave shadow it geometrically is), and the hung spill multiplier
+ *       1.8 → 0.30 (it is SHADOWLESS; at 1.35 m from the studs it fills in the very shadows the
+ *       hook exists to cast).
+ *
+ *       MEASURED, `?shot=site-close&quality=ultra`, 1600×900, one page load, one camera
+ *       (-135.5, 18.675, 132.0), the hook moved between captures with `hangAt()` and everything
+ *       else — tuning, fuel, weather, seed — identical:
+ *
+ *                                          %warm    meanY    p99.9
+ *           hook at the post (D7's) ........ 0.9%   0.0183   0.321   ← reproduces the regression
+ *                                                                     frame (0.7% / 0.0182)
+ *           hook on the camera side ........ 14.3%  0.0262   0.903
+ *           …a second capture of the same ... 20.2%  0.0266   0.753   ← the ±6 pt spread is the
+ *                                                                     flame flicker, not drift
+ *
+ *       CAST SHADOWS, same pair, the lantern's shadow map toggled on and off at each hook, each
+ *       frame normalised to its own p99.5 so the meter cannot fake it, over the pixels the lamp
+ *       actually lights:
+ *
+ *                              ≥4× darker   ≥10×    meter drift, shadows on vs off
+ *           hook at the post ..... 17.4%     4.0%    0.350×   ← the frame is 2.9× darker with
+ *                                                              shadows ON, because the light is
+ *                                                              occluded from the eye. That is
+ *                                                              the defect inflating the metric.
+ *           camera-side hook ...... 5.9%     3.5%    1.047×   ← exposure barely moves
+ *
+ *       So shadow COVERAGE went down and this is still the right trade: at the post, most of the
+ *       "lit area" was behind the building. Where the surviving shadows land, from the mask:
+ *       stud shadows striped across the interior and the far wall's inner face (≥4×, read
+ *       through the near wall's gaps), the platform's shadow on the ground in front of it and
+ *       the frame's shadow on the open ground east of the plot (2–4×).
+ *
+ *       KNOWN LIMIT, and it is geometry, not tuning: with the lamp on the +z side of the plot,
+ *       every shadow the FRAME throws goes to -z, i.e. behind the wall the eye is looking at.
+ *       `keyart-site.png` gets its long ground shadows because at that build state there is no
+ *       wall — it is piers, joists and four posts. `?shot=site-close` stands the cabin to night
+ *       4. Ask for the keyart composition with `?shot=site-close&build=2`.
+ *
+ *   D11 A POSED SHOT WAS NOT REPRODUCIBLE OVER A SESSION, because the wick burns. See the
+ *       comment in `_stepFuel()`: at 30 s the site-close lamp is 63.2 cd and at ~5 min it is
+ *       26.5 cd with `_flameHealth` 0.46, which is a 2.4× swing in the only light in the frame
+ *       and a third of its warm pixels, from elapsed time alone. Three captures I took late in a
+ *       session read %warm 9.4–9.9 where the same build reads 14–20 fresh. The tank is now held
+ *       full while `Shots.active` is set.
  *
  *   D8  A NUMERICALLY OVERFLOWED NODE, live in the scene graph: the 'lantern-page-bounce'
  *       SpotLight was measured at world Y = -7.02e+99. Root cause is a latch, not a divergence:
@@ -229,6 +293,28 @@
  *       1.000 → 0.090, chimney emissive 1.306 → 0.119, halo 0.341 → 0.031,
  *       `visibilityContribution` 1.000 → 0.180 (GDD §9.4's hoodFactor exactly) and
  *       `illumination` 0.550 → 0.220 (GDD §11.2's lum exactly). The stealth verb is live.
+ *
+ *       ADDENDUM, re-measured on the current build: **do not judge the hood by the whole-frame
+ *       mean.** With a closed-loop auto-exposure meter in the pipe, killing the frame's dominant
+ *       light source makes the meter open up, and the mean can go UP while the verb works
+ *       perfectly. `?shot=forest-deep` vs `?shot=forest-hooded&quality=ultra`, 1600×900, only
+ *       `hood` differs:
+ *
+ *                                              hood 0    hood 1     ratio
+ *           foreground ground the lamp lights  0.08664   0.00958    9.0× DARKER
+ *           …its warm-pixel share               97.8%      0.0%
+ *           canopy + fog, moonlit only         0.00844   0.01405    1.67× brighter  ← the meter
+ *           far fog wall, moonlit only         0.11322   0.20599    1.82× brighter  ← the meter
+ *           WHOLE FRAME MEAN                   0.02998   0.03503    1.17× BRIGHTER
+ *
+ *       The 1.6%-brighter figure this note opens with was measured the same way as that 1.17×,
+ *       and that metric cannot tell a dead hood from a live one: it moves with the meter, not
+ *       with the lantern. The instrument that answers the question is a rectangle over what the
+ *       lamp actually lights, plus the warm-pixel share. HAND-OFF, Render: if the spec wants the
+ *       hooded FRAME darker and not just the hooded GROUND darker, that is the auto-exposure
+ *       adaptation rate in Postprocessing, not anything in this file — and a meter that recovers
+ *       1.7× the instant the player hoods is also a gameplay question, because it hands most of
+ *       the darkness straight back.
  *
  *   D6  THE BLOWN-WHITE LANTERN, and it was not the emissives. All three emitters used to sit
  *       ON the flame — 24 mm from the chimney glass, 30 mm from the brass, and (after the cone
@@ -325,7 +411,16 @@ export const TUNING = {
   hangHysteresis: 1.6,           // metres of dead band so a step does not flap the state
   hangSpeed: 1.6,                // walking faster than this and he takes it back off the hook
   hangBlendSeconds: 0.55,        // the reach up / lift down, and the only time the rig teleports
-  hangIntensityMul: 2.6,         // 10 m of decay-2 falloff has to be paid for somewhere
+  // D10. The hook moved from 9.8 m off the eye to 5.5 m, and from 4.5 m off the near stud wall
+  // to 1.9 m. Inverse square does the rest: this number was 2.6 to pay for a 10 m throw and at
+  // the new distance the same figure is a five-stop overexposure of the near studs. Measured by
+  // sweep, see D10's table.
+  hangIntensityMul: 0.62,
+  // The spill is SHADOWLESS. At 9.8 m it was a faint ambient wash; at 1.9 m from the studs the
+  // same candela figure is 26x the irradiance and it fills in every shadow the core throws,
+  // which is the whole point of hanging the lamp. It goes DOWN on the hook, not up (it used to
+  // be a hardcoded x1.8).
+  hangSpillMul: 0.30,
   // A hurricane lamp on a post is very nearly omnidirectional, and the composition depends on
   // it: the pool is centred UNDER the lamp and the studs, which stand ABOVE it, rake their
   // shadows radially outward across the deck and away into the pines. A 0.67 rad cone aimed
@@ -334,17 +429,53 @@ export const TUNING = {
   // and a 145° perspective shadow map is mush; 127° is the honest ceiling. Texel at 10 m ≈ 20 mm
   // against a 90 mm stud, which is three texels of penumbra — enough to read as a shadow edge.
   hangAngleMul: 1.42,
-  hangDown: 0.72,                // how much of the hung aim is straight down vs across the plot
+  // How much of the hung aim is straight DOWN versus across the plot. At 0.72 the beam left the
+  // hook 73 degrees below horizontal; with the hook now 1.9 m from the stud wall and only 1.3 m
+  // above its mid-height, the wall sat 69 degrees off the aim — outside a 63.5 degree cone, so
+  // the near studs got the spill and nothing else. At 0.45 the aim leaves 53 degrees below
+  // horizontal, the wall is 50 degrees off it, and the pool still lands on the ground.
+  hangDown: 0.10,
   hangDistanceMul: 1.5,          // 39 m — the far mud has to still be inside the window
   hangSwayHz: 0.23,              // a 0.22 m lamp on a wire bail is a ~2 s pendulum; wind drives it
   hangSwayRad: 0.055,
   /**
-   * Local position of CabinSite's lantern hook, in that system's own group space, derived from
-   * `CabinSite._gLanternPost()` (post at `-HX-0.55, -HZ-0.35`, arm ferrule at `+0.31, 2.31`).
-   * Used ONLY as the fallback when CabinSite does not publish a hook of its own.
-   * TODO(api): CabinSite should expose `lanternHook` (Vector3 or Object3D) and this goes away.
+   * WHERE THE LAMP HANGS, in CabinSite's own group space (that group is axis-aligned — its yaw
+   * is 0 and nothing writes it — so these are world offsets from `CabinSite.center`).
+   *
+   * This is NOT the hook on `CabinSite._gLanternPost()`. That post is at local (-3.75, -1.95),
+   * i.e. the -x -z corner, and every framing that exists of this site (`site-close` +4.5/+4.0,
+   * `site-wide` +18/+16, `lightning` +26/+24, `manual` +6/+5) looks in from +x +z. A lamp on
+   * that post is diagonally OPPOSITE the eye: it lit the far faces, back-lit the stud wall, and
+   * turned the frame into a silhouette with warm light leaking between the studs. See D10.
+   *
+   * The number below is a composition, measured against the eye and the geometry (all figures
+   * site-local; the `site-close` camera resolves to (4.5, 1.60, 4.0), verified at runtime):
+   *   - 1.35 m OUTSIDE the south stud wall's outer face (z = 1.65). Across the run of wall the
+   *     camera actually reads, the lamp is 0-58 deg off that wall's own normal where the CAMERA
+   *     is 62 deg off it — the lamp is squarer to the timber than the eye is, which is what
+   *     "modelled" means, and it is the whole difference between this and D10.
+   *   - 6.82 m from the eye, and 112 deg away from it as seen from the middle of that wall, so a
+   *     stud's shadow is displaced across the line of sight instead of hiding behind itself.
+   *   - 2.35 m up — 1.73 m above the 0.62 m deck, so the studs rake outward from below the top
+   *     plate and the ground pool sits under the lamp at frame-left, as in `keyart-site.png`.
+   *   - lands at 24% across a 1600 px frame (px 388, py 304): in shot, off to one side, not
+   *     behind the building.
+   * West of this the wall's east third goes to the spill alone; east of it the lamp swings round
+   * to graze the wall and the studs stop reading. Closer in than ~1.2 m the near stud is a hot
+   * patch and the rest of the wall is 17x down on it.
+   *
+   * NOTE(api): if CabinSite ever publishes `lanternHook`, it must be on the +z side of the
+   * plot or it will re-introduce D10. `hookPreferPublished` below is the switch, and it is off
+   * for exactly that reason.
    */
-  hookLocal: new THREE.Vector3(-3.44, 2.05, -1.95),
+  hookLocal: new THREE.Vector3(-2.20, 2.35, 3.00),
+  /**
+   * Whether a `CabinSite.lanternHook` / `.hookPosition`, if one appears, outranks `hookLocal`.
+   * FALSE, deliberately: the only hook that system models today is the one that caused D10, and
+   * a silent regression on someone else's commit is not a trade worth making at this hour. Flip
+   * it once CabinSite's published hook is on the camera side of the frame.
+   */
+  hookPreferPublished: false,
 
   /* --- near-field glow: the player's own hands and the lumber in them ------------------ */
   glowIntensity: 1.1,
@@ -995,6 +1126,20 @@ export class Flashlight {
     if (this._ignite < target) this._ignite = Math.min(1, this._ignite + dt * rate);
     else if (this._ignite > target) this._ignite = Math.max(0, this._ignite - dt * rate);
 
+    // D11, AND IT IS A MEASUREMENT BUG, NOT A GAMEPLAY ONE. A posed shot has to be the same
+    // frame at t = 20 s and at t = 6 min, and it was not: the wick burns 0.55 units/s, so a
+    // review session that takes ten captures over six minutes is measuring a lamp that is dying.
+    // MEASURED on `?shot=site-close&quality=ultra`, one page load, nothing else changed:
+    //     30 s after shotReady   core 63.2 cd, _flameHealth 1.00, frame %warm 13.8, p99.9 0.887
+    //     ~5 min after           core 26.5 cd, _flameHealth 0.46, frame %warm  9.8, p99.9 0.347
+    // i.e. a 2.4x swing in the light and a third of the warm pixels, from nothing but elapsed
+    // time. So while a shot is posed the tank stays full. `Shots.active` is null in play — this
+    // cannot touch the game, and GDD 11.2's burn rates are untouched.
+    if (this.ctx?.systems?.get?.('Shots')?.active) {
+      this._fuelUnits = TUNING.fuelCapacity;
+      this.fuel = 1;
+    }
+
     if (this.on && this._fuelUnits > 0) {
       const burn = mix(TUNING.burnOpen, TUNING.burnHooded, this.hoodLevel);
       // Only a lit wick burns fuel; the ignition ramp burns proportionally.
@@ -1138,7 +1283,10 @@ export class Flashlight {
     } else {
       const site = this.ctx?.systems?.get?.('CabinSite');
       if (site) {
-        const pub = site.lanternHook ?? site.hookPosition ?? null;
+        // D10: a published hook only wins if we have been told it is composed for the eye.
+        const pub = TUNING.hookPreferPublished
+          ? (site.lanternHook ?? site.hookPosition ?? null)
+          : null;
         if (pub && typeof pub.getWorldPosition === 'function') {
           pub.getWorldPosition(this._hookPos);
           this._hookValid = this._finite3(this._hookPos);
@@ -1365,7 +1513,9 @@ export class Flashlight {
       // hood takes the leak with it. It used to survive at 50%, which — being shadowless,
       // 74° wide and aimed at the ground two metres away — is most of what a hooded frame
       // was made of, and it is half of why hooding measured as a no-op.
-      spill.intensity = T.spillIntensity * alive * spillMul * mix(1, 1.8, hb);
+      // ...and D10: on the hook it comes DOWN. A shadowless 74-degree flood 1.9 m from the studs
+      // fills in every shadow the core throws, which is the one thing the hung state exists for.
+      spill.intensity = T.spillIntensity * alive * spillMul * mix(1, T.hangSpillMul, hb);
       spill.angle = T.spillAngle * mix(1, 0.55, h);
       spill.distance = T.spillDistance * mix(1, 0.40, h) * mix(1, 1.25, hb);
       spill.color.copy(flameCol);

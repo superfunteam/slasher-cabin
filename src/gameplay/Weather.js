@@ -300,6 +300,36 @@ void main() {
   // so the pixel figure is the ONLY correct authority and the world figure is deleted.
   float wid = dist * uPxWidth * aParams.z;
 
+  // ---------------------------------------------------------------------------------------
+  // A STREAK IS NEVER ALLOWED TO BE ROUND. This is the orange-confetti bug.
+  //
+  // The width above is pinned to a pixel count, so it does NOT shrink with distance. The
+  // smear length is velocity * shutter in METRES, so it does. Past a few metres the two
+  // meet and every drop degenerates into a ~2 px square. Composited amber over a black
+  // forest, a 2 px square is a glitter dot, and a few hundred of them in a lantern beam are
+  // a confetti field. Measured on the defect build at shot=site-close, over the 998 drops
+  // with cone weight > 0.5: median 9.3 px long by 1.67 px wide (5.7:1), 5th percentile
+  // 1.6:1, and 16.2% of them under 3:1. Those are the dots.
+  //
+  // keyart-site.png, measured on a 3x crop around the lantern: the streaks run roughly
+  // 20-70 px long at 1-2 px wide, i.e. 20:1 to 50:1, and they are continuous lines.
+  //
+  // So the floor is expressed as an ASPECT RATIO rather than a length. Because the width is
+  // itself proportional to distance, an aspect floor is a SCREEN-SPACE quantity: it
+  // lengthens a far drop in world units until it still projects to a line. That is also
+  // what a long exposure of rain at twenty metres actually looks like — the far drops do
+  // not become dots, they become fainter lines.
+  #ifdef DRIP
+    float aspect = 4.5;                 // a canopy drip is a fat slow drop, not a hair
+  #else
+    float aspect = 17.0 + 11.0 * aParams.y;
+  #endif
+  len = max(len, wid * aspect);
+  // ...and never longer than this. The cap only ever binds on the far shell, where the
+  // aspect floor asks for metres; without it a drop a metre from the lens under a
+  // downward-pitched camera becomes a spike radiating from the nadir.
+  len = min(len, 1.45);
+
   vec3 wp = p + dir * ((position.y - 0.5) * len) + side * (position.x * wid);
 
   // --- alpha
@@ -324,9 +354,14 @@ void main() {
   // lantern beam. The old 0.56 near-shell alpha, flat-topped across a multi-pixel quad, was
   // opaque paint. These numbers came down again when the density went up: the integrated
   // veil is what should read, never a single drop.
-  float base = mix(0.085, 0.055, shell);
+  //
+  // These came down again when the aspect floor went in: a streak that is now 25-45 px long
+  // instead of 9 px covers ~2x the pixels, so the same per-drop alpha would have doubled the
+  // integrated veil and pushed the frame off the §3.1.1 tone contract. Coverage went up, so
+  // opacity comes down; the READ is unchanged and the shape is right.
+  float base = mix(0.048, 0.034, shell);
   #ifdef DRIP
-    base = 0.17;                       // a canopy drip is a fat slow drop and reads as one
+    base = 0.15;                       // a canopy drip is a fat slow drop and reads as one
   #endif
   float a = alive * edge * nearFade * fogFade * base;
 
@@ -334,13 +369,33 @@ void main() {
     a *= smoothstep(0.02, 0.22, uRain);
   #endif
 
-  // --- lighting. ART §5.4: streaks inside a light cone are lit at 2.2x. One dot product.
+  // --- lighting. ART §5.4: a streak inside the lantern's light is lit by it.
+  //
+  // THE FALLOFF MUST BE SMOOTH IN BOTH AXES. The previous form was
+  //     smoothstep(cosOuter, cosInner, cosA) * (1.0 - smoothstep(range*0.45, range, dl))
+  // which is a plateau with a rim: every drop inside 45% of the throw was lit at FULL
+  // strength, and the drop beside it one penumbra-width further off axis was lit at zero.
+  // Against a black forest that draws a hard-edged wedge of amber with a visible boundary —
+  // the beam stencils the rain instead of finding it. Two changes:
+  //
+  //   * the angular ramp starts OUTSIDE the geometric cone. A hurricane lantern spills, and
+  //     the spill is the whole reason rain fades out of a beam rather than stopping at it.
+  //     At shot=site-close the spot is 63 deg with 0.62 penumbra, so the ramp now runs from
+  //     ~91 deg off-axis in to 30 deg instead of 63 in to 30.
+  //   * the radial term is an inverse-square falloff instead of a plateau, so brightness
+  //     changes continuously with distance from the flame, which is what light does. The
+  //     remaining smoothstep is only there to reach exactly zero at the light's own range so
+  //     no drop is lit beyond where the spot itself reaches.
   vec3 toL = p - uLanternPos;
   float dl = length(toL);
   float cosA = dot(toL / max(dl, 1e-4), uLanternAxis);
-  float cone = smoothstep(uLanternParams.x, uLanternParams.y, cosA)
-             * (1.0 - smoothstep(uLanternParams.w * 0.45, uLanternParams.w, dl));
-  float lantern = cone * uLanternParams.z;
+  float spill = mix(uLanternParams.x, -1.0, 0.34);
+  float ang = smoothstep(spill, uLanternParams.y, cosA);
+  ang *= ang;
+  float rn = dl / max(uLanternParams.w * 0.20, 0.5);
+  float atten = (1.0 / (1.0 + rn * rn))
+              * (1.0 - smoothstep(uLanternParams.w * 0.50, uLanternParams.w, dl));
+  float lantern = ang * atten * uLanternParams.z;
 
   // ART §2.1, THE ONE RULE: the only warm light in the world is human. A drop crossing the
   // lantern beam is lit BY the lantern, so it must come back amber, not blue — in
@@ -351,16 +406,24 @@ void main() {
   //
   // The moon term is deliberately below the moonlit mud it falls on (§3.1 target 0.045 rel.
   // luminance): rain in the open forest is not allowed to paint itself over the black.
+  //
+  // 2.10 was too hot: at 0.42 alpha over a near-black plate, a 2.10 amber radiance composites
+  // to a solid saturated disc, which is the other half of why the dots read as glitter rather
+  // than water. 1.55 still comes back unmistakably amber and still sits above the timber it
+  // falls past without becoming paint.
   vColor = uRainColor    * (0.13 + 0.26 * uMoon)
-         + uLanternColor * (2.10 * lantern)
+         + uLanternColor * (1.55 * lantern)
          + uFlashColor   * (1.60 * uLightning);
 
   // The beam does not just make a drop brighter, it makes it *present*: alpha rises inside
   // the cone too. That is the whole point of the effect — nearly nothing in the forest,
   // unmistakable in the lantern — and brightness alone cannot buy it at 0.08 alpha.
-  a *= 1.0 + 3.6 * lantern + 1.4 * uLightning;
+  a *= 1.0 + 3.4 * lantern + 1.4 * uLightning;
 
-  vAlpha = min(a, 0.42);
+  // The ceiling is what stops a drop becoming a solid mark. 0.42 was high enough that a lit
+  // near drop was effectively opaque; 0.30 keeps the brightest streak translucent, so what
+  // reads is the density of the field and not any one line in it.
+  vAlpha = min(a, 0.30);
   if (a < 0.002) {
     gl_Position = vec4(2.0, 2.0, 2.0, 1.0);   // off-screen, no fill cost
     return;
@@ -381,7 +444,9 @@ void main() {
   // triangular profile the rasteriser samples the ramp at a random offset and the drop reads
   // at a third of its intended brightness, which is how rain becomes invisible.
   float across = smoothstep(0.0, 0.45, 1.0 - abs(vQuad.x - 0.5) * 2.0);
-  float along = smoothstep(0.0, 0.20, vQuad.y) * (1.0 - smoothstep(0.72, 1.0, vQuad.y));
+  // Taper both ends over a quarter of the streak. Now that a streak is 25-45 px rather than
+  // 9, a squared-off end reads as a drawn tick mark; a tapered one reads as motion.
+  float along = smoothstep(0.0, 0.26, vQuad.y) * (1.0 - smoothstep(0.70, 1.0, vQuad.y));
   float a = vAlpha * across * along;
   if (a < 0.002) discard;
   gl_FragColor = vec4(vColor, a);
@@ -438,11 +503,20 @@ void main() {
   // Same ONE RULE as the streaks: a ring breaking in the lantern pool is lit by the lantern
   // and comes back amber. A cold ring inside a warm pool reads as a decal sitting on top of
   // the image instead of a disturbance in it.
+  // Identical falloff to STREAK_VERT — angular spill outside the geometric cone plus an
+  // inverse-square radial term. If the ripples kept the old plateau-and-rim form, the ring
+  // that broke just outside the beam would be a different colour from the one just inside it
+  // and the pool would have a visible edge drawn round it.
   vec3 toL = wp - uLanternPos;
   float dl = length(toL);
   float cosA = dot(toL / max(dl, 1e-4), uLanternAxis);
-  float lantern = smoothstep(uLanternParams.x, uLanternParams.y, cosA)
-                * (1.0 - smoothstep(uLanternParams.w * 0.45, uLanternParams.w, dl))
+  float spill = mix(uLanternParams.x, -1.0, 0.34);
+  float ang = smoothstep(spill, uLanternParams.y, cosA);
+  ang *= ang;
+  float rn = dl / max(uLanternParams.w * 0.20, 0.5);
+  float lantern = ang
+                * (1.0 / (1.0 + rn * rn))
+                * (1.0 - smoothstep(uLanternParams.w * 0.50, uLanternParams.w, dl))
                 * uLanternParams.z;
   vColor = uRippleColor  * (0.16 + 0.30 * uMoon)
          + uLanternColor * (1.10 * lantern)
@@ -681,14 +755,16 @@ export class Weather {
     // sub-pixelling into nothing.
     const fov = (this.ctx?.camera?.fov ?? 72) * Math.PI / 180;
     const px = (2 * Math.tan(fov * 0.5)) / Math.max(1, height || this.ctx?.height || 1080);
-    // ~1.25 px. The fragment profile (STREAK_FRAG) is flat-topped across the middle 55% with
-    // soft shoulders, so 1.25 px of quad is ~0.7 px of solid core plus antialiased edges —
-    // a hairline, which is what a raindrop is. The old 2.4 was chosen to stop far streaks
-    // sub-pixelling away; the hard 0.006 ceiling now does that job without letting a NEAR
-    // streak grow into a bar, because width is no longer allowed a world-space floor at all.
-    const w = clamp(px * 1.25, 0.0006, 0.006);
+    // ~1.2 px of quad. The fragment profile (STREAK_FRAG) is flat-topped across the middle
+    // 55% with soft shoulders, so this is ~0.7 px of solid core plus antialiased edges — a
+    // hairline, which is what a raindrop is, and it matches the 1-2 px the streaks measure in
+    // keyart-site.png. The old 2.4 was chosen to stop far streaks sub-pixelling away; the
+    // aspect floor in STREAK_VERT now does that job by lengthening them instead, which is the
+    // correct axis to fix it on — a far drop should get shorter and fainter, never fatter.
+    // The 0.0045 ceiling matters on a small viewport, where px alone would draw a bar.
+    const w = clamp(px * 1.2, 0.0006, 0.0045);
     this._streakMat.uniforms.uPxWidth.value = w;
-    if (this._dripMat) this._dripMat.uniforms.uPxWidth.value = w * 1.5;
+    if (this._dripMat) this._dripMat.uniforms.uPxWidth.value = w * 1.7;
   }
 
   dispose() {
@@ -1743,12 +1819,17 @@ export class Weather {
       // is a lot of it at forty, where it is a sub-pixel smear and costs the same.
       const shell = i < streakCount * 0.78 ? 0 : 1;
       par[i * 4 + 0] = shell;
-      par[i * 4 + 1] = r.range(0.7, 1.5) * (shell ? 1.5 : 1.0);
-      // aParams.z is now a multiplier on a PIXEL width, not on a world width, so its range
-      // is the variation between one drop and another (a little scatter keeps the field from
-      // reading as a screen-door) and nothing more. The far shell is allowed a third again
-      // so a 40 m streak still lands on a whole pixel; anything beyond that is a bar.
-      par[i * 4 + 2] = r.range(0.85, 1.20) * (shell ? 1.35 : 1.0);
+      // aParams.y scatters BOTH the shutter-driven length and the aspect floor, so this is
+      // the attribute that keeps the field from reading as one repeated dash. The far-shell
+      // bonus is 1.2, down from 1.5: with the aspect floor the far drops are already long,
+      // and 1.5 let the length cap bind on nearly all of them, which flattened the variety.
+      par[i * 4 + 1] = r.range(0.7, 1.5) * (shell ? 1.2 : 1.0);
+      // aParams.z is a multiplier on a PIXEL width, not on a world width, so its range is the
+      // variation between one drop and another and nothing more. The far shell's old 1.35
+      // bonus existed to stop a 40 m streak sub-pixelling away; the aspect floor now handles
+      // that by making it longer, and the bonus is deleted — a fat far drop is a dot, which
+      // is the exact defect this pass exists to remove.
+      par[i * 4 + 2] = r.range(0.85, 1.20);
       par[i * 4 + 3] = r.range(0.82, 1.22);
       sed[i] = r.next();
     }
@@ -1785,7 +1866,7 @@ export class Weather {
     const dSed = new Float32Array(dripCount);
     for (let i = 0; i < dripCount; i++) {
       dPar[i * 4 + 1] = r.range(1.1, 2.0);     // longer streak: a drip is a fat slow drop
-      dPar[i * 4 + 2] = r.range(1.05, 1.45);   // pixel-width multiplier — see the streak note
+      dPar[i * 4 + 2] = r.range(0.95, 1.25);   // pixel-width multiplier — see the streak note
       dPar[i * 4 + 3] = TUNING.dripFall;
     }
     this._dripAttr = new THREE.InstancedBufferAttribute(dOff, 3);
@@ -1906,11 +1987,13 @@ export class Weather {
     su.uMoon.value = moon;
     su.uFogD0.value = fogD0;
     su.uFallSpeed.value = lerp(6.4, 10.4, clamp01(this.rain));
-    // The streak IS the motion blur, so this is a shutter angle and it is short. 0.030 s at
-    // 9 m/s is a 0.27 m smear, which at the two metres where most drops live is 120 screen
-    // pixels of falling white line. 0.010-0.015 s puts a near streak at 25-45 px, which is
-    // the length rain has in the reference plate.
-    su.uShutter.value = lerp(0.010, 0.015, clamp01(this.rain));
+    // The streak IS the motion blur, so this is a shutter angle. It only sets the length of
+    // the drops close enough for velocity * shutter to beat the aspect floor — i.e. the
+    // nearest couple of metres, where the field wants its longest lines. 0.030 s at 9 m/s is
+    // a 0.27 m smear, which at two metres is 120 px of falling white line and reads as a
+    // scratch; 0.012-0.018 s puts a 1 m drop at 45-70 px, which is the top of the range the
+    // streaks measure in keyart-site.png.
+    su.uShutter.value = lerp(0.012, 0.018, clamp01(this.rain));
 
     this._readLantern(su.uLanternPos.value, su.uLanternAxis.value, su.uLanternParams.value);
 
