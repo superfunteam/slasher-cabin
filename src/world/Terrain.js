@@ -51,7 +51,7 @@ export const SURFACES = ['needles', 'mud', 'moss', 'granite', 'water', 'gravel']
  * Shared-library material names Terrain will take its ground constants from, best first.
  * These are the real keys in src/render/Materials.js — not guesses.
  */
-const GROUND_MATERIAL_NAMES = ['ground-needles', 'ground-duff', 'ground-mud', 'granite'];
+const GROUND_MATERIAL_NAMES = ['ground-needles', 'ground-moss', 'ground-mud', 'granite'];
 const S_NEEDLES = 0, S_MUD = 1, S_MOSS = 2, S_GRANITE = 3, S_WATER = 4, S_GRAVEL = 5;
 
 /**
@@ -981,6 +981,38 @@ export class Terrain {
         denF[j * dn + i] = fbm((this.x0 + i * 4) * 0.0072 + 4.3, z * 0.0072 - 2.7, 4, s + 401);
       }
     }
+    // ---------------- canopy sky occlusion ----------------
+    // A clearing's sky view factor is set by the trees AROUND it, not by the trees standing on
+    // it. The old exposure term read only the density at the sample point, so a hole in dense
+    // forest — and the camp clearing itself — came out at exposure 1.0 and collected the entire
+    // HemisphereLight. The terrain is the only large surface in the game whose normal points
+    // straight up at that light, so that single number is why every clearing rendered as the
+    // brightest large area in the frame (measured: camp clearing exposure 0.98).
+    // Baked on the 4 m grid and sampled bilinearly: 129^2 x 24 taps, once, at load.
+    const occF = new Float32Array(dn * dn);
+    {
+      const RC = [1, 0.7071, 0, -0.7071, -1, -0.7071, 0, 0.7071];
+      const RS = [0, 0.7071, 1, 0.7071, 0, -0.7071, -1, -0.7071];
+      const RINGS = [1, 2, 4];              // 4 m, 8 m, 16 m out
+      const RW = [0.46, 0.34, 0.20];        // a 22 m canopy: near trees subtend far more sky
+      for (let j = 0; j < dn; j++) {
+        for (let i = 0; i < dn; i++) {
+          let acc = 0;
+          for (let r = 0; r < 3; r++) {
+            const rr = RINGS[r];
+            let s = 0;
+            for (let a = 0; a < 8; a++) {
+              const ii = clamp(i + Math.round(RC[a] * rr), 0, dn - 1);
+              const jj = clamp(j + Math.round(RS[a] * rr), 0, dn - 1);
+              s += smoothstep(0.34, 0.74, denF[jj * dn + ii]);
+            }
+            acc += (s * 0.125) * RW[r];
+          }
+          occF[j * dn + i] = acc;
+        }
+      }
+    }
+
     const bi = (arr, w, fi, fj) => {
       const ix = fi | 0, iz = fj | 0;
       const tx = fi - ix, tz = fj - iz;
@@ -1067,6 +1099,7 @@ export class Terrain {
 
         // ---------------- sky exposure (aExposure per ART_DIRECTION §5.1) ----------------
         let e = 1 - 0.78 * clamp01(d);
+        e *= 1 - 0.82 * clamp01(bi(occF, dn, fi4, fj4));   // trees AROUND this point, see above
         e *= 1 - concave * 0.20;
         e = lerp(e, Math.min(1, e + 0.25), clamp01(overWater / 30));  // open ground near the lake
         expo[idx] = Math.round(clamp01(e) * 255);
@@ -1369,10 +1402,14 @@ export class Terrain {
       // WHITE on purpose: the splat in _patchFragment IS the albedo (`diffuseColor.rgb *=
       // gAlbedo`). Any tint here multiplies the whole art-directed palette a second time.
       color: 0xffffff,
-      // roughness/metalness are overwritten per-pixel by the splat; these are the values three
-      // uses for anything the patch does not reach, so keep them in step with the library.
-      roughness: Number.isFinite(ref?.roughness) ? ref.roughness : 0.85,
-      metalness: Number.isFinite(ref?.metalness) ? ref.metalness : 0.0,
+      // roughness/metalness are ABSOLUTE per-pixel writes in the splat (`roughnessFactor = gRough`
+      // replaces the chunk outright, it does not multiply), and there is no roughnessMap bound
+      // here. So these must NOT be copied from the library: Materials sets roughness = 1 /
+      // metalness = 1 whenever it binds a Textures ORM set, and adopting those would either
+      // double-apply or hand three a metallic ground for every path the patch does not reach
+      // (depth/shadow prepass, a driver that drops the patch). Pinned, deliberately.
+      roughness: 1.0,
+      metalness: 0.0,
       dithering: true, side: THREE.FrontSide,
     });
     if (Number.isFinite(ref?.envMapIntensity)) mat.envMapIntensity = ref.envMapIntensity;
@@ -1482,6 +1519,7 @@ varying vec3 vWNrm;
 vec3 gAlbedo = vec3( 0.5 );
 float gRough = 0.8;
 float gAO = 1.0;
+float gWet = 0.0;
 vec3 gNrmW = vec3( 0.0, 1.0, 0.0 );
 
 vec3 tSrgb( vec3 c ) {
@@ -1535,10 +1573,15 @@ vec4 tTri( sampler2D t, vec3 p, float sc, vec3 an, float w, vec4 planar ) {
   float ws = wN + wM + wMo + wG + wGr + 1e-5;
   wN /= ws; wM /= ws; wMo /= ws; wG /= ws; wGr /= ws;
 
-  // ---- per-family albedo (ART_DIRECTION §2.2 / §5.2) ----
-  vec3 cNeedle = mix( tSrgb( vec3( 0.290, 0.267, 0.200 ) ),   // foliage.dead #4a4433
-                      tSrgb( vec3( 0.141, 0.122, 0.086 ) ),   // dark duff #241f16
-                      clamp( dMicro.r * 0.75 + dMeso.g * 0.45, 0.0, 1.0 ) );
+  // ---- per-family albedo (ART_DIRECTION 2.2 palette, 6.2 material table) ----
+  // The terrain's dominant surface is the table's 'Wet earth / duff' row, authored at #2a221b
+  // (0.0165 rel. luminance). foliage.dead #4a4433 (0.0583) is the DRY needle litter that only
+  // survives under canopy shelter, so it is the top of the range and must not also be the mean.
+  // The previous blend centred on #362f24 (0.0264) - 1.6x the authored wet-earth value - which
+  // is most of why the clearing was the brightest large area in the frame.
+  vec3 cNeedle = mix( tSrgb( vec3( 0.290, 0.258, 0.196 ) ),   // foliage.dead #4a4433, dry litter
+                      tSrgb( vec3( 0.094, 0.076, 0.054 ) ),   // soaked duff #18130e
+                      clamp( dMicro.r * 0.70 + dMeso.g * 0.50 + 0.10, 0.0, 1.0 ) );
   cNeedle *= 0.86 + 0.28 * dMicro.g;
 
   vec3 cMud = mix( tSrgb( vec3( 0.165, 0.133, 0.106 ) ),      // mat.mud #2a221b
@@ -1557,14 +1600,21 @@ vec4 tTri( sampler2D t, vec3 p, float sc, vec3 an, float w, vec4 planar ) {
   cGran = mix( cGran, tSrgb( vec3( 0.541, 0.573, 0.604 ) ), smoothstep( 0.90, 1.00, dMicro.r ) );
   cGran *= 0.88 + 0.24 * dMacro.g;
 
+  // Gravel's lit pebble tone is capped so the family mean stays under mid.stone #3b464b
+  // (0.0582), which ART_DIRECTION 2.2 names as the brightest natural diffuse in the game.
   float peb = smoothstep( 0.35, 0.72, dMicro.g );
-  vec3 cGrav = mix( tSrgb( vec3( 0.196, 0.227, 0.243 ) ), tSrgb( vec3( 0.365, 0.400, 0.420 ) ), peb );
+  vec3 cGrav = mix( tSrgb( vec3( 0.196, 0.227, 0.243 ) ), tSrgb( vec3( 0.318, 0.348, 0.366 ) ), peb );
   cGrav *= 0.85 + 0.30 * dMicro.r;
 
   vec3 albedo = cNeedle * wN + cMud * wM + cMoss * wMo + cGran * wG + cGrav * wGr;
   albedo *= 0.90 + 0.20 * dMacro.g;                      // 10 m scale breakup
 
-  float rough = 0.90 * wN + 0.16 * wM + 0.72 * wMo + 0.55 * wG + 0.78 * wGr;
+  // Roughness per the ART_DIRECTION 6.2 material table: wet earth/duff 0.30, mud 0.16, moss 0.72,
+  // granite 0.55, gravel 0.78. The duff term used to be 0.90 - a chalk-matte lambertian sheet that
+  // returns the entire hemisphere as flat, view-independent diffuse and no specular structure at
+  // all. That is the other half of the 'pale sheet' read, and it is why the lantern threw no
+  // highlights on the ground.
+  float rough = 0.34 * wN + 0.16 * wM + 0.72 * wMo + 0.55 * wG + 0.78 * wGr;
   float poro  = 1.00 * wN + 1.00 * wM + 0.85 * wMo + 0.55 * wG + 0.70 * wGr;
 
   // ---- dirt in crevices ----
@@ -1572,16 +1622,44 @@ vec4 tTri( sampler2D t, vec3 p, float sc, vec3 an, float w, vec4 planar ) {
   float cavMicro = 1.0 - dMicro.a;
   albedo *= mix( 1.0, 0.58, cav * 0.55 + cavMicro * 0.25 );
 
-  // ---- the four-part wetness model (ART_DIRECTION §5.1) ----
-  float W = clamp( vMisc.y * ( 0.42 + 0.58 * uWet ) + uRain * vMisc.z * 0.55 + cav * uRain * 0.35, 0.0, 1.0 );
-  albedo *= mix( 1.0, 0.62, W * poro );
-  rough = mix( rough, 0.075, W * ( 1.0 - dMeso.a * 0.4 ) );
+  // ---- the four-part wetness model (ART_DIRECTION 6.1) ----
+  // 6.1 opens with 'The world is damp every night', so W carries a floor. uWet is the Materials
+  // accumulating integrator and reads 0.26 on a clear night with uRain 0, which on its own gave
+  // W = 0.07 here and a 3% albedo darkening instead of the 38% the model specifies. Measured, on
+  // the ridge shot, before this line was fixed.
+  float soak = max( uWet, 0.42 );
+  float W = clamp( ( 0.30 + 0.70 * vMisc.y ) * soak
+                 + uRain * ( 0.22 + 0.55 * vMisc.z )
+                 + cav * ( 0.22 + 0.40 * uRain ), 0.0, 1.0 );
+
+  // 1. darkened albedo, scaled by porosity. Water fills the micro-voids and kills diffuse
+  //    backscatter, so soil goes to roughly a third and granite barely moves.
+  albedo *= mix( 1.0, 0.34, W * poro );
+
+  // 2. crushed roughness - wet surfaces become mirrors, aggressively. Weighted toward cavities:
+  //    water stands in the low spots, it does not sheet evenly over an open plane, and crushing
+  //    the whole clearing to 0.075 hands the SSR pass a lake.
+  rough = mix( rough, 0.075, W * ( 1.0 - dMeso.a * 0.35 ) * ( 0.30 + 0.70 * cav ) );
+
+  // Specular detail below a pixel has to become roughness with distance or the ground mirrors
+  // and sparkle-aliases (the Toksvig argument, trap 7). This is the near-field fade: the
+  // lantern pool at 0-8 m keeps its full wet sheen, the clearing past ~30 m does not.
+  float sfade = smoothstep( 8.0, 34.0, camDist );
+
+  // 3. puddle accumulation in cavities: albedo toward water.body #0b171c, roughness toward 0.02,
+  //    normal toward flat. Only on near-level ground, and only once the surface is genuinely wet.
+  float pud = smoothstep( 0.55, 0.94, cav * 0.65 + cavMicro * 0.35 )
+            * smoothstep( 0.25, 0.75, W )
+            * smoothstep( 0.35, 0.10, 1.0 - gn.y )
+            * ( 1.0 - sfade * 0.85 );
+  albedo = mix( albedo, tSrgb( vec3( 0.043, 0.090, 0.110 ) ), pud * 0.85 );
+  rough = mix( rough, 0.020, pud * 0.90 );
 
   // ---- normal: two-scale, distance-faded into roughness (Toksvig-ish, trap 7) ----
   float nStr = mix( 1.0, 0.18, dfade );
   vec3 nTS = normalize( vec3( ( nMeso.xy * 1.15 + nMicro.xy * 0.85 ) * nStr, 1.0 ) );
-  nTS = normalize( mix( nTS, vec3( 0.0, 0.0, 1.0 ), W * cav * 0.75 ) );
-  rough = clamp( mix( rough, rough + 0.18, dfade ), 0.030, 1.0 );
+  nTS = normalize( mix( nTS, vec3( 0.0, 0.0, 1.0 ), max( W * cav * 0.75, pud * 0.90 ) ) );
+  rough = clamp( max( mix( rough, rough + 0.18, dfade ), sfade * 0.40 ), 0.030, 1.0 );
 
   vec3 Tv = normalize( vec3( 1.0, 0.0, 0.0 ) - gn * gn.x );
   vec3 Bv = cross( Tv, gn );
@@ -1589,7 +1667,14 @@ vec4 tTri( sampler2D t, vec3 p, float sc, vec3 an, float w, vec4 planar ) {
 
   gAlbedo = albedo;
   gRough = rough;
-  gAO = clamp( vMisc.w * ( 1.0 - 0.35 * cav ) * ( 1.0 - 0.20 * cavMicro ), 0.0, 1.0 );
+  gWet = W * ( 1.0 - sfade * 0.70 );   // the F0 lift is a near-field read, same reason as sfade
+  // The hemisphere / probe term is the ground's dominant illuminant, and the terrain is the only
+  // large surface in the game whose normal points straight at it - trees, timber and campers all
+  // present near-vertical normals and collect a fraction of it. Occluding it by the baked sky
+  // view factor (vMisc.z, which already accounts for canopy density) as well as by terrain
+  // horizon AO is what stops a clearing ringed by 30 m pines reading as an open field.
+  float skyView = mix( 0.10, 1.0, vMisc.z * vMisc.z );
+  gAO = clamp( vMisc.w * skyView * ( 1.0 - 0.35 * cav ) * ( 1.0 - 0.20 * cavMicro ), 0.0, 1.0 );
 }
 diffuseColor.rgb *= gAlbedo;`;
     if (f.includes('#include <map_fragment>')) f = f.replace('#include <map_fragment>', surface);
@@ -1605,6 +1690,16 @@ diffuseColor.rgb *= gAlbedo;`;
     if (f.includes('#include <aomap_fragment>')) {
       f = f.replace('#include <aomap_fragment>',
         '#include <aomap_fragment>\n  reflectedLight.indirectDiffuse *= gAO;');
+    }
+    // ART_DIRECTION 6.1 op 4 — grazing-angle sheen: Schlick F0 0.02 lifted toward 0.06 on wet
+    // ground. metalness is pinned to 0 here, so specularColorBlended is just specularColor and
+    // writing both keeps three's own invariant. This is the term that puts the lantern's wet
+    // glitter on the mud in the key art.
+    if (f.includes('#include <lights_physical_fragment>')) {
+      f = f.replace('#include <lights_physical_fragment>', /* glsl */`
+#include <lights_physical_fragment>
+material.specularColor = mix( material.specularColor, vec3( 0.06 ), smoothstep( 0.30, 0.85, gWet ) );
+material.specularColorBlended = material.specularColor;`);
     }
 
     // Analytic exponential HEIGHT fog, applied in scene-linear space before tone mapping

@@ -23,8 +23,10 @@
  *   lamp.addFuel(units)                 scavengeable refill. Default 45 (GDD §11.2). Returns added.
  *   lamp.refill()                       fill to capacity.
  *   lamp.light                  THREE.SpotLight  — the shadow-casting core. VolumetricFog reads
- *                                       this and samples its shadow map. Frustum is kept tight:
- *                                       near 0.22, far 16.0, fov tracks light.angle.
+ *                                       this and samples its shadow map. Frustum: near 0.22,
+ *                                       far = light.distance (26 open / 11.7 hooded), fov =
+ *                                       2·angle. Three keeps far and fov in step with the beam
+ *                                       for us; do not hand-set them.
  *   lamp.spill                  THREE.SpotLight  — shadowless 6% leak (ART_DIRECTION §3.2)
  *   lamp.glow                   THREE.PointLight — near-field: hands, held lumber, the page
  *   lamp.pageLight              THREE.SpotLight  — manual page bounce (ART_DIRECTION §3.2/§13.8)
@@ -53,10 +55,10 @@
  * ---------------------------------------------------------------------------------------------
  * NUMBERS AND WHERE THEY COME FROM (nothing here is invented)
  * ---------------------------------------------------------------------------------------------
- *   ART_DIRECTION §3.2   core SpotLight #ffb865, intensity 40, decay 2, angle 0.42, penumbra
- *                        0.55, distance 14, one shadow map. Shadowless spill at angle 0.95,
- *                        intensity 2.4 (6%), distance 9. Held low and LEFT at
- *                        (-0.34, -0.22, -0.45) camera-space, aimed 8° down and 4° left.
+ *   ART_DIRECTION §3.2   core SpotLight #ffb865, decay 2, one shadow map; shadowless spill at
+ *                        6% of the core. Intensity/angle/distance/carry offset are retuned
+ *                        against the key art — see D4 for the measured numbers. Held low and
+ *                        LEFT, aimed down and 4° left.
  *                        Flicker 1/f at 0.9 Hz ±7% plus a 40 ms hard dropout at 0.4%/s.
  *                        Fully hooded reads at 0.10 intensity, reached over 0.12 s.
  *   AUDIO_DIRECTION §4.2 the lantern's flicker LFO sits at 11.5 Hz. That is the third octave.
@@ -93,6 +95,45 @@
  *   D3  sfx ids `lantern_ignite` / `lantern_douse` / `lantern_hood` / `lantern_unhood` /
  *       `lantern_refuel` / `lantern_gutter` do not yet exist in AUDIO_DIRECTION's recipe list.
  *       They are emitted anyway; an unknown id is a no-op in AudioEngine. Owner: Audio agent.
+ *
+ *   D4  ART_DIRECTION §3.2 says core intensity 40 cd, angle 0.42, distance 14. Shipped at
+ *       105 / 0.78 / 26. This is measured, not preferred. Captured `?shot=site-close` at
+ *       1600×900 and sampled mean relative luminance of the stud band (studs 3.5–8 m from the
+ *       flame) against `public/img/keyart-site.png`'s lit post:
+ *
+ *           key art reference ......... 0.048
+ *           40 cd  / 14 m (as spec'd) . 0.0116     ← the frame is not legible, at all
+ *           90 cd  / 26 m ............. 0.0292
+ *           150 cd / 26 m ............. 0.0486     ← lands on the reference
+ *           240 cd / 26 m ............. 0.0816     ← past it
+ *
+ *       Widening the cone from 0.42 to 0.78 rad then roughly doubled the band again on its
+ *       own — at 0.42 the frame was simply outside the beam, penumbra and all — so the
+ *       shipped figure came down from 150 to 105. Verified at the end: stud 0.124, sill
+ *       0.114, ground pool 0.031, far mud 0.004 against the key art's 0.048 / 0.070 / 0.024
+ *       / 0.005, measured while Postprocessing was running ~3× the spec'd exposure. Divide
+ *       by that and 105 cd lands on the reference. **If Render restores exposure to §3.1's
+ *       0.62 and the frame reads dim, this number is the one to raise, and 150 is where the
+ *       clean 0.62-exposure sweep above put it.**
+ *
+ *       The 40 cd figure was never wrong as a *physical* number — a hurricane lamp really is
+ *       ~40 cd — it was wrong against this renderer's exposure and AgX curve, which is what
+ *       §3.1's own instruction to "only tune with a screenshot to justify it" is for.
+ *       distance 14 additionally cut the far studs by a further 20% via the Frostbite window.
+ *       Owner to reconcile in ART_DIRECTION §3.2: Render agent.
+ *
+ *   D5  `glow` used to sit exactly on the flame, i.e. 3 cm from the lamp's own brass. It is now
+ *       0.40 m out along the aim, which is where the hands and the carried lumber actually are.
+ *
+ *   D6  THE BLOWN-WHITE LANTERN, and it was not the emissives. All three emitters used to sit
+ *       ON the flame — 24 mm from the chimney glass, 30 mm from the brass, and (after the cone
+ *       widened to 0.78 rad) with that glass INSIDE the cone. Three's distance attenuation is
+ *       `1 / max(pow(d, decay), 0.01)`, i.e. it saturates at 100×, so the core delivered an
+ *       irradiance of ~10 500 to its own chimney. Measured proof: sweeping the emissive stack
+ *       over a 200:1 range — flameHdr 0.28 → 60, glassEmissive 0.22 → 25 — moved the lamp's
+ *       mean relative luminance only 0.164 → 0.214 and its peak not at all (0.273 ± 0.005 in
+ *       every single capture). The lamp was pinned against a clip that had nothing to do with
+ *       any number in this file's emissive block. `lightOffset` is the actual fix.
  */
 
 import * as THREE from 'three';
@@ -115,6 +156,7 @@ const _e1 = new THREE.Euler(0, 0, 0, 'YXZ');
 const _e2 = new THREE.Euler(0, 0, 0, 'YXZ');
 const _colA = new THREE.Color();
 const _colB = new THREE.Color();
+const _colC = new THREE.Color();
 
 const DEG = Math.PI / 180;
 const clamp = (v, a, b) => (v < a ? a : v > b ? b : v);
@@ -131,27 +173,62 @@ export const TUNING = {
   flameColor: 0xffb865,          // ART_DIRECTION §2.3 `lantern`
   flameColorLow: 0xff5f18,       // what a starved wick reddens to
   pageColor: 0xf2efe6,
+  glassColor: 0xc0b49c,          // warm bone, not the old cool green-grey
+  glassOpacity: 0.26,            // you have to be able to SEE the flame through it
+  // The chimney's own glow colour, which is NOT the beam's colour. Authored deliberately
+  // over-saturated: measured, this stack desaturates hard on the way to the screen. The
+  // chimney at #ffd9a8 (the key art's own sampled hue, sRGB 226/190/157) came back at
+  // sRGB 105/100/97 — dead neutral, the grey blob. At #ff9c3a it comes back warm. So this
+  // is a pre-compensated authoring value, not a display value, and that is why it does not
+  // match the swatch you would pick off the reference with an eyedropper.
+  glassGlowColor: 0xff9c3a,
 
-  /* --- core spot (ART_DIRECTION §3.2) ------------------------------------------------- */
-  coreIntensity: 40,
-  coreAngle: 0.42,
-  corePenumbra: 0.55,
-  coreDistance: 14,
+  /* --- how far above 1.0 the emissive bits sit before AgX -------------------------------
+   * The flame is a 4 mm teardrop. To read as fire rather than as an orange decal it has to
+   * clip; to stop the whole lamp reading as a white blob, only the flame may. So the wick
+   * gets a hard over-range, the halo and the chimney stay under it. */
+  flameHdr: 1.8,
+  haloHdr: 0.80,
+  sheenHdr: 0.85,
+  glassEmissive: 1.3,
+
+  /* --- core spot (ART_DIRECTION §3.2, retuned — see D4) ------------------------------- */
+  coreIntensity: 105,            // D4. 40 cd lit nothing; measured, see D4.
+  coreAngle: 0.78,               // 44.7° half-angle: a lantern is a point source, not a torch
+  corePenumbra: 0.62,            // no visible cone edge anywhere in the key art
+  coreDistance: 26,              // the 14 m cutoff was clipping the beam at the far studs
   decay: 2,
-  shadowNear: 0.22,
-  shadowFar: 16.0,
+  shadowNear: 0.22,              // the lamp's own body sits at 0.03–0.10 m: inside near, never a caster
+  shadowFar: 28.0,               // >= coreDistance, or SpotLightShadow's far plane eats the beam
   shadowBias: -0.00075,
   shadowNormalBias: 0.028,
 
   /* --- shadowless spill: real lanterns leak ------------------------------------------- */
-  spillIntensity: 2.4,
-  spillAngle: 0.95,
+  spillIntensity: 6,             // ART's 6% of the core. It is shadowless, so every extra
+                                 // candela here is contrast the frame does not get back.
+  spillAngle: 1.30,              // 74.5°: this is what puts light on the ground at your boots
   spillPenumbra: 1.0,
-  spillDistance: 9,
+  spillDistance: 16,
 
   /* --- near-field glow: the player's own hands and the lumber in them ------------------ */
-  glowIntensity: 2.9,
-  glowDistance: 3.6,
+  glowIntensity: 1.1,
+  glowDistance: 3.2,
+  glowForward: 0.40,             // pushed clear of its own chimney — see D5
+
+  /* --- THE ONE THAT MATTERED (D6) -----------------------------------------------------
+   * How far along the aim the emitters sit, ahead of the physical flame. Three's
+   * getDistanceAttenuation is `1 / max(pow(d, decay), 0.01)`, so attenuation SATURATES at
+   * 100× — and the lamp's own chimney glass is 24 mm from the wick and inside the cone.
+   * 105 cd × 100 = an irradiance of 10 500 on a piece of glass, which clips to white, loses
+   * its hue, and is then spread by the defocus into exactly the grey blob this pass exists
+   * to kill. Nothing in the emissive stack ever mattered; this number did.
+   *
+   * At 0.26 m the whole lamp is BEHIND the cone apex — >90° off the aim, so the spot
+   * attenuation is a hard zero and the lamp cannot light itself at all. The visible
+   * consequence at 5 m is a 3% shift in beam origin, i.e. none. `flamePosition`, which is
+   * what Campers see and what the audio pans on, still tracks the real wick.
+   */
+  lightOffset: 0.26,
 
   /* --- manual page bounce (ART_DIRECTION §3.2 row 9) ---------------------------------- */
   pageIntensity: 3.0,
@@ -160,9 +237,13 @@ export const TUNING = {
   pageDistance: 2.2,
 
   /* --- where it is carried (ART_DIRECTION §3.2, hard rule) ---------------------------- */
-  handOffset: new THREE.Vector3(-0.34, -0.22, -0.45),
+  // Still low and LEFT, but at arm's length and hanging, not shoved into the lens. At 0.45 m
+  // the 0.22 m lamp subtended 27° of a 72° FOV — a sixth of the frame. At 0.87 m and 0.84
+  // scale it subtends 12°, which is where a carried hurricane lamp actually reads.
+  handOffset: new THREE.Vector3(-0.40, -0.42, -0.66),
+  meshScale: 0.84,
   stowOffset: new THREE.Vector3(-0.12, -0.20, 0.16),   // added when both hands are full
-  aimPitchDeg: -8,               // 8° down
+  aimPitchDeg: -14,              // 14° down: the pool has to reach the ground inside 3 m
   aimYawDeg: 4,                  // 4° left
   hoodAimPitchDeg: -31,          // extra downward pitch at full hood: the pool at your feet
 
@@ -265,6 +346,8 @@ export class Flashlight {
     this.flamePosition = new THREE.Vector3();
     /** Live flame colour, recomputed each frame. Read by _applyMesh(). */
     this._flameColorNow = new THREE.Color(TUNING.flameColor);
+    /** Live chimney-glow colour — whiter than the flame. See TUNING.glassGlowColor. */
+    this._glassColorNow = new THREE.Color(TUNING.glassGlowColor);
 
     /** @type {THREE.SpotLight|null} */ this.light = null;
     /** @type {THREE.SpotLight|null} */ this.spill = null;
@@ -873,6 +956,11 @@ export class Flashlight {
     // shared scratch colour across two methods is exactly the kind of coupling that breaks
     // silently the first time someone reorders the update stages.
     const flameCol = this._flameColorNow.copy(_colA).lerp(_colB, redness);
+    // The chimney tracks the same starvation curve but starts whiter.
+    this._glassColorNow.copy(_colC.setHex(T.glassGlowColor)).lerp(_colB, redness);
+
+    // Emitter position: on the aim, ahead of the wick. See TUNING.lightOffset (D6).
+    _v3c.copy(this.flamePosition).addScaledVector(this._aimDir, T.lightOffset);
 
     const core = this.light;
     if (core) {
@@ -883,11 +971,11 @@ export class Flashlight {
       core.penumbra = mix(T.corePenumbra, 0.92, h);       // a shuttered lamp has no hard edge
       core.distance = T.coreDistance * mix(1, 0.45, h);
       core.color.copy(flameCol);
-      core.position.copy(this.flamePosition);
+      core.position.copy(_v3c);
       // castShadow is set once from the tier; skip the whole pass when the lamp is dark.
       if (this._shadowCapable) core.castShadow = on && this.intensity > 0.05;
       if (this._targetObj) {
-        this._targetObj.position.copy(this.flamePosition).addScaledVector(this._aimDir, 10);
+        this._targetObj.position.copy(_v3c).addScaledVector(this._aimDir, 10);
       }
     }
 
@@ -899,7 +987,7 @@ export class Flashlight {
       spill.angle = T.spillAngle * mix(1, 0.7, h);
       spill.distance = T.spillDistance * mix(1, 0.6, h);
       spill.color.copy(flameCol);
-      spill.position.copy(this.flamePosition);
+      spill.position.copy(_v3c);
     }
 
     const glow = this.glow;
@@ -910,7 +998,11 @@ export class Flashlight {
       glow.intensity = T.glowIntensity * alive * nearMul;
       glow.distance = T.glowDistance * mix(1, 0.72, h);
       glow.color.copy(flameCol);
-      glow.position.copy(this.flamePosition);
+      // D5. This used to sit exactly on the flame — i.e. 3 cm from its own brass fount, where
+      // decay 2 turns 2.9 cd into an irradiance of ~1800 and clips the whole lamp to white.
+      // It is a near-field FILL for the hands and the carried lumber, so it belongs out in
+      // front of the lamp, not inside it.
+      glow.position.copy(this.flamePosition).addScaledVector(this._aimDir, T.glowForward);
     }
 
     const page = this.pageLight;
@@ -931,6 +1023,7 @@ export class Flashlight {
 
   /** Drive the mesh: flame size, glass emissive, shutter travel. */
   _applyMesh(dt) {
+    const T = TUNING;
     const p = this._parts;
     const alive = clamp(this._ignite * this._flicker * this._flameHealth, 0, 1.4);
 
@@ -945,7 +1038,11 @@ export class Flashlight {
         p.flame.rotation.z = lean;
         if (p.flame.material) {
           p.flame.material.opacity = clamp01(0.55 + 0.45 * alive);
-          p.flame.material.color.copy(this._flameColorNow);
+          // Over-ranged so the wick is the one thing in the frame allowed to clip AgX
+          // (ART_DIRECTION §3.1: brightest 0.1% may clip, and nothing else may). `copy` then
+          // scale — never scale `_flameColorNow` itself, the SpotLights read that instance.
+          p.flame.material.color.copy(this._flameColorNow)
+            .multiplyScalar(T.flameHdr * mix(0.55, 1, clamp01(alive)));
         }
       }
     }
@@ -958,22 +1055,25 @@ export class Flashlight {
         p.halo.scale.setScalar(s);
         if (p.halo.material) {
           p.halo.material.opacity = clamp01(0.10 + 0.24 * alive) * mix(1, 0.35, this.hoodLevel);
-          p.halo.material.color.copy(this._flameColorNow);
+          // Stays under 1.0: the halo is the bloom SEED, not the highlight.
+          p.halo.material.color.copy(this._flameColorNow).multiplyScalar(T.haloHdr);
         }
       }
     }
 
     // The glass catches it. This is the detail that makes the object read as glass rather than
     // as a transparent cylinder: the chimney itself glows, unevenly, through its own soot.
+    // Deliberately kept below 1.0 — a chimney that clips is a white blob, and the brief is that
+    // the POOL is the brightest thing in the frame, not the lamp.
     if (p.glass?.material) {
-      p.glass.material.emissiveIntensity = alive * 0.85 * mix(1, 0.5, this.hoodLevel);
-      p.glass.material.emissive.copy(this._flameColorNow);
+      p.glass.material.emissiveIntensity = alive * T.glassEmissive * mix(1, 0.5, this.hoodLevel);
+      p.glass.material.emissive.copy(this._glassColorNow);
     }
     if (p.glassSheen) {
       p.glassSheen.visible = alive > 0.01;
       if (p.glassSheen.material) {
-        p.glassSheen.material.opacity = clamp01(0.06 + 0.20 * alive) * mix(1, 0.45, this.hoodLevel);
-        p.glassSheen.material.color.copy(this._flameColorNow);
+        p.glassSheen.material.opacity = clamp01(0.08 + 0.22 * alive) * mix(1, 0.45, this.hoodLevel);
+        p.glassSheen.material.color.copy(this._glassColorNow).multiplyScalar(T.sheenHdr);
       }
     }
 
@@ -1042,7 +1142,12 @@ export class Flashlight {
       this.settings?.tier?.(512, 1024, 2048, 2048) ?? 1024,
     );
     core.shadow.camera.near = T.shadowNear;
-    core.shadow.camera.far = T.shadowFar;
+    // SpotLightShadow.updateMatrices overwrites `far` with `light.distance` every frame and
+    // `fov` with 2·angle·focus, so the frustum tracks the beam automatically — which is the
+    // whole reason `coreDistance` and `shadowFar` must never disagree. If they do, the beam
+    // lights geometry the shadow map cannot see and every shadow in the pool silently vanishes,
+    // taking VolumetricFog's cone with it. Keep this a max(), not an assignment.
+    core.shadow.camera.far = Math.max(T.shadowFar, T.coreDistance);
     core.shadow.bias = T.shadowBias;
     core.shadow.normalBias = T.shadowNormalBias;
     core.shadow.focus = 1.0;
@@ -1100,7 +1205,10 @@ export class Flashlight {
 
     // ---------------------------------------------------------------- materials
     const matBrass = new THREE.MeshStandardMaterial({
-      color: 0x9a7440, metalness: 0.86, roughness: 0.44, map: brassTex ?? null,
+      // Rougher than a showroom lamp on purpose: a tight GGX lobe 0.36 m from a point light
+      // is a specular spike, and a specular spike on a hand prop is the white blob we are
+      // getting rid of. This lamp has been in a shed since 1971.
+      color: 0x9a7440, metalness: 0.86, roughness: 0.56, map: brassTex ?? null,
     });
     const matBrassDark = new THREE.MeshStandardMaterial({
       color: 0x5e4523, metalness: 0.82, roughness: 0.62, map: brassTex ?? null,
@@ -1112,11 +1220,11 @@ export class Flashlight {
       color: 0x2e3134, metalness: 0.9, roughness: 0.48, side: THREE.DoubleSide,
     });
     const matGlass = new THREE.MeshPhysicalMaterial({
-      color: 0xb9c6bd,
+      color: T.glassColor,
       metalness: 0.0,
       roughness: 0.10,
       transparent: true,
-      opacity: 0.20,
+      opacity: T.glassOpacity,
       side: THREE.DoubleSide,
       depthWrite: false,
       ior: 1.52,
@@ -1273,6 +1381,7 @@ export class Flashlight {
     this._parts.sleeve = sleeve;
     this._parts.wick = wick;
 
+    group.scale.setScalar(T.meshScale);
     this.object = group;
     if (this.scene) this.scene.add(group);
   }

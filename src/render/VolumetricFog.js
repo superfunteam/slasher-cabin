@@ -92,40 +92,84 @@ const TERRAIN_RECENTER = 96;      // recentre when the player leaves this radius
 const TERRAIN_ROWS_PER_FRAME = 10;
 const NOISE_TEX = 64;
 
-/** Art-directed defaults.  Every one of these is live-tunable through `fog.params`. */
+/**
+ * Art-directed defaults.  Every one of these is live-tunable through `fog.params`.
+ *
+ * THE NUMBER THAT MATTERS.  The medium's ambient (sky-scatter) term is a PEDESTAL: it is added
+ * at every marched sample regardless of geometry, so it is the one term that cannot carry an
+ * image.  Every structured term — the moon shaft, the lantern cone, the mist band — has to sit
+ * ABOVE it to be visible.  This module previously ran `ambient` at 1.15 with a further x1.33
+ * weather scale, i.e. ~1.53 x `fog.far`, which measured at 0.13/0.18/0.25 linear against a scene
+ * whose own radiance was 0.0015/0.0021/0.0030 — a flat blue pedestal EIGHTY-FIVE TIMES the world
+ * behind it.  Transmittance collapsed to 0.02 and the frame became a featureless wash that the
+ * exposure clamp downstream then crushed to black.  That is why no cone, no shaft and no mist
+ * layer were ever visible: they were all there, 2-10 stops under a constant.
+ *
+ * The rule this file now obeys: the ambient pedestal is authored to land at roughly the same
+ * order as moonlit ground (a few hundredths, linear), and the moon/lantern terms are scaled to
+ * sit clearly above it.  Contrast is the horror (ART §11).
+ */
 const DEFAULT_PARAMS = {
   /** Base height-fog density at the fog floor, 1/m.  ART §5.1 clear=0.014 .. whiteout=0.078 */
-  density: 0.016,
+  density: 0.0105,
   /** Fog floor, metres. */
   floorY: -1.0,
   /** Scale height, metres.  ART §5.1: 4.2 clear (shoulder height on the lake path). */
-  scaleHeight: 4.4,
+  scaleHeight: 4.6,
   /** Henyey-Greenstein g.  ART §5.1: 0.55 clear .. 0.38 whiteout. */
   hg: 0.62,
   /** Single-scattering albedo. Water droplets are near-white. */
   albedo: 0.92,
-  /** How hard the ambient sky-scatter term reads. */
-  ambient: 1.15,
+  /**
+   * Scale on the ambient sky-scatter pedestal, as a fraction of the `fog.near`/`fog.far`
+   * swatches.  See the block comment above — this is the single most destructive knob in the
+   * module and it is deliberately small.
+   */
+  ambient: 0.16,
+  /**
+   * How much the ambient pedestal survives in moon-shadowed volume.  Below 1.0 the canopy's
+   * own shadow map carves the fog, which is what turns a wash into god rays (ART §5.4).
+   */
+  ambientOcclusion: 0.26,
+  /** Metres over which the near->far aerial gradient completes.  Long = the treeline sits back. */
+  aerialDistance: 118,
   /** Contrast of the drifting density noise. 0 = uniform grey wash (a named failure mode). */
   noiseContrast: 0.95,
   /** Ground-mist top above the mist floor, metres, before pooling/wobble. ART §5.2: ~0.55. */
-  mistTop: 0.72,
-  /** Vertical feather of the mist ceiling.  Small = a distinct LAYER. */
-  mistFeather: 0.52,
+  mistTop: 0.62,
+  /**
+   * Vertical feather of the mist ceiling, metres.  Small = a distinct LAYER — but too small and
+   * the ceiling reads as a drawn line rather than a body of air, which is exactly what a first
+   * capture of the lake shot showed: a neon strip on the waterline instead of keyart-lake's soft
+   * band.  0.55 keeps the layer unmistakable while giving the top edge somewhere to dissolve.
+   */
+  mistFeather: 0.55,
   /** Ground-mist density, 1/m.  Much denser than the height fog — that is what makes a layer. */
-  mistDensity: 0.30,
-  /** How much the noise wobbles the mist ceiling, metres. */
-  mistWobble: 0.42,
-  /** How much the mist tints itself toward fog.near (self-lit look). */
-  mistTint: 0.55,
+  mistDensity: 0.17,
+  /** How much the noise wobbles the mist ceiling, metres.  This is what stops it being a plane. */
+  mistWobble: 0.58,
+  /**
+   * Gain on the mist's own in-scatter.  The mist is LIT (moon + a little sky), not emissive.
+   * A grazing view along the layer integrates to the source radiance, so this number is the
+   * band's saturated brightness against near-black water: keyart-lake's band sits roughly 3-4x
+   * the water, not the 8x that blew it out through bloom at 0.62.
+   */
+  mistTint: 0.45,
   /** Multiplier on the moon's volumetric contribution. */
-  moonScatter: 1.0,
+  moonScatter: 3.0,
   /** Multiplier on the lantern's volumetric contribution. */
   lanternScatter: 1.0,
   /** Multiplier on campfire/sodium/torch volumetrics. */
-  localScatter: 1.0,
+  localScatter: 0.9,
   /** Rain streaks inside a light cone are lit at this multiple. ART §5.4. */
   rainStreak: 2.2,
+  /**
+   * Legibility floor on transmittance in CLEAR air, faded out as the medium thickens.  "Dark but
+   * legible" is the brief; a night that integrates to T=0 has stopped being a photograph of a
+   * forest and become a grey card.  At whiteout (fogAmt 1) this goes to ~0.01 and the medium is
+   * allowed to close completely, because that is Night 5's whole point.
+   */
+  minTransmit: 0.13,
   /** Far clamp of the march, metres. */
   maxDistance: 150,
 };
@@ -194,6 +238,9 @@ uniform vec4  uFogB;
 uniform vec3  uFogNear;
 uniform vec3  uFogFar;
 uniform vec3  uFogLit;
+
+// x 1/aerial distance, y ambient survival in moon shadow, z transmittance floor, w unused
+uniform vec4  uScatterCfg;
 
 // x mist top, y mist feather, z mist density, w mist wobble
 uniform vec4  uMist;
@@ -264,7 +311,7 @@ vec4 terrainAt(vec2 xz) {
   return texture2D(tTerrain, clamp(t, 0.001, 0.999));
 }
 
-float densityAt(vec3 p, out float mistAmt) {
+float densityAt(vec3 p, float dist, out float mistAmt) {
   // ---- drifting low-frequency structure.  Uniform fog reads as a grey wash; this is the fix.
   vec2 n1 = p.xz * uNoiseCfg.x + uDriftA + vec2(p.y * 0.011, -p.y * 0.008);
   vec2 n2 = p.xz * uNoiseCfg.y + uDriftB + vec2(-p.y * 0.023, p.y * 0.017);
@@ -288,7 +335,12 @@ float densityAt(vec3 p, out float mistAmt) {
   vec2 dxz = p.xz - uPlayerPos.xz;
   top -= exp(-dot(dxz, dxz) * 0.85) * 0.42;
 
-  float band = sat((top - p.y) / max(uMist.y, 0.04));
+  // The ceiling feathers out with distance.  A layer with a distance-independent feather draws a
+  // razor-sharp horizon line where it saturates — the first lake capture put a neon strip on the
+  // waterline instead of keyart-lake's soft band.  Turbulent mixing (and the fact that a metre of
+  // vertical structure is sub-pixel at 100 m) says the far edge should dissolve; this says so too.
+  float feather = uMist.y * (1.0 + dist * 0.030);
+  float band = sat((top - p.y) / max(feather, 0.04));
   band *= sat((p.y - floorY + 1.30) * 1.5);
   float clump = smoothstep(0.28, 0.88, n);
   mistAmt = band * (0.30 + 0.90 * clump) * mult;
@@ -344,19 +396,32 @@ void main() {
       vec3 p = uCamPos + rd * dist;
 
       float mistAmt = 0.0;
-      float sigma = densityAt(p, mistAmt);
+      float sigma = densityAt(p, dist, mistAmt);
 
       if (sigma > 2e-5) {
+        // ------------------------------------------------ moon shafts (the money shot)
+        // The shadow tap is taken FIRST because it gates the ambient pedestal as well as the
+        // moon's own term.  Ambient that ignores occlusion is a constant, and a constant is the
+        // one thing a volumetric cannot draw a shape with.
+        float shM = mix(0.85, shadowTap(tMoonShadow, uMoonShadowMat, p, uMoonShadowCfg.y),
+                        uMoonShadowCfg.x);
+
         // ------------------------------------------------ ambient / aerial in-scatter
-        vec3 L = mix(uFogNear, uFogFar, sat(dist * 0.017)) * uFogB.z;
-        L += uFogNear * (mistAmt * uFogB.w);
+        // Deliberately small (see DEFAULT_PARAMS.ambient) and occluded, so that open air over
+        // the plot glows while volume under the canopy stays near-black.  The near->far grade
+        // completes over 'aerialDistance' metres: that gradient IS the aerial perspective that
+        // pushes the far treeline back without lifting the near frame off the floor.
+        float skyVis = mix(uScatterCfg.y, 1.0, shM);
+        vec3 L = mix(uFogNear, uFogFar, sat(dist * uScatterCfg.x)) * (uFogB.z * skyVis);
+
+        // The ground mist is LIT, not emissive: mostly moonlight (so the layer has a bright
+        // side and reads as a body of air), plus a small sky term so it never goes flat black.
+        L += (uFogNear * 0.30 + uMoonColor * (0.24 * shM)) * (mistAmt * uFogB.w);
+
         L += uFogLit * (uWeather.z * 2.4);
 
         vec3 Lwarm = vec3(0.0);
 
-        // ------------------------------------------------ moon shafts (the money shot)
-        float shM = mix(0.85, shadowTap(tMoonShadow, uMoonShadowMat, p, uMoonShadowCfg.y),
-                        uMoonShadowCfg.x);
         L += uMoonColor * (phaseMoon * shM);
 
         // ------------------------------------------------ the lantern (keyart-site.png)
@@ -410,7 +475,14 @@ void main() {
     }
   }
 
-  vec4 cur = vec4(max(Lacc, vec3(0.0)), clamp(T, 0.0, 1.0));
+  // Legibility floor.  Applied to the OUTPUT transmittance only, never inside the integration,
+  // so the in-scatter stays a physical integral and only the composite is prevented from
+  // annihilating the scene.  It also guarantees a non-zero alpha, which keeps Postprocessing's
+  // degenerate-buffer guard (a texel that is zero in rgb AND a is treated as 'no fog') from
+  // ever misreading a legitimately empty patch of clear air as a broken buffer.
+  float Tout = max(clamp(T, 0.0, 1.0), uScatterCfg.z);
+
+  vec4 cur = vec4(max(Lacc, vec3(0.0)), Tout);
   vec4 outC = cur;
 
   // ---------------------------------------------------------------- temporal reprojection
@@ -1106,13 +1178,14 @@ export class VolumetricFog {
       uHistoryAmount: { value: this._historyAmount },
       uBlueSize: { value: 128 },
 
-      uFogA: { value: new THREE.Vector4(0.016, -1.0, 1 / 4.4, 150) },
-      uFogB: { value: new THREE.Vector4(0.62, 0.92, 1.15, 0.55) },
+      uFogA: { value: new THREE.Vector4(0.0105, -1.0, 1 / 4.6, 150) },
+      uFogB: { value: new THREE.Vector4(0.62, 0.92, 0.16, 0.45) },
       uFogNear: { value: new THREE.Vector3() },
       uFogFar: { value: new THREE.Vector3() },
       uFogLit: { value: new THREE.Vector3() },
 
-      uMist: { value: new THREE.Vector4(0.72, 0.52, 0.30, 0.42) },
+      uScatterCfg: { value: new THREE.Vector4(1 / 118, 0.26, 0.13, 0) },
+      uMist: { value: new THREE.Vector4(0.62, 0.55, 0.17, 0.58) },
       uNoiseCfg: { value: new THREE.Vector4(0.0125, 0.045, 0.95, 2.2) },
       uDriftA: { value: new THREE.Vector2() },
       uDriftB: { value: new THREE.Vector2() },
@@ -1499,16 +1572,28 @@ export class VolumetricFog {
     this._playerPos(u.uPlayerPos.value);
 
     // ---- density profile from the weather state (ART_DIRECTION §5.1)
+    // The old ramp was linear in fogAmt (density = base + f*0.052), which put a mid-weather
+    // night at 0.05/m: an opaque wall at 25 m, so the treeline did not "sit back", it ceased to
+    // exist.  ART §5.1 wants 0.014 clear and 0.078 at whiteout; a 2.2 power lands both ends and
+    // keeps the middle nights transparent enough to read depth through.
     const P = this.params;
     const f = this._fogAmt;
-    const density = (P.density + f * 0.052 + rain * 0.013) * (1 + lightning * 0.15);
-    const H = P.scaleHeight + f * 9.0 + rain * 1.4;
+    const density = (P.density + Math.pow(f, 2.2) * 0.062 + rain * 0.005) * (1 + lightning * 0.15);
+    const H = P.scaleHeight + f * 5.5 + rain * 1.0;
     u.uFogA.value.set(density, P.floorY, 1 / Math.max(H, 0.5), P.maxDistance);
 
     // thick fog multiply-scatters and loses its forward lobe — that is why a whiteout has no
     // visible shafts (ART §5.3).  g goes 0.62 -> 0.38 as the medium thickens.
     const hg = Math.max(0.05, Math.min(0.9, P.hg - f * 0.24));
-    u.uFogB.value.set(hg, P.albedo, P.ambient * (0.75 + f * 0.9), P.mistTint);
+    u.uFogB.value.set(hg, P.albedo, P.ambient * (0.62 + f * 0.55), P.mistTint);
+
+    // ---- aerial rate, ambient occlusion floor, legibility floor on transmittance
+    u.uScatterCfg.value.set(
+      1 / Math.max(20, P.aerialDistance),
+      Math.min(1, Math.max(0, P.ambientOcclusion)),
+      Math.max(0, P.minTransmit) * (1 - f) * (1 - f) + 0.008,
+      0,
+    );
 
     // colours: thicker fog lifts and cools, dawn warms.  No allocation — two module scratches.
     const dawn = Math.min(1, Math.max(0, (nightPhase - 0.85) / 0.15));
@@ -1527,11 +1612,12 @@ export class VolumetricFog {
     _col.setHex(PAL.lit);
     u.uFogLit.value.set(_col.r, _col.g, _col.b);
 
-    // ---- ground mist
+    // ---- ground mist.  A LAYER: it grows in density and a little in height with the weather,
+    // but its ceiling stays near knee/waist so the world above it is never lost.
     u.uMist.value.set(
-      P.mistTop * (0.85 + f * 0.9),
-      P.mistFeather * (1 + f * 0.7),
-      P.mistDensity * (0.55 + f * 1.15) * (1 + rain * 0.35),
+      P.mistTop * (0.85 + f * 0.75),
+      P.mistFeather * (1 + f * 0.5),
+      P.mistDensity * (0.50 + f * 1.10) * (1 + rain * 0.30),
       P.mistWobble,
     );
 
@@ -1749,11 +1835,22 @@ export class VolumetricFog {
     const cand = this._cand;
     cand.length = 0;
 
+    // The lantern already has its own dedicated, shadowed term in the march.  Its spill cone and
+    // the manual's page bounce are the SAME physical source, so letting them win local slots
+    // scored them a second and third helping of warm in-scatter right in front of the camera —
+    // a broad amber haze that filled the frame and buried the cone's shape — while starving the
+    // slots the campfires and the sodium lamp were supposed to occupy (ART §5.4).
+    const lamp = this.ctx.systems?.get?.('Flashlight');
+    const isLanternPart = (light) => !!lamp
+      && (light === lamp.light || light === lamp.spill || light === lamp.pageLight
+        || light === lamp.glow);
+
     const push = (l) => {
       if (!l) return;
       const light = l.isLight ? l : (l.light && l.light.isLight ? l.light : null);
       if (!light || !light.visible || !(light.intensity > 0)) return;
       if (!(light.isSpotLight || light.isPointLight)) return;
+      if (isLanternPart(light)) return;
       if (cand.length < 24) cand.push(light);
     };
 
