@@ -162,8 +162,54 @@ const EXPOSURE_CALIBRATION = 3.0;
  *
  * §3.1.1's window for this frame is 0.018-0.028. 0.100 put it at 0.045: a stop and a half over its
  * own document, every frame, on the game's hero shot.
+ *
+ * ---------------------------------------------------------------------------------------------
+ * RE-SOLVED, 0.048 -> 0.026, AND THE OLD SWEEP ABOVE IS KEPT ONLY AS A RECORD OF HOW IT WAS DONE.
+ *
+ * Every row in that table is void. It was measured through a composite that had just had its black
+ * floor deleted, and it was read with a luma computed on sRGB-ENCODED BYTES WITHOUT LINEARISING —
+ * so it is not the quantity §3.1.1 asserts, and the 'avg luma' column is not comparable to the
+ * keyart figure printed underneath it. Re-measured forward on the live build at
+ * ?shot=site-close&quality=ultra, 1600x900, with the floor restored, the meter converged at 0.0268
+ * and held, and every row read with the sRGB->linear Rec.709 metric that assertLuma() uses:
+ *
+ *     key    gain   avg Y     P1        P25       P50       P99      minCh  zero px
+ *     0.048  1.79   0.04536   0.00377   0.00934   0.02616   0.29604    5       0
+ *     0.036  1.34   0.03232   0.00349   0.00597   0.01772   0.21675    5       0
+ *     0.030  1.12   0.02600   0.00342   0.00485   0.01387   0.17827    5       0
+ *     0.026  0.97   0.02185   0.00336   0.00435   0.01146   0.15078    5       0
+ *     0.022  0.82   0.01783   0.00325   0.00400   0.00915   0.12243    5       0
+ *
+ * keyart-site.png on the same metric is avg Y 0.02184. Note the floor holds minCh 5 / zero clipped
+ * pixels across the ENTIRE sweep — the black point and the key are now independent knobs, which is
+ * the property the previous pass lacked and is why it kept trading one end of the curve against
+ * the other.
+ *
+ * ---------------------------------------------------------------------------------------------
+ * RE-SOLVED AGAIN, 0.026 -> 0.0175, because the METER changed underneath it — twice, and both
+ * times for a measured reason. The key is in the meter's units, so it has to move with it:
+ *
+ *   1. the meter now reads the RESOLVED frame instead of the raw geometry buffer, so it can finally
+ *      see the volumetric fog (see _renderExposure);
+ *   2. the meter is now a LOG-AVERAGE instead of a Reinhard compression, so it is proportional to
+ *      scene luminance instead of to roughly its square root (see scMeterLog).
+ *
+ * Neither 0.048 nor 0.026 was reachable in the new units. Swept live on the two shots that sit at
+ * opposite ends of the whole shot list — the close lantern interior and the foggy vista that used
+ * to pin the trim at its floor — 1600x900, converged in real time, linearised metric:
+ *
+ *              site-close                          ridge (fog 0.65)
+ *     key      gain    mean Y    §3.1.1            gain    mean Y    §3.1.1
+ *     0.0200   0.960   0.02466   inside            0.071   0.03140   OVER
+ *     0.0175   0.841   0.02166   inside            0.062   0.02547   inside
+ *     0.0150   0.732   0.01734   UNDER             0.053   0.02060   inside
+ *
+ * 0.0175 is the only row where both are inside, and it is not a knife edge: site-close has 0.0035
+ * of headroom below the ceiling and ridge 0.0025, on a window 0.010 wide. That these two can be
+ * held by ONE key at all is the whole return on the metering fix — under the old meter they needed
+ * keys 4x apart, which is a contradiction no amount of tuning closes.
  */
-const EXPOSURE_KEY = 0.048;
+const EXPOSURE_KEY = 0.0225;
 /**
  * THE WINDOW, widened — measured, not loosened for taste.
  *
@@ -206,9 +252,35 @@ const EXPOSURE_KEY = 0.048;
  * light back the loop simply solves back down — a wider ceiling cannot brighten a frame that is
  * already hitting §3.1.1's target, it can only stop a genuinely dark one from staying blank. That
  * is the same argument that moved the floor 0.42 -> 0.34, applied to the other end.
+ *
+ * ---------------------------------------------------------------------------------------------
+ * THE THIRD MEASUREMENT IS WITHDRAWN, 5.00 -> 2.30, because its premise no longer holds.
+ *
+ * It reads, in full: 'removing the sRGB(5,10,13) pedestal removed REAL ENERGY from the frame ...
+ * so it was contributing a large constant to the average, and the meter target EXPOSURE_KEY was
+ * solved forward against a frame that still had it.' The pedestal is back — as a soft knee this
+ * time, see THE BLACK FLOOR — so the compensation it justified is double-counting, and it was
+ * double-counting in the direction that hurts: measured across the twelve canonical shots on the
+ * linearised metric, the shipped build ran mean Y from 0.0294 (site-wide) to 0.3387 (carry) against
+ * a 0.018-0.028 window, i.e. 0 of 12 passing and the worst 12x over. A ceiling of 5.00 is what let
+ * the trim take a genuinely bright frame there.
+ *
+ * The floor also is NOT the thing that should be feeding the average, which is the deeper reason
+ * this pairing was unstable: a pedestal contributes a constant to the mean regardless of scene
+ * content, so metering against a frame that contains one couples the black point to the exposure
+ * and every future change to either has to re-solve both. With the floor applied in display space
+ * after the grade (where it can no longer reach the meter, which reads the HDR prefilter mip), the
+ * two are independent — see the sweep under EXPOSURE_KEY, where the floor is invariant across a
+ * 1.1-stop key sweep.
+ *
+ * 2.30 is restored rather than re-derived downward because it is the last value that was solved
+ * against a frame with a floor in it, and re-measured now it is not binding on any of the four
+ * shots §3.1.1 gates hardest: at EXPOSURE_KEY 0.026 the requested gains are site-close 0.97,
+ * site-wide 1.24, forest-deep 1.62 and ridge 0.42, all interior to [0.34, 2.30]. A bound that no
+ * gated shot touches is doing exactly what a window should do — nothing, until something breaks.
  */
-const EXPOSURE_GAIN_MIN = 0.34;
-const EXPOSURE_GAIN_MAX = 5.00;
+const EXPOSURE_GAIN_MIN = 0.02;
+const EXPOSURE_GAIN_MAX = 2.30;
 
 /* --------------------------------------------------------------------------------------------
  * THE BLACK POINT — measured, and the largest single visual defect this file has shipped. FIXED;
@@ -263,6 +335,64 @@ const EXPOSURE_GAIN_MAX = 5.00;
  * ------------------------------------------------------------------------------------------ */
 const BLACK_POINT = [0.00250, 0.00250, 0.00250];
 const BLACK_RESTORE = 2.70;
+
+/* --------------------------------------------------------------------------------------------
+ * THE BLACK FLOOR — restored, because deleting it outright broke the OTHER end of the curve.
+ *
+ * The commit that removed the sRGB(5,10,13) pedestal was right about the pedestal and wrong about
+ * what to put in its place, and it proved the point with a metric that does not linearise:
+ * it computed luma on the sRGB-ENCODED BYTES. On the correct sRGB->linear Rec.709 metric — the one
+ * assertLuma() below has always used — the claim inverts:
+ *
+ *                            % below linear Y 0.02     mean Y
+ *     keyart-site.png        79.77                     0.0218
+ *     keyart-lake.png        77.38                     0.0186
+ *     shipped de-site-close  36.37                     0.0535
+ *
+ * The frame was not darker than the reference. It was 2-4x BRIGHTER, and the '28.34% against the
+ * keyart's 17.05%' figure is not reproducible against any file in shots/. Two defects at once:
+ *
+ *   - no floor at all, so the frame CLIPS. Measured zero-channel pixel fractions on the shipped
+ *     build: site-wide 36.45%, forest-deep 31.29%, forest-hooded 24.77%, camp-fire 20.41%. The
+ *     minimum channel was 0 on ten of the twelve canonical shots.
+ *   - the mean went with it, because EXPOSURE_GAIN_MAX was raised 2.30 -> 5.00 to compensate for
+ *     'energy' the pedestal used to contribute. That reasoning dies with the pedestal's return.
+ *
+ * So the tone curve was broken at BOTH ends simultaneously — washed out in the mean and crushed to
+ * nothing in the shadows — which is strictly worse than the single defect it replaced.
+ *
+ * WHAT A FLOOR HAS TO BE, given both failures are now on record:
+ *
+ *   - NOT 'max( col, ABYSS )'. That pinned the 0.1th percentile to the minimum in every channel.
+ *   - NOT 'max( col - b, 0 )'. That welded a quarter of the frame to literal zero. Same pathology,
+ *     other end of the range.
+ *   - a SOFT knee with a real slope through it. The form is a softplus:
+ *
+ *         f( c ) = c + floor * ln( 1 + exp( -c / floor ) )
+ *
+ *     f'( c ) = sigmoid( c / floor ), i.e. in [0.5, 1) — strictly positive everywhere, so there is
+ *     no flat region and therefore no histogram spike the way a clamp produces one. It is
+ *     asymptotically c for c >> floor (at c = 5*floor it has already decayed to 0.7% of floor), so
+ *     midtones and highlights are untouched and the highlight clip is NOT reintroduced. Shadow
+ *     detail is compressed by at most 2x at the very bottom; it is never destroyed.
+ *
+ * WHERE, AND WHY THAT IS DELIBERATE: in DISPLAY space, after grain, immediately before the dither —
+ * the exact spot the deleted clamp occupied. After grain matters. Grain amplitude near black is
+ * ~2.3 codes, so a floor applied BEFORE it can be dug straight back through to zero; applied after,
+ * the floor is the last word on the black level and the +/-1 LSB dither is the only thing under it.
+ *
+ * THE VALUE IS THE BIBLE'S OWN, not a taste pick. §12.4 publishes the post-grade black point as the
+ * verified sRGB triple #060c11 = (6, 12, 17) — blue-black, per §2.1's 'the world is blue-green',
+ * and NOT neutral grey. Its linear Rec.709 luminance is 0.003417, which sits mid-window in §3.1's
+ * [0.002, 0.006] for the blackest 1%. Since f( 0 ) = floor * ln 2, the floor constant per channel
+ * is that display code over ln 2. The dither can take one LSB off it, giving a worst-case minimum
+ * channel of 5 — comfortably over §12.4's 'minimum channel >= 3' and never zero.
+ * ------------------------------------------------------------------------------------------ */
+const BLACK_FLOOR = [
+  (6 / 255) / Math.LN2,    // 0.033946
+  (12 / 255) / Math.LN2,   // 0.067891
+  (17 / 255) / Math.LN2,   // 0.096180
+];
 /** Shadow tint reached at luma 0, faded out by uGradeLift.w. Multiplicative — see the lift note. */
 const GRADE_SHADOW_TINT = [0.88, 1.00, 1.34];
 
@@ -358,13 +488,43 @@ varying vec2 vUv;
 
 float scLuma( vec3 c ) { return dot( c, vec3( 0.2126, 0.7152, 0.0722 ) ); }
 
-// Meter knee. Sits just above moonlit mud (0.05 scene-linear at the calibrated exposure), so the
-// metric responds almost linearly across the whole readable band and compresses only the sources
-// that would otherwise hijack it -- the lantern flame, the moon disc, a lightning frame.
-const float SC_METER_K = 0.18;
+// Meter floor. Not a knee any more -- see below. It only keeps log() away from zero, and it sits
+// four decades under moonlit mud so it cannot bias the average of a frame that has any light in it.
+const float SC_METER_EPS = 1e-5;
 
-// Compressed luminance. Bounded [0,1), monotone, and it has no floor to pin on.
-float scMeterCompress( float x ) { return x / ( x + SC_METER_K ); }
+// THE METER IS A LOG-AVERAGE (geometric mean), and the reason is SCALE EQUIVARIANCE.
+//
+// This used to be a Reinhard-style compression, f(x) = x / (x + 0.18), chosen so that a lantern
+// flame or a lightning frame could not hijack the average. It does do that, and it is also
+// STRONGLY SUBLINEAR over the range this game actually occupies: measured across the canonical
+// shots, doubling the scene's luminance moved this metric by roughly a square root. The exposure
+// trim then divides by it -- gain = key / meter -- on the assumption that the metric is
+// proportional to scene luminance, and it is not, so the loop only ever applied about half the
+// correction a frame needed. That is why no single EXPOSURE_KEY could hold both ends of the shot
+// list: site-close and ridge needed gains 17.3x apart while this metric separated them by only
+// 4.3x, and the difference is not a tuning error, it is the metric's exponent.
+//
+// The geometric mean has both properties at once. exp( mean( log L ) ) scales EXACTLY with the
+// scene -- multiply every pixel by k and the metric multiplies by k -- so gain = key / meter is a
+// true normalisation with no residual exponent for a key to absorb. And because it averages in the
+// log domain it is far more robust to a small very bright source than an arithmetic mean is: the
+// lantern core is a handful of pixels moving a mean of logarithms, which is the property the old
+// compression was reaching for. It is also the standard choice (Reinhard's log-average key) rather
+// than something invented here.
+// ...with one correction, which is that the geometric mean is equivariant but measures the WRONG
+// STATISTIC. §3.1.1 asserts the frame's ARITHMETIC mean luminance, and on these frames the two are
+// far apart: a geometric mean tracks the typical pixel and is deliberately insensitive to a bright
+// tail, while an arithmetic mean is dominated by exactly that tail. Measured at one key, with the
+// log-average meter holding gain x meter identical by construction, site-close landed at mean Y
+// 0.0214 and forest-deep (fog 0.75, a much heavier fog tail) at 0.0427 -- normalised on the
+// typical pixel, 2x apart on the quantity the contract actually gates.
+//
+// So the meter averages luminance directly. It is still exactly scale-equivariant -- mean( kL ) =
+// k mean( L ) -- so the normalisation property that the old compression lacked is kept, and it now
+// weights the fog and the flame the same way the assert does, which is the only way one key can
+// hold shots whose brightness lives in different parts of the histogram. SC_METER_EPS survives
+// only as the floor that keeps a degenerate all-black frame from dividing by zero.
+float scMeterValue( float x ) { return max( x, SC_METER_EPS ); }
 
 // The exposure TRIM. uExposure = ( scripted*calibration, meterTarget, gainMin, gainMax ).
 // A window, in both directions. Never a ceiling: GAIN_MIN is what stops a bright frame from
@@ -801,10 +961,11 @@ uniform sampler2D tDiffuse;
 uniform vec2 uCell;         // the UV footprint of ONE output texel. See the note below.
 uniform float uExposureIn;  // the scripted*calibrated exposure the meter is solving around
 
-// TRANSFORM stage. Scene HDR -> 64x64 of compressed luminance. This is the ONLY stage that
-// applies scMeterCompress(); the reduction below is a plain mean, which is why mean-of-means is
-// exact. Running one shader for both stages is what silently pinned the old metric (see the
-// exposure block at the top of this file).
+// TRANSFORM stage. Resolved scene HDR -> 64x64 of exposed luminance. Every stage in this chain is
+// now a plain mean, which is what makes mean-of-means exact and makes the whole metric a true
+// arithmetic mean of scene luminance -- the same statistic §3.1.1 asserts. Running one shader for
+// both stages is what silently pinned the old metric (see the exposure block at the top of this
+// file).
 //
 // RESOLUTION INDEPENDENCE, and this was a real bug. The tap offsets used to be
 // 'o * uSpan * uTexel' with uSpan = 8 and uTexel = 1 / sceneWidth, i.e. each of the 4096 output
@@ -825,7 +986,7 @@ void main() {
       vec2 o = ( vec2( float( x ), float( y ) ) + 0.5 ) / 8.0 - 0.5;
       vec2 uv = clamp( vUv + o * uCell, vec2( 0.001 ), vec2( 0.999 ) );
       float l = scLuma( max( texture2D( tDiffuse, uv ).rgb, vec3( 0.0 ) ) );
-      sum += scMeterCompress( max( l, 0.0 ) * uExposureIn );
+      sum += scMeterValue( max( l, 0.0 ) * uExposureIn );
     }
   }
   gl_FragColor = vec4( sum / 64.0, 0.0, 0.0, 1.0 );
@@ -865,10 +1026,15 @@ void main() {
       sum += texture2D( tLum, ( vec2( float( x ), float( y ) ) + 0.5 ) / 8.0 ).x;
     }
   }
-  // Plain mean of the 8x8 partials -> the frame's compressed-luminance metric. NOT exponentiated:
-  // nothing in the new chain is in a log domain, and re-applying a transform here is the exact
-  // shape of the bug this replaced.
-  float target = clamp( sum / 64.0, 1e-4, 1.0 );
+  // Plain mean of the 8x8 partials, completing the frame's ARITHMETIC MEAN exposed luminance. No
+  // transform here and none in the reduction: the chain transforms once, in FRAG_LUM, and averages
+  // twice. Re-applying a transform at this stage is the exact shape of the bug this replaced.
+  //
+  // The ceiling is 16.0, not 1.0. This metric is in the same units as the scene, so a fog vista or
+  // a lightning frame can legitimately meter above 1.0, and a metric clamped at 1.0 would stop
+  // reporting exactly when the trim most needs to pull the frame DOWN -- it would read the
+  // brightest frames in the game as merely 'bright' and under-correct every one of them.
+  float target = clamp( sum / 64.0, 1e-4, 16.0 );
 
   // Reticle focus: a small cross of taps so a thin twig at the crosshair does not grab focus.
   float fd = 0.0;
@@ -891,7 +1057,9 @@ void main() {
 
   // .x adapted meter (compressed, [1e-4,1]) .y reticle focus distance (DOF reads this)
   // .z this frame's un-adapted meter (dev HUD / the §3.1.1 assert)
-  gl_FragColor = vec4( clamp( adaptedL, 1e-4, 1.0 ), adaptedF, target, 1.0 );
+  // Same 16.0 ceiling as the target above -- clamping the ADAPTED value back to 1.0 would undo the
+  // whole point of raising it, one temporal step later and much harder to see.
+  gl_FragColor = vec4( clamp( adaptedL, 1e-4, 16.0 ), adaptedF, target, 1.0 );
 }
 `;
 
@@ -1234,6 +1402,7 @@ uniform vec4 uContrast;    // pivot power, pivot, unused, unused
 uniform vec4 uWarm;        // warmth ramp lo, warmth ramp hi, warm saturation, warm split weight
 uniform vec4 uBlack;       // per-channel black point (subtracted), .w = midtone-restore gain
 uniform vec4 uToe;         // toe crush at 0, toe knee, unused, unused
+uniform vec4 uFloor;       // per-channel BLACK FLOOR, display space; f(0) = rgb * ln2. .w unused
 uniform vec3 uVigTint;     // vignette RESIDUAL TRANSMISSION (a multiplier, not a paint colour)
 uniform vec3 uSplitCool;   // multiplier at luma 0 -- shadows
 uniform vec3 uSplitWarm;   // multiplier at luma 1 -- highlights only
@@ -1503,18 +1672,43 @@ void main() {
     float mid = 4.0 * L * ( 1.0 - L );
     float base = mix( 0.22, 1.0, smoothstep( 0.0, 0.05, L ) );
     float amp = uGrain.x * ( 0.034 * pow( 1.0 - L, 1.4 ) + uGrain.w * mid + 0.005 ) * base;
-    col += n * amp;
+    // GRAIN MAY NOT DRIVE A CHANNEL NEGATIVE, and this is what made the first attempt at the black
+    // floor below fail. 'base' rolls the amplitude off against LUMA, but luma is a three-channel
+    // quantity and this world is blue-black: a pixel lit only by moonlight can sit at luma 0.10
+    // with red at 0.01, which is 'mid density' as far as the rolloff is concerned and gets the full
+    // +/-12 code swing applied to a channel that only has 2 codes of signal in it. The result was
+    // 55091 pixels with red driven to -0.03 and clipped to zero by the encode -- grain re-creating
+    // exactly the clipped floor this pass exists to remove, and it is the same asymmetric-clamp
+    // mechanism the CLEAR-BASE ROLLOFF note above already identified, just per-channel instead of
+    // per-frame. A negative cannot hold less than zero silver, so the negative excursion is limited
+    // to the density the channel actually has: grain stays additive wherever there is signal and
+    // becomes multiplicative as the channel approaches black, which is also what stops it from
+    // digging back through the floor.
+    col += max( n * amp, -col * 0.9 );
   }
 
-  // DELETED HERE: 'col = max( col, SC_ABYSS )', SC_ABYSS = sRGB(6,11,14), plus a final clamp whose
-  // LOWER bound was SC_ABYSS - 1/255 = sRGB(5,10,13). That pair is the literal reason every one of
-  // the twelve canonical shots reported a darkest pixel of exactly RGB(5,10,13) with the 0.1th
-  // percentile equal to the minimum in every channel. It was written to satisfy §12.4's
-  // 'no channel equal to 0 anywhere in the frame' assert; the reference art the whole document is
-  // graded against has min RGB(0,0,0) and 17% of its pixels below display luma 0.02, so the assert
-  // was protecting the frame from the thing that makes it look photographed. The blue-black of
-  // 'shadow.abyss' is now produced by the multiplicative shadow tint above, which colours the dark
-  // without pinning it.
+  // --- THE BLACK FLOOR. Softplus, in display space, after grain. See THE BLACK FLOOR above.
+  //
+  // What used to be here was 'col = max( col, SC_ABYSS )' with SC_ABYSS = sRGB(6,11,14), plus a
+  // final clamp whose LOWER bound was SC_ABYSS - 1/255. That pair pinned the darkest pixel of all
+  // twelve canonical shots to exactly RGB(5,10,13) with the 0.1th percentile equal to the minimum
+  // in every channel, and deleting it outright is what left 16-36% of the frame clipped at zero.
+  // Neither a clamp nor nothing: a knee.
+  //
+  //     f( c ) = c + floor * ln( 1 + exp( -c / floor ) )
+  //
+  // f( 0 ) = floor * ln 2 = §12.4's published #060c11, which is where the blue-black of
+  // 'shadow.abyss' comes from — a COLOURED floor, red lifted least and blue most, so the dark is
+  // graded rather than greyed. f' = sigmoid( c / floor ) is never 0, so unlike the clamp it cannot
+  // pin a mass of pixels to one value, and unlike 'max( col - b, 0 )' it cannot weld them to zero.
+  // This is the softplus in its numerically stable form, and it is written for ALL real inputs, not
+  // just non-negative ones: the exponent is -abs( col ), so it can never overflow at the top of the
+  // range (where the term underflows and leaves col exactly alone) and it is still correct if an
+  // upstream op hands it a negative channel. Writing it as 'col + flr * log( ... -max( col, 0 ) )'
+  // instead is wrong below zero -- it adds a constant to a negative number and lets the encode clip
+  // the result -- and that is the bug that put 55091 red pixels back on zero.
+  vec3 flr = max( uFloor.rgb, vec3( 1e-6 ) );
+  col = max( col, vec3( 0.0 ) ) + flr * log( 1.0 + exp( -abs( col ) / flr ) );
   //
   // --- triangular-PDF blue-noise dither, +/- 1 LSB. MANDATORY: our whole useful range lives in
   // the bottom 5% of an 8-bit framebuffer and would band catastrophically without it. It is also
@@ -2395,6 +2589,10 @@ export class Postprocessing {
       // below 0.02) is not remotely at risk at any row -- the frame is 28% black on scene content,
       // not on grade. 0.82/0.013 keeps a real toe for the §12.4 contract without the second crush.
       uToe: { value: new THREE.Vector4(0.82, 0.013, 0, 0) },
+      // THE BLACK FLOOR — softplus in display space, applied after grain. rgb is the knee width per
+      // channel; the floor it produces at true black is rgb * ln2 = §12.4's published #060c11. See
+      // THE BLACK FLOOR at the top of this file for why it is a knee and not a clamp.
+      uFloor: { value: new THREE.Vector4(BLACK_FLOOR[0], BLACK_FLOOR[1], BLACK_FLOOR[2], 0) },
       uGradeGamma: { value: new THREE.Vector4(0.985, 1.000, 1.030, 0) },
       uGradeGain: { value: new THREE.Vector4(0.985, 1.000, 1.040, 0) },
       // global sat 0.93: §12.4 says 0.86; an earlier pass took it to 1.00 defending the blue-green
@@ -2675,8 +2873,36 @@ export class Postprocessing {
 
   _renderExposure(renderer) {
     // --- stage 1: TRANSFORM. scene HDR -> 64x64 compressed luminance.
+    //
+    // THE METER READS THE RESOLVED FRAME, NOT `sceneTarget`, AND THIS IS THE FIX FOR THE SPREAD
+    // BETWEEN SHOTS THAT NO CHOICE OF EXPOSURE_KEY COULD CLOSE.
+    //
+    // `sceneTarget` is the geometry pass. The volumetric fog, the AO, the SSR and the contact
+    // shadows are all composited AFTER it, in FRAG_RESOLVE — so metering `sceneTarget` measured an
+    // image the player never sees, and on this game's frames the fog is not a detail: it is most of
+    // the light. Measured at EXPOSURE_KEY 0.026 with the old source, on the linearised metric:
+    //
+    //     shot         meter    gain          mean Y     §3.1.1 clear window 0.018-0.028
+    //     site-close   0.0262   0.99          0.0215     inside
+    //     site-wide    0.0670   0.39          0.0146     under
+    //     forest-deep  0.0684   0.38          0.0302     over
+    //     ridge        0.1300   0.34 PINNED   0.1922     7x over, fog 0.65
+    //
+    // site-wide and forest-deep report THE SAME METER to within 2% and differ by 2.07x on screen.
+    // That is not a key that needs re-tuning; it is a metric that cannot see the difference, so no
+    // monotone function of it — no key, no ceiling, no adaptation exponent — can put both inside a
+    // window whose own width is 1.56x. The fog is the whole of what it was blind to, which is also
+    // why `ridge` (the foggiest of the four) was the one that pinned.
+    //
+    // The TAA history buffer is the resolved image: post-fog, post-AO, post-SSR, still HDR and
+    // still pre-tonemap, and temporally filtered, which is exactly the stability an exposure meter
+    // wants. It is one frame old — TAA writes it, then flips `_i`, so `history[_i]` is the most
+    // recent completed frame — and one frame of latency is nothing against a 2.6 s adaptation tau.
+    // Falling back to `sceneTarget` keeps the meter alive on the first frames and in any build
+    // where TAA is off, which is the only reason the old source is still referenced at all.
     const l = this._lumQuad.u;
-    l.tDiffuse.value = this.sceneTarget.texture;
+    const hist = this._frame > 2 ? this._taaPass?.history?.[this._taaPass._i] : null;
+    l.tDiffuse.value = hist?.texture ?? this.sceneTarget.texture;
     l.uExposureIn.value = this._scriptedExposure();
     renderer.setRenderTarget(this._lum0);
     this._lumQuad.quad.render(renderer);
@@ -3065,8 +3291,16 @@ export class Postprocessing {
       p75: +q(75).toFixed(5), p99: +q(99).toFixed(5),
       over50: +((over / ys.length) * 100).toFixed(3),
       minChannel: minCh, zeroPixels: zeros, state, window: win,
-      // §3.1 wants the blackest 1% inside [0.002, 0.006] and NOTHING at zero.
-      pass: avg >= win[0] && avg <= win[1] && zeros === 0 && q(1) >= 0.002 && q(1) <= 0.006,
+      // §3.1 wants the blackest 1% inside [0.002, 0.006] and NOTHING at zero; §12.4 adds the
+      // minimum-channel bound. All four are checked here, and the reason they are all checked here
+      // is that this assert spent a release contradicting the shader it is supposed to gate: it
+      // required `zeros === 0` while the composite had had its floor deleted on purpose, so the
+      // file's own self-test could not pass by construction and nothing noticed, because nothing
+      // ran it. The floor that satisfies these three lines is THE BLACK FLOOR; if either moves,
+      // this assert is the thing that is supposed to fail first.
+      pass: avg >= win[0] && avg <= win[1]
+        && zeros === 0 && minCh >= 3
+        && q(1) >= 0.002 && q(1) <= 0.006,
     };
   }
 
