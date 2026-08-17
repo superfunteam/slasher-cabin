@@ -19,6 +19,7 @@ torque 1.0, and `build:stage-complete {stage:1}` fired.
 | Draw calls | **352–358 — over the 220 budget in ARCHITECTURE §10.** Unresolved. |
 | Visual, honest | ~5/10 mean over 13 shots; `site-close`/`opening` reach 7; lightning now lands |
 | Assets | 14 generated images, 33 audio beds/SFX/score, 90 VO lines |
+| First load | `dist` **22 MB** (from 59); real cold transfer **6.7 MB**. 17 MB of the 22 is audio. |
 | Docs | ~12,400 lines across five binding documents |
 
 **The interface is the strongest part** — title screen, the wordless in-engine manual, and the
@@ -27,7 +28,7 @@ real and named below.
 
 ---
 
-## THE MOST IMPORTANT THING: measurement on this project has lied six times
+## THE MOST IMPORTANT THING: measurement on this project has lied seven times
 
 Every one of these produced *confident, precise, wrong numbers*. Several sent real work backwards;
 one caused a committed regression. Two were inside the tool built to prevent the others.
@@ -49,6 +50,15 @@ one caused a committed regression. Two were inside the tool built to prevent the
 6. `tools/luma.mjs` reused a stale `/tmp` decode, so a **missing file silently reported the
    reference's numbers**. Caught only because a row came back byte-identical to the keyart.
    *Fixed: errors loudly.*
+7. `tools/luma.mjs` read **indexed-colour PNGs as if their palette INDICES were RGB.** Its TIFF
+   walk assumes 3 samples/pixel and `sips` preserves a palette, so it reported meanY `NaN` for one
+   file and "99.81% below 0.02" — i.e. *pitch black* — for a near-white paper texture. Latent
+   until `tools/optimise-images.mjs` converted most of `public/img/` to colour-type 3.
+   *Fixed: it detects IHDR colour type 3 and refuses, telling you to flatten with
+   `magick in.png -type TrueColor out.png`.* **Captures and the keyart are truecolour, so no
+   render measurement was ever affected** — but three of the seven failures are now inside the
+   one tool built to prevent the other four. Distrust it accordingly; it earns trust only by
+   printing `-> OK` on the calibration line.
 
 ### The rules that came out of it
 
@@ -114,15 +124,16 @@ would push `site-close` out of spec, so this needs judgement rather than a tweak
 4. **Visual gaps to the key art:** the lake has no water surface or reflection; tent interiors
    glow *inverted* (openings darker than canvas); cabin windows are flat rectangles with no spill;
    `ridge` is the "grey mush" failure `ART_DIRECTION §11` explicitly forbids.
-5. **First-load weight: `dist` is 46 MB** (down from 59). The production build has now been
-   served and verified — every asset resolves, sourcemaps are off, reference keyart is stripped.
-   But **27 MB is `img/` and 17 MB is `audio/`**, and the images are full-resolution PNGs straight
-   out of gpt-image-2. The obvious win nobody has taken: downscale and re-encode them (most are
-   used at a fraction of their native size), and consider lazy-loading the audio beds rather than
-   shipping all 33 up front. Also, six generated images are not yet wired to anything
-   (`icons-tools`, `icons-parts`, `mascot-sheet`, `hardware-plate`, two decals) — they were
-   deliberately left in the build rather than stripped, because excluding an image that works in
-   dev and 404s in production the moment someone wires it is the worst kind of trap.
+5. ~~First-load weight~~ **DONE. `dist` is 22 MB** (was 59, then 46). `img/` went 27 MB → 2.3 MB
+   and real cold transfer 17,815 KB → 6,694 KB, via `tools/optimise-images.mjs` — which sizes
+   each image from the box `Menu.js` actually paints it into, **measured from the running DOM
+   rather than read off the CSS**, and that corrected its own arithmetic twice. `keyart-*` is
+   excluded by name; it is the calibration target. Six generated images are still not wired to
+   anything (`icons-tools`, `icons-parts`, `mascot-sheet`, `hardware-plate`, two decals) and are
+   deliberately left in the build rather than stripped — excluding an image that works in dev and
+   404s in production the moment someone wires it is the worst kind of trap.
+   **What is left here is `audio/`, still 17 MB and the largest single item in `dist`** — all 33
+   beds/SFX ship up front. Lazy-loading them behind the preloader is the next obvious win.
 
 ---
 
@@ -139,6 +150,15 @@ would push `site-close` out of spec, so this needs judgement rather than a tweak
 - The keyart's own black point is *looser* than the spec: it has min channel 0 and 4.31% clipped
   pixels. `ART_DIRECTION`'s "no zeros, min channel ≥ 3" is stricter than the image it exists to
   match — **do not chase it at the cost of the mean.**
+- **The preloader's ordering guarantee.** The title used to be painted 888 ms *before* its own
+  background — a booklet floating against nothing. It now appears 7,772 ms *after* it, as one
+  reveal of a finished composition. That gap is the feature, not latency to optimise away: the
+  gate waits on a frame actually presented and on `splash-title.png` **decoded**, not merely on
+  the engine reporting ready. Do not "improve" this by showing the title earlier. There is a
+  640 ms floor so a warm cache still reads as a deliberate reveal rather than a flash.
+- **`Menu.update()` already drifts the title camera** — a 4½-minute orbit at 27 m breathing ±2.4 m,
+  with handheld noise, per `ART §11`'s "never let the frame be still". It yields to `Shots.active`
+  so the capture harness always wins. Add light, not more camera.
 
 ---
 
