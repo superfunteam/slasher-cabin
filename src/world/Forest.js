@@ -149,7 +149,44 @@ export const FOREST_TUNING = {
   rMin: 3.1,               // densest spacing, metres
   rMax: 11.5,              // thinnest spacing before it reads as a clearing
   lod0: 34, lod1: 78, lod2: 165,
-  shadowRange: 45,         // beyond this a trunk shadow is under a shadow-map texel (ART §3.5)
+  /**
+   * SHADOW BAND. Only LOD0 casts, and LOD0 already ends at `lod0` metres, so this number is
+   * the SECOND gate, not the first — it is here to trim the LOD0 disc further when a bucket's
+   * nearest instance is already far enough that its shadow lands under a texel. The lamp that
+   * carries the key art (Flashlight `lantern-core`) has shadow.camera.far = 26, so anything
+   * past that contributes to the moon pass only, and the moon runs at intensity 0.03.
+   */
+  shadowRange: 28,
+  /**
+   * Undergrowth casts on a much tighter leash than trees. A stump throws a readable shadow at
+   * 8 m in a lantern beam and nothing at all at 25 m, but it costs a full extra draw either
+   * way, x every shadow-casting light. Ferns and salal never cast (see the `cast` flags in
+   * `_buildUndergrowthBuckets`) — only the solid deadfall logs and stumps do.
+   */
+  ugShadowRange: 15,
+  /**
+   * BUILD-PAD CLEARING — the single number that decides whether the key art exists.
+   *
+   * `padClear` is how far past the pad edge the last trunk stands, and `padFeather` is how far
+   * past THAT the forest returns to full density. These used to be 11.0 and 28.0, which put the
+   * nearest trunk 23.4 m from the pad centre and the treeline proper at 51 m. The lantern's
+   * shadow camera reaches 26 m and its intensity falls off as 1/r^2, so at 23 m the nearest
+   * bark received about a hundredth of the light it gets at 8 m: the frame was lit against a
+   * black void, cast its shadow into empty air, and the "enormous shadows thrown up into the
+   * pines" of keyart-site.png could not physically happen. There was nothing there to hit.
+   *
+   * At 2.6 m of clearance the trunks stand just off the flattened pad, 9-13 m from a caretaker
+   * standing at the frame — inside the 26 m shadow camera AND inside the part of the 1/r^2
+   * curve where bark still reads warm. The feather is short enough that a real wall of forest
+   * closes the frame off instead of a distant band across a black gap.
+   * The clearing edge stays SPARSE on purpose (the feather leaves ~8-11 m spacing at the rim),
+   * because the key art shows half a dozen individually lit trunks, not a hedge.
+   *
+   * Do not push `padClear` below ~2: the pad half-extent is the WORKING area, not the cabin
+   * footprint, and a trunk inside it fouls carry paths and the piers.
+   */
+  padClear: 2.6,
+  padFeather: 11.0,
   lodJitter: 0.14,         // per-tree +/- on the LOD rings so the transition is not an arc
   undergrowthChunksPerFrame: 3,
   rebuildMoveEps: 1.0,     // metres
@@ -662,10 +699,10 @@ export class Forest {
     const pad = T?.buildSiteCenter;
     let padFeather = 1;
     if (pad) {
-      const inner = (T?.buildPadHalf ?? 12) + 7.5 + 3.5;
+      const inner = (T?.buildPadHalf ?? 12) + FT.padClear;
       const dp = Math.hypot(x - pad.x, z - pad.z);
       if (dp < inner) return -1;
-      padFeather = smooth01(inner, inner + 28, dp);
+      padFeather = smooth01(inner, inner + FT.padFeather, dp);
     }
     const dock = T?.dock;
     if (dock && Math.hypot(x - dock.x, z - dock.z) < 11) return -1;
@@ -1754,6 +1791,7 @@ export class Forest {
   _flush() {
     const shadowOn = this._shadows !== false;
     const sr = FT.shadowRange;
+    const ugSr = FT.ugShadowRange;
     let draws = 0;
     const buckets = this._buckets;
     for (let b = 0; b < buckets.length; b++) {
@@ -1768,9 +1806,11 @@ export class Forest {
         if (ea.clearUpdateRanges) { ea.clearUpdateRanges(); ea.addUpdateRange(0, n * 2); }
         ea.needsUpdate = true;
       }
-      // Shadow casting is a band, not a flag: past ~45 m a tree's shadow is smaller than a
-      // shadow-map texel and costs a full extra draw to render. ART_DIRECTION §3.5.
-      const cast = vis && shadowOn && bk.lod === 0 && bk.near < sr;
+      // Shadow casting is a band, not a flag: past `shadowRange` a tree's shadow is smaller
+      // than a shadow-map texel and costs a full extra draw per casting light to render.
+      // ART_DIRECTION §3.5. Undergrowth runs on its own, much shorter leash.
+      const cast = vis && shadowOn && bk.lod === 0
+        && bk.near < (bk.ug ? ugSr : sr);
       const subs = bk.subs;
       for (let s = 0; s < subs.length; s++) {
         const sub = subs[s];

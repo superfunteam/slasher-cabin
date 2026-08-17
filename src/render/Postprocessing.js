@@ -41,9 +41,36 @@
  * `post.gbufferIsAuthored = true` and the resolve/TAA will prefer it. See the report notes.
  *
  * ---------------------------------------------------------------------------------------------
- * BUDGET: ~5.4 ms at 1080p/ultra on an M-series GPU. AO and SSR are half-res, the luminance chain
- * is 64x64, the bloom chain starts at half-res. On `low` everything above collapses to
- * scene -> composite (AgX + grade + grain + vignette + dither) -> FXAA.
+ * ---------------------------------------------------------------------------------------------
+ * BUDGET, MEASURED. `await post.bench()` (bottom of this file) at ?shot=site-close&quality=ultra,
+ * 2560x1440 (dpr 2), engine stopped, on this M-series machine. Milliseconds, GPU:
+ *
+ *     volumetric fog (NOT ours)   1.30      taa (resolve + history copy)   0.89
+ *     gtao + bilateral blur       1.82      resolve                        0.07
+ *     bloom chain                 1.46      ssr                            0.19
+ *     composite                   1.26      motion blur                    0.00 (idle camera)
+ *     normals from depth          1.17      meter chain (64x64/8x8/1x1)    ~0.3
+ *     dof                         0.64      -------------------------------------
+ *                                           WHOLE POST STACK               7.6
+ *
+ * 7.6 ms at 3.69 Mpx is 2.06 ns/pixel, i.e. 4.3 ms at 1080p — inside ARCHITECTURE's 6 ms.
+ * THE POST STACK IS NOT WHY THE FRAME IS SLOW. In the same session the same instrument put the
+ * scene draw at 24.6 ms and its four shadow maps at 12.0 ms, so 36.6 of a 44.5 ms synchronised
+ * frame — 82% — is geometry and shadows, neither of which is in this file. The three things the
+ * brief suspected all measured cheap: SSR is 0.19 ms because its up-facing mask discards almost
+ * every pixel at night, the exposure reduction is ~0.3 ms because it really is 64x64 -> 8x8 ->
+ * 1x1, and TAA renders the scene exactly once (see _renderScene, called once per render()).
+ *
+ * Two things this file then gave back, neither of which touches the ultra look:
+ *   - the normal buffer is HALF RES. Every consumer (GTAO, SSR, and the 800x450 fog march) was
+ *     already sampling below full res. Worth 1.2-1.5 ms, measured 4/4 in an interleaved A/B.
+ *   - `_renderScale`, which sizes the scene target and every post target together, so it scales
+ *     the WHOLE frame rather than just post. 1.0 on ultra — the ultra frame is unchanged — and
+ *     0.90 / 0.75 / 0.60 down the ladder, which is where §13's 'low must still be playable' now
+ *     comes from.
+ *
+ * On `low` everything above collapses to scene -> composite (AgX + grade + grain + vignette +
+ * dither) -> FXAA, at 0.60 render scale.
  *
  * GLSL rule (ARCHITECTURE.md §11b): never a backtick inside a shader comment. 'Single quotes'.
  */
@@ -1283,6 +1310,17 @@ export class Postprocessing {
 
     this._w = 1; this._h = 1; this._dpr = 1;
     this._pw = 1; this._ph = 1;
+    /**
+     * Internal render scale. The scene AND every post target are sized at
+     * canvasBackingPixels * this, and the composite upsamples on its way to the default
+     * framebuffer, so it scales the WHOLE frame — scene raster included — not just post.
+     *
+     * 1.0 on ultra: the ultra look is not traded for frame rate (ART_DIRECTION is binding on it).
+     * The ladder below ultra is where the trade lives, which is the order of preference the
+     * performance brief asks for. Shadow map cost does not move with it — those are fixed-size
+     * depth targets owned by the lighting rig, not by this file.
+     */
+    this._renderScale = 1;
 
     this._frame = 0;
     this._time = 0;
@@ -1324,6 +1362,17 @@ export class Postprocessing {
   /** 0..1 — desaturation, pulsing vignette, slight lens warp. Campers.js / HUD.js call this. */
   setPanic(v) {
     this._panicTarget = Math.max(0, Math.min(1, Number.isFinite(v) ? v : 0));
+  }
+
+  /**
+   * Internal render scale, 0.5..1. Applies to the scene draw and every post target; the composite
+   * upsamples to the canvas. Call with no argument to return to the tier default.
+   */
+  setRenderScale(v) {
+    const next = Number.isFinite(v) ? Math.max(0.5, Math.min(1, v)) : this._tierRenderScale();
+    if (Math.abs(next - this._renderScale) < 1e-3) return;
+    this._renderScale = next;
+    if (this._ready && !this._fallback) this._resizeTo(this._scaledWidth(), this._scaledHeight());
   }
 
   /** 0..1 — tightens the vignette while sprinting (the only other dynamic vignette, §12.7). */
@@ -1443,8 +1492,14 @@ export class Postprocessing {
     this.stats.tier = this._tier;
   }
 
-  /** Engine calls this instead of renderer.render(). We own the frame from here. */
-  render() {
+  /**
+   * Engine calls this instead of renderer.render(). We own the frame from here.
+   *
+   * `skipScene` is for bench() only: the scene draw is identical under every post configuration,
+   * so leaving it out makes a pass-by-pass sweep 4x faster AND removes the scene's frame-to-frame
+   * variance — which is larger than most of the deltas being measured — from the numbers.
+   */
+  render(skipScene = false) {
     const ctx = this.ctx;
     const renderer = ctx?.renderer;
     const scene = ctx?.scene;
@@ -1458,8 +1513,9 @@ export class Postprocessing {
     }
 
     // Size may have changed without a resize() call (harness captureFrame).
-    const dw = renderer.domElement?.width ?? this._pw;
-    const dh = renderer.domElement?.height ?? this._ph;
+    const scale = this._renderScale;
+    const dw = Math.max(1, Math.round((renderer.domElement?.width ?? this._pw) * scale));
+    const dh = Math.max(1, Math.round((renderer.domElement?.height ?? this._ph) * scale));
     if (dw !== this._pw || dh !== this._ph) this._resizeTo(dw, dh);
 
     const prevAutoClear = renderer.autoClear;
@@ -1467,7 +1523,7 @@ export class Postprocessing {
 
     try {
       this._frame++;
-      this._renderScene(renderer, scene, camera);
+      if (!skipScene) this._renderScene(renderer, scene, camera);
       this._renderGeometryBuffers(renderer, camera);
       this._renderExposure(renderer);
       this._updateChainUniforms(camera);
@@ -1496,9 +1552,7 @@ export class Postprocessing {
     this._h = Math.max(1, h || 1);
     this._dpr = this.ctx?.dpr || 1;
     if (this._fallback || !this._ready) return;
-    const pw = Math.max(1, Math.round(this._w * this._dpr));
-    const ph = Math.max(1, Math.round(this._h * this._dpr));
-    this._resizeTo(pw, ph);
+    this._resizeTo(this._scaledWidth(), this._scaledHeight());
   }
 
   dispose() {
@@ -1538,6 +1592,15 @@ export class Postprocessing {
   }
 
   // ------------------------------------------------------------------ internals: setup
+
+  /** §13 wants low/medium still playable; this is the lever that gets them there. */
+  _tierRenderScale() {
+    const s = this._settings;
+    return s?.tier ? s.tier(0.60, 0.75, 0.90, 1.0) : 1.0;
+  }
+
+  _scaledWidth() { return Math.max(1, Math.round(this._w * this._dpr * this._renderScale)); }
+  _scaledHeight() { return Math.max(1, Math.round(this._h * this._dpr * this._renderScale)); }
 
   _globalUniforms() {
     const m = this.ctx?.systems?.get?.('Materials');
@@ -1611,8 +1674,8 @@ export class Postprocessing {
   }
 
   _buildTargets() {
-    const pw = this._pw = Math.max(1, Math.round(this._w * this._dpr));
-    const ph = this._ph = Math.max(1, Math.round(this._h * this._dpr));
+    const pw = this._pw = this._scaledWidth();
+    const ph = this._ph = this._scaledHeight();
     const hw = Math.max(1, pw >> 1);
     const hh = Math.max(1, ph >> 1);
 
@@ -1646,7 +1709,12 @@ export class Postprocessing {
       ? this.sceneTarget.textures[1] : null;
 
     // --- geometry buffers
-    this._normalRT = this._mkTarget(pw, ph, { type: THREE.UnsignedByteType, name: 'sc-normal' });
+    // HALF RES, and measured: this pass cost 1.17 ms of a 7.6 ms post stack at 2560x1440 while
+    // every consumer of it already samples at half res or lower — GTAO and SSR run at hw x hh, and
+    // VolumetricFog marches an 800x450 buffer. A full-res normal buffer was reconstructing detail
+    // that nothing downstream could read, at 3.7 M pixels and 14.7 MB of RGBA8 bandwidth a frame.
+    // Sampling is by UV, so this is invisible to anyone holding `post.normalTexture`.
+    this._normalRT = this._mkTarget(hw, hh, { type: THREE.UnsignedByteType, name: 'sc-normal' });
     this.normalTexture = this._normalRT.texture;
 
     this._aoRT = this._mkTarget(hw, hh, { type: THREE.HalfFloatType, name: 'sc-ao' });
@@ -1916,6 +1984,8 @@ export class Postprocessing {
     const s = this._settings;
     const taa = t >= 2;
 
+    this.setRenderScale();          // tier default; ultra is 1.0, so ultra is bit-identical
+
     if (this._taaPass) { this._taaPass.enabled = taa; if (taa) this._taaPass.reset(); }
     if (this._fxaaPass) this._fxaaPass.enabled = !taa;
     if (this._motionPass) this._motionPass.enabled = t >= 1 && (s?.get?.('motionBlur') ?? true);
@@ -1984,15 +2054,18 @@ export class Postprocessing {
     const far = camera.far ?? 1200;
 
     // --- normals from depth (public: VolumetricFog reads this.normalTexture)
+    const hw = this._aoRT.width, hh = this._aoRT.height;
+
     if (this._needNormals) {
       const u = this._normalQuad.u;
       u.uProjInv.value.copy(this._projInv);
-      u.uTexel.value.copy(texel);
+      // Half-res texel: the cross-difference stencil must straddle the pixel this half-res texel
+      // actually covers, or the reconstruction reads a 1-full-res-pixel neighbourhood and returns
+      // a normal for a quarter of the footprint it is being asked about.
+      u.uTexel.value.set(1 / hw, 1 / hh);
       renderer.setRenderTarget(this._normalRT);
       this._normalQuad.quad.render(renderer);
     }
-
-    const hw = this._aoRT.width, hh = this._aoRT.height;
 
     // --- AO (half res) + separable bilateral blur guided by depth AND normal
     if (this._aoEnabled && this._needNormals) {
@@ -2229,6 +2302,108 @@ export class Postprocessing {
     if (this._fxaaPass?.enabled) this._fxaaPass.uniforms.uTexel.value.copy(texel);
   }
 
+  /* ------------------------------------------------------------------ dev: the pass budget ----
+   * `bench()` answers one question: how many milliseconds does each pass cost, right now, at the
+   * resolution actually being rendered. Everything in the perf section of this file was decided
+   * from its output, so the method ships with the file rather than living in a scratch console.
+   *
+   * WHY IT IS SHAPED LIKE THIS. Two more obvious instruments were tried first and both lie:
+   *
+   *   EXT_disjoint_timer_query_webgl2  is present on this ANGLE/Metal backend and it resolves, but
+   *      each begin/end splits the command buffer. Bracketing eleven stages of one real frame
+   *      reported every stage at 11-15 ms and a 180 ms total on a 95 ms frame: the queries were
+   *      measuring their own flushes. Timing a stage by submitting it N times in a row instead
+   *      reported 153 ms for the scene draw on a 116 ms frame, because N back-to-back copies of a
+   *      full-screen pass hit bandwidth behaviour that the in-order frame never sees.
+   *   gl.finish()  does not synchronise here. A full frame 'measured' 1.32 ms through it.
+   *
+   * What does work is a 1x1 readPixels() off the default framebuffer, which is a real stall, with
+   * the pass under test toggled off between two runs. Subtraction of two synchronised wall-clock
+   * numbers has no per-pass instrumentation cost to contaminate it.
+   * ------------------------------------------------------------------------------------------ */
+
+  /**
+   * DEV TOOL. `await post.bench()` -> [{ name, ms, delta }], each delta being what that pass costs.
+   *
+   * NEVER called from the frame loop, which is why it may allocate. Runs the frame itself, so it
+   * is valid with the engine stopped or running; stop the engine for the quietest numbers.
+   */
+  async bench(frames = 12, repeats = 3, skipScene = true) {
+    const renderer = this.ctx?.renderer;
+    if (!renderer || !this._ready || this._fallback || !this.composer) return null;
+    const gl = renderer.getContext();
+    const px = new Uint8Array(4);
+    const fog = this.ctx?.systems?.get?.('VolumetricFog');
+    const pass = (n) => this.composer.passes.find((p) => (p.material?.name ?? p.constructor?.name) === n);
+
+    const sync = () => {
+      renderer.setRenderTarget(null);
+      gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+      gl.readPixels(0, 0, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, px);
+    };
+    const frame = () => {
+      if (fog?.enabled && typeof fog.render === 'function') fog.render();
+      this.render(skipScene);
+    };
+    const once = () => {
+      for (let i = 0; i < 3; i++) frame();
+      sync();
+      const t0 = performance.now();
+      for (let i = 0; i < frames; i++) frame();
+      sync();
+      return (performance.now() - t0) / frames;
+    };
+    const measure = async () => {
+      let best = Infinity;
+      for (let k = 0; k < repeats; k++) { best = Math.min(best, once()); await new Promise((r) => setTimeout(r, 16)); }
+      return best;
+    };
+
+    // Saved state — every one of these is restored in the finally block.
+    const saved = {
+      fog: fog?.enabled, ssr: this._ssrEnabled, ao: this._aoEnabled, normals: this._needNormals,
+      exposureFn: this._renderExposure, shadowAuto: renderer.shadowMap.autoUpdate,
+      passes: this.composer.passes.map((p) => p.enabled),
+    };
+
+    const rows = [];
+    try {
+      let prev = await measure();
+      rows.push({ name: 'FULL FRAME', ms: +prev.toFixed(2), delta: 0 });
+      const step = async (name, off) => {
+        off();
+        const now = await measure();
+        rows.push({ name, ms: +now.toFixed(2), delta: +(prev - now).toFixed(2) });
+        prev = now;
+      };
+
+      await step('volumetric fog', () => { if (fog) fog.enabled = false; });
+      await step('ssr', () => { this._ssrEnabled = false; });
+      await step('gtao + bilateral blur', () => { this._aoEnabled = false; });
+      await step('bloom chain', () => { const p = pass('BloomPass'); if (p) p.enabled = false; });
+      await step('dof', () => { const p = pass('sc-dof'); if (p) p.enabled = false; });
+      await step('motion blur', () => { const p = pass('sc-motion'); if (p) p.enabled = false; });
+      await step('taa', () => { const p = pass('sc-taa'); if (p) p.enabled = false; });
+      await step('meter chain', () => { this._renderExposure = () => {}; });
+      await step('normals from depth', () => { this._needNormals = false; });
+      await step('composite', () => { const p = pass('sc-composite'); if (p) p.enabled = false; });
+      await step('resolve', () => { const p = pass('sc-resolve'); if (p) p.enabled = false; });
+      await step('shadow maps (not ours)', () => { renderer.shadowMap.autoUpdate = false; });
+      rows.push({ name: skipScene ? 'FLOOR (scene draw excluded)' : 'SCENE DRAW, no shadows', ms: +prev.toFixed(2), delta: 0 });
+    } finally {
+      if (fog) fog.enabled = saved.fog;
+      this._ssrEnabled = saved.ssr;
+      this._aoEnabled = saved.ao;
+      this._needNormals = saved.normals;
+      this._renderExposure = saved.exposureFn;
+      renderer.shadowMap.autoUpdate = saved.shadowAuto;
+      this.composer.passes.forEach((p, i) => { p.enabled = saved.passes[i]; });
+      this._taaPass?.reset();
+      this._prevValid = false;
+    }
+    return rows;
+  }
+
   _fogTexture() {
     const fog = this.ctx?.systems?.get?.('VolumetricFog');
     if (!fog) return null;
@@ -2253,7 +2428,7 @@ export class Postprocessing {
       this._depthTex.image.width = pw;
       this._depthTex.image.height = ph;
       this._depthTex.needsUpdate = true;
-      this._normalRT.setSize(pw, ph);
+      this._normalRT.setSize(hw, hh);
       this._aoRT.setSize(hw, hh);
       this._aoRT2.setSize(hw, hh);
       this._ssrRT.setSize(hw, hh);

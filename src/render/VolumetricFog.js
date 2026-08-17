@@ -95,24 +95,37 @@ const NOISE_TEX = 64;
 /**
  * Art-directed defaults.  Every one of these is live-tunable through `fog.params`.
  *
- * THE NUMBER THAT MATTERS.  The medium's ambient (sky-scatter) term is a PEDESTAL: it is added
- * at every marched sample regardless of geometry, so it is the one term that cannot carry an
- * image.  Every structured term — the moon shaft, the lantern cone, the mist band — has to sit
- * ABOVE it to be visible.  This module previously ran `ambient` at 1.15 with a further x1.33
- * weather scale, i.e. ~1.53 x `fog.far`, which measured at 0.13/0.18/0.25 linear against a scene
- * whose own radiance was 0.0015/0.0021/0.0030 — a flat blue pedestal EIGHTY-FIVE TIMES the world
- * behind it.  Transmittance collapsed to 0.02 and the frame became a featureless wash that the
- * exposure clamp downstream then crushed to black.  That is why no cone, no shaft and no mist
- * layer were ever visible: they were all there, 2-10 stops under a constant.
+ * THE BUG THAT MADE THIS MODULE INVISIBLE (measured, 2026-08-16).  `floorY` is the fog floor and
+ * it used to be applied as an ABSOLUTE world height (y = -1).  The playable terrain is not at
+ * y = 0: the cabin site sits at y = +17.08 and the player's eye at y = +18.68.  With a 7.6 m
+ * scale height that put the eye 19.7 m up the exponential, so the height fog evaluated to
  *
- * The rule this file now obeys: the ambient pedestal is authored to land at roughly the same
- * order as moonlit ground (a few hundredths, linear), and the moon/lantern terms are scaled to
- * sit clearly above it.  Contrast is the horror (ART §11).
+ *     0.00195 / m   at the eye, where it should have been   0.0181 / m
+ *
+ * i.e. the entire medium ran 9.3x too thin everywhere the game is actually played.  Readback of
+ * the target confirmed the consequence exactly: mean in-scatter 0.0142 against a scene whose
+ * mean radiance was 0.0595, and mean transmittance 0.749, so Postprocessing's
+ * `scene * a + rgb` resolved to 0.0595*0.749 + 0.0142 = 0.0588 — a 1% change, a visual no-op.
+ * The fog was never missing.  It was a correctly-integrated near-vacuum.
+ *
+ * The fix is in `densityAt`: the height fog is now referenced to the GROUND under the sample
+ * (the same baked terrain window the mist already used), so `floorY` means "one metre below the
+ * ground" the way ART §5.1 intends, at every altitude in the level.
+ *
+ * SECOND RULE, kept from the previous revision.  The ambient (sky-scatter) term is a PEDESTAL:
+ * it is added at every sample regardless of geometry, so it is the one term that cannot carry an
+ * image.  It is authored so that a ray that saturates (tau >> 1) integrates TO the `fog.far`
+ * swatch and no further — that is the "distance wall" of ART §2.2 — and it is gated by the moon's
+ * shadow map so canopy carves it.  Contrast is the horror (ART §11).
  */
 const DEFAULT_PARAMS = {
   /** Base height-fog density at the fog floor, 1/m.  ART §5.1 clear=0.014 .. whiteout=0.078 */
   density: 0.0105,
-  /** Fog floor, metres. */
+  /**
+   * Fog floor, metres, RELATIVE TO THE GROUND under the sample (ART §5.1 y0 = -1).  It is not a
+   * world height — see the block comment above; treating it as one is what made this module
+   * invisible on a level whose terrain sits 17 m above the origin.
+   */
   floorY: -1.0,
   /** Scale height, metres.  ART §5.1: 4.2 clear (shoulder height on the lake path). */
   scaleHeight: 4.6,
@@ -122,10 +135,12 @@ const DEFAULT_PARAMS = {
   albedo: 0.92,
   /**
    * Scale on the ambient sky-scatter pedestal, as a fraction of the `fog.near`/`fog.far`
-   * swatches.  See the block comment above — this is the single most destructive knob in the
-   * module and it is deliberately small.
+   * swatches.  A fully saturated ray integrates to `albedo * ambient * fog.far`, so ~1.0 is the
+   * value that makes the far treeline land ON the ART §2.2 "distance wall" swatch (0.134 linear)
+   * instead of somewhere arbitrary.  See the block comment above — this is the single most
+   * destructive knob in the module, which is why it is derived rather than guessed.
    */
-  ambient: 0.16,
+  ambient: 0.85,
   /**
    * How much the ambient pedestal survives in moon-shadowed volume.  Below 1.0 the canopy's
    * own shadow map carves the fog, which is what turns a wash into god rays (ART §5.4).
@@ -155,10 +170,29 @@ const DEFAULT_PARAMS = {
    * the water, not the 8x that blew it out through bloom at 0.62.
    */
   mistTint: 0.45,
-  /** Multiplier on the moon's volumetric contribution. */
-  moonScatter: 3.0,
-  /** Multiplier on the lantern's volumetric contribution. */
+  /**
+   * The moon's volumetric source RADIANCE, linear, absolute — not a multiplier on the light.
+   *
+   * `Sky` authors its DirectionalLight in three.js physical units and the number swings with the
+   * night: it measured 0.031 here, which through the old `intensity * 3.0` multiplier produced a
+   * moon term of 0.019/0.028/0.052 — two stops under the ambient pedestal, i.e. no shafts, ever.
+   * Coupling a volumetric to another module's unit convention is how that happens.  Instead the
+   * light's colour is normalised to unit luminance and its magnitude comes from here, ramped by
+   * a saturating curve of the light's intensity (`moonRef`) so a moon that sets still fades out.
+   * 0.42 puts an open-air shaft at ~0.09 linear against ~0.06 moonlit ground: visible, not a wash.
+   */
+  moonScatter: 0.42,
+  /** Light intensity at which the moon's volumetric drive reaches 63% of `moonScatter`. */
+  moonRef: 0.05,
+  /** Multiplier on the lantern's volumetric contribution (on top of the 1/4pi normalisation). */
   lanternScatter: 1.0,
+  /**
+   * Finite radius of the lantern's emitting body, metres.  Kills the 1/d^2 singularity of a
+   * source that is parented to the camera — see the comment in the march shader.  0.45 is much
+   * larger than the real glass because it also stands in for the near field the camera cannot
+   * see into (the fixture, the player's hand, the first few centimetres of air).
+   */
+  lanternRadius: 0.45,
   /** Multiplier on campfire/sodium/torch volumetrics. */
   localScatter: 0.9,
   /** Rain streaks inside a light cone are lit at this multiple. ART §5.4. */
@@ -261,7 +295,7 @@ uniform vec2  uMoonShadowCfg;      // x enabled, y bias
 uniform vec3  uLampPos;
 uniform vec3  uLampDir;
 uniform vec3  uLampColor;
-uniform vec4  uLampCone;           // x cosOuter, y cosInner, z range, w unused
+uniform vec4  uLampCone;           // x cosOuter, y cosInner, z range, w source radius SQUARED
 uniform mat4  uLampShadowMat;
 uniform vec2  uLampShadowCfg;      // x enabled, y bias
 
@@ -318,16 +352,21 @@ float densityAt(vec3 p, float dist, out float mistAmt) {
   float n = texture2D(tNoise, n1).r * 0.66 + texture2D(tNoise, n2).g * 0.34;
   n = mix(0.5, n, uNoiseCfg.z);
 
-  // ---- analytic height fog
-  float base = uFogA.x * exp(-max(p.y - uFogA.y, 0.0) * uFogA.z);
-  base *= 0.40 + 1.40 * n;
-
-  // ---- ground mist: a LAYER, not a fill
+  // ---- where the ground is under this sample (baked terrain window, flattened to the waterline)
   vec4 tr = terrainAt(p.xz);
   float valid = uTerrainOrigin.y;
   float floorY = mix(uFogA.y + 0.6, tr.r, valid);
   float pool = mix(0.5, tr.b, valid);
   float mult = mix(1.0, tr.a, valid);
+
+  // ---- analytic height fog, referenced to the GROUND and not to world y = 0.
+  // uFogA.y is ART §5.1's y0, which is 'one metre below the ground', not 'one metre below the
+  // world origin'.  This level's terrain sits at y = +17, so measuring the exponential from the
+  // world origin put the player 19.7 m up it and evaluated the whole medium 9.3x too thin.  That
+  // single line is why nothing this module drew was ever visible.  See DEFAULT_PARAMS.
+  float fogFloor = mix(uFogA.y, tr.r + uFogA.y, valid);
+  float base = uFogA.x * exp(-max(p.y - fogFloor, 0.0) * uFogA.z);
+  base *= 0.40 + 1.40 * n;
 
   float top = floorY + uMist.x * (0.55 + 1.25 * pool) + (n - 0.5) * uMist.w;
 
@@ -425,13 +464,23 @@ void main() {
         L += uMoonColor * (phaseMoon * shM);
 
         // ------------------------------------------------ the lantern (keyart-site.png)
+        // uLampCone.w is the SQUARE of a finite source radius, and it is not a fudge.  The held
+        // lantern is parented to the eye, so uLampPos == uCamPos to within a metre; a bare 1/d^2
+        // point source there puts its own singularity inside the first march step and the
+        // in-scatter integral becomes ~I*sigma_s*phase/d_start, i.e. it is decided entirely by
+        // the near plane.  Measured: 5.12 linear at the bottom-centre of site-close against a
+        // scene whose brightest pixel was 0.75 — a fireball that stopped the auto-exposure down
+        // and crushed everything else in frame, which is the other half of why this pass looked
+        // like it was doing nothing.  A real lantern is a flame inside a glass of finite size
+        // and there is no fog between the two, so the source gets a radius and the singularity
+        // goes away.
         vec3 toL = uLampPos - p;
         float dl2 = dot(toL, toL);
         float dl = sqrt(max(dl2, 1e-4));
         vec3 ld = toL / dl;
         float coneA = smoothstep(uLampCone.x, uLampCone.y, dot(uLampDir, -ld));
         if (coneA > 0.0) {
-          float att = 1.0 / max(dl2, 0.05);
+          float att = 1.0 / (dl2 + uLampCone.w);
           float rr = dl / max(uLampCone.z, 0.001);
           rr = rr * rr; rr = rr * rr;
           att *= pow(sat(1.0 - rr), 2.0);
@@ -448,7 +497,7 @@ void main() {
             float d22 = dot(t2, t2);
             float d2 = sqrt(max(d22, 1e-4));
             vec3 ld2 = t2 / d2;
-            float att = 1.0 / max(d22, 0.05);
+            float att = 1.0 / (d22 + 0.25);   // 0.5 m source radius, same reason as the lantern
             float r2 = d2 / par.z;
             r2 = r2 * r2; r2 = r2 * r2;
             att *= pow(sat(1.0 - r2), 2.0);
@@ -456,6 +505,14 @@ void main() {
             Lwarm += uLocalColor[k] * (att * cone * phaseHG(dot(ld2, rd), g));
           }
         }
+
+        // The punctual lights arrive in three.js physical units (candela), so their in-scatter is
+        // sigma_s * p(theta) * I / d^2 with p the NORMALISED phase function — which carries the
+        // 1/4pi that phaseHG() leaves out.  The header claimed that factor was 'folded into the
+        // light intensities'; it never was, and the whole warm term therefore ran 4pi = 12.6x
+        // hot.  The moon does not get it: its radiance is authored directly in
+        // DEFAULT_PARAMS.moonScatter, in linear units, and is already calibrated.
+        Lwarm *= PI_INV4;
 
         L += Lwarm;
 
@@ -596,12 +653,30 @@ export class VolumetricFog {
     this._historyAmount = 0.88;
 
     /**
-     * Hard ceilings on buffer area, independent of DPR.  A retina 1080p canvas is a 3840x2160
-     * drawing buffer; a full-res HDR fog buffer there is 66 MB and 8.3 M raymarched pixels,
-     * which is not a 2.5 ms pass on any laptop.  These caps keep the budget honest while still
-     * letting the tier ask for "full".
+     * THE BUDGET, and it is measured, not guessed.
+     *
+     * A raymarch costs `pixels x steps` samples and nothing else moves the needle, so the honest
+     * knob is the PRODUCT.  Timed on the reference machine at ?shot=site-close&quality=ultra by
+     * bracketing `render()` between two `readRenderTargetPixels` stalls (a GL sync; `gl.finish()`
+     * does not block in Chrome's command-buffer model and reported a useless 0.01 ms), with the
+     * engine loop stopped so the main frame did not contaminate the sample:
+     *
+     *      1549x871  x 64 steps  ->  12.55 ms      1099x618 x 64  ->  7.18 ms
+     *      1549x871  x 32 steps  ->   7.00 ms      1099x618 x 32  ->  3.72 ms
+     *      1549x871  x 16 steps  ->   3.53 ms       777x437 x 32  ->  1.92 ms
+     *
+     * which fits `ms ~= 0.50 + 0.139 * Mpixels * steps` to within 8% across the whole set.  The
+     * old cap of 1.35e6 with the old 64 steps therefore bought a 12.6 ms pass against ART §5.3's
+     * 1.80 ms ceiling — 7x over, and the dominant term in a 110 ms frame.
+     *
+     * Solving that fit for the ART ceiling gives `Mpixels * steps <= 9.4`.  The tiers below spend
+     * it as 0.36 Mpx x 32, because resolution and steps are NOT interchangeable here: the blue-
+     * noise ray-start jitter plus 8-frame temporal reprojection already hide step banding, while
+     * nothing hides a march that undersamples a light cone in depth.  Spend on steps, claw the
+     * pixels back with the bilateral upsample.  ART §5.3's own froxel grid is 160x90 — a
+     * screen-space march at 800x450 is five times finer than the spec it replaces.
      */
-    this.maxFogPixels = 1.35e6;
+    this.maxFogPixels = 3.6e5;
     this.maxDepthPixels = 2.15e6;
 
     this._fw = 1; this._fh = 1;
@@ -657,6 +732,21 @@ export class VolumetricFog {
     // light bookkeeping
     this._moon = null;
     this._lightScanAge = 999;
+    /**
+     * Point/spot lights found by walking the scene, refreshed on the same slow cadence as the
+     * moon scan.  The documented sources (Props.lights, CabinSite, Campers) are consulted first,
+     * but they do not cover everything: the site's hung lantern — 2 m from the camera in
+     * keyart-site.png and the single most important local in the game — appears in none of them,
+     * so relying on them alone left its slot empty.  Codes defensively rather than editing a
+     * file this agent does not own.
+     */
+    this._sceneLights = [];
+    this._collectLight = (o) => {
+      if (!o.visible || !o.isLight) return;
+      if (!(o.isSpotLight || o.isPointLight)) return;
+      if (!(o.intensity > 0)) return;
+      if (this._sceneLights.length < 48) this._sceneLights.push(o);
+    };
     this._depthSkips = [];
     this._skipScanAge = 999;
 
@@ -923,7 +1013,7 @@ export class VolumetricFog {
     this._marchScene = null; this._blitScene = null; this._marchCam = null;
     this._marchMesh = null; this._blitMesh = null; this._compositeMesh = null;
     this._terrData = null; this._terrStaging = null;
-    this._moon = null; this._depthSkips.length = 0;
+    this._moon = null; this._depthSkips.length = 0; this._sceneLights.length = 0;
     this._uniforms = null;
     this._ready = false;
   }
@@ -960,10 +1050,17 @@ export class VolumetricFog {
     const s = this.ctx.settings;
     const tier = (l, m, h, u) => (s && typeof s.tier === 'function' ? s.tier(l, m, h, u) : h);
 
-    this._scale = tier(0.25, 0.5, 0.5, 1.0);
-    this._steps = tier(16, 24, 40, 64);
-    this._locals = tier(1, 2, 3, 3);
+    // Ask for half the drawing buffer at every tier above 'low'; the area cap above is what
+    // actually decides, and it is the thing with a measured budget behind it.  Predicted cost
+    // from the fit in the constructor, at the tier's own cap:
+    //   low  0.12 Mpx x 12 = 0.70 ms   high  0.30 Mpx x 26 = 1.58 ms
+    //   med  0.22 Mpx x 20 = 1.11 ms   ultra 0.36 Mpx x 32 = 2.10 ms
+    this._scale = tier(0.25, 0.5, 0.5, 0.5);
+    this._steps = tier(12, 20, 26, 32);
+    // ART §5.3's ultra row is 'moon + lantern + nearest 2 locals'; 3 was over spec and over cost.
+    this._locals = tier(1, 1, 2, 2);
     this._historyAmount = tier(0.0, 0.82, 0.88, 0.92);
+    this.maxFogPixels = tier(1.2e5, 2.2e5, 3.0e5, 3.6e5);
 
     this.stats.steps = this._steps;
     this.stats.scale = this._scale;
@@ -1201,7 +1298,7 @@ export class VolumetricFog {
       uLampPos: { value: new THREE.Vector3() },
       uLampDir: { value: new THREE.Vector3(0, 0, -1) },
       uLampColor: { value: new THREE.Vector3(0, 0, 0) },
-      uLampCone: { value: new THREE.Vector4(0.9, 0.95, 14, 0) },
+      uLampCone: { value: new THREE.Vector4(0.9, 0.95, 14, 0.2) },
       uLampShadowMat: { value: new THREE.Matrix4() },
       uLampShadowCfg: { value: new THREE.Vector2(0, 0.0015) },
 
@@ -1636,7 +1733,12 @@ export class VolumetricFog {
 
     // ---- lights
     this._lightScanAge++;
-    if (this._lightScanAge > 20) { this._findMoon(); this._lightScanAge = 0; }
+    if (this._lightScanAge > 20) {
+      this._findMoon();
+      this._sceneLights.length = 0;
+      this.ctx.scene?.traverse?.(this._collectLight);
+      this._lightScanAge = 0;
+    }
     this._syncShadowMode();
     this._updateMoon(u, g);
     this._updateLantern(u);
@@ -1756,8 +1858,16 @@ export class VolumetricFog {
       _v3a.normalize();
       u.uMoonDir.value.copy(_v3a);
 
-      const s = moon.intensity * P.moonScatter;
-      u.uMoonColor.value.set(moon.color.r * s, moon.color.g * s, moon.color.b * s);
+      // Decouple from Sky's light units.  Normalise the colour to unit luminance so the swatch
+      // survives, and drive the magnitude from an art-directed radiance ramped by a saturating
+      // curve of the light's intensity: a moon that sets still fades the shafts out, but a moon
+      // whose intensity is authored at 0.03 instead of 3.0 does not silently delete them.
+      const c = moon.color;
+      const lum = Math.max(0.2126 * c.r + 0.7152 * c.g + 0.0722 * c.b, 1e-4);
+      const drive = P.moonScatter
+        * (1 - Math.exp(-Math.max(moon.intensity, 0) / Math.max(P.moonRef, 1e-4)));
+      const s = drive / lum;
+      u.uMoonColor.value.set(c.r * s, c.g * s, c.b * s);
 
       const sm = moon.shadow;
       const dtex = sm && sm.map && sm.map.depthTexture;
@@ -1803,7 +1913,8 @@ export class VolumetricFog {
       const cosOuter = Math.cos(light.angle);
       const cosInner = Math.cos(light.angle * (1 - (light.penumbra ?? 0)));
       const range = light.distance > 0 ? light.distance : 24;
-      u.uLampCone.value.set(cosOuter, Math.max(cosInner, cosOuter + 1e-4), range, 0);
+      const rad = Math.max(0.05, P.lanternRadius);
+      u.uLampCone.value.set(cosOuter, Math.max(cosInner, cosOuter + 1e-4), range, rad * rad);
 
       const sm = light.shadow;
       const dtex = sm && sm.map && sm.map.depthTexture;
@@ -1865,6 +1976,13 @@ export class VolumetricFog {
     const agents = campers && campers.agents;
     if (Array.isArray(agents)) {
       for (let i = 0; i < agents.length && cand.length < 24; i++) push(agents[i]?.torch ?? agents[i]?.light);
+    }
+
+    // ...then everything else in the scene, deduped.  See this._sceneLights.
+    const sl = this._sceneLights;
+    for (let i = 0; i < sl.length && cand.length < 24; i++) {
+      const l = sl[i];
+      if (cand.indexOf(l) < 0) push(l);
     }
 
     // score by intensity / (1 + d^2) — the same rule Materials.assignLights uses
