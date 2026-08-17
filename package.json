@@ -1,0 +1,19 @@
+{
+  "name": "slasher-cabin",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Slasher Cabin: Some Assembly Required — build it and they will die.",
+  "scripts": {
+    "dev": "vite --host 127.0.0.1 --port 5173",
+    "build": "vite build",
+    "preview": "vite preview --host 127.0.0.1 --port 4173",
+    "voices": "node tools/generate-voices.mjs"
+  },
+  "dependencies": {
+    "three": "^0.185.1"
+  },
+  "devDependencies": {
+    "vite": "^8.2.1"
+  }
+}

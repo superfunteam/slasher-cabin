@@ -1,0 +1,2024 @@
+/**
+ * VOLUMETRIC FOG + LIGHT SHAFTS.  "Fog is a character." (ART_DIRECTION.md §5)
+ *
+ * OWNER: Render agent.  See ARCHITECTURE.md §9 and ART_DIRECTION.md §5.1–§5.4.
+ *
+ * ---------------------------------------------------------------------------------------------
+ * WHAT THIS IS
+ * ---------------------------------------------------------------------------------------------
+ * A screen-space raymarcher that integrates in-scattered radiance and transmittance along the
+ * view ray, from the near plane to scene depth, at a tier-driven fraction of the render
+ * resolution, with per-pixel blue-noise ray-start jitter and temporal reprojection.
+ *
+ * The medium is lit by:
+ *   - the moon, sampled against its real shadow map, which is what makes canopy shafts;
+ *   - the player's lantern, sampled against its spot shadow map, so trees cut the cone;
+ *   - up to N campfire / sodium / torch locals (cone falloff only, no shadow — ART §5.4);
+ *   - an ambient sky-scatter term graded near->far (fog.near -> fog.far);
+ *   - lightning, which floods the whole medium for the length of the flash.
+ * Phase is Henyey-Greenstein with a 0.12 isotropic floor, so looking toward a light blooms and
+ * looking away goes dim.  That anisotropy is the entire difference between fog and atmosphere.
+ *
+ * Density is exponential height falloff modulated by drifting low-frequency noise, PLUS a
+ * separate, much denser GROUND MIST layer that follows the terrain, flattens onto the lake at
+ * the waterline, pools in hollows, thins on ridges, and is pushed aside by the player.  The
+ * layering is the point: see public/img/keyart-lake.png, where the mist sits in a band ON the
+ * water rather than filling the frame.
+ *
+ * ---------------------------------------------------------------------------------------------
+ * PUBLIC API (this is what other modules may rely on)
+ * ---------------------------------------------------------------------------------------------
+ *   fog.enabled            bool     hard off switch.  false => render() is a no-op and the
+ *                                   standalone composite quad hides itself.
+ *   fog.target             THREE.WebGLRenderTarget | null
+ *                                   RGB = in-scattered radiance, LINEAR, pre-tonemap.
+ *                                   A   = transmittance of the medium to the scene surface.
+ *                                   Composite is:  colour = scene * fog.a + fog.rgb
+ *                                   Stable across frames — safe to grab the texture once.
+ *   fog.texture            THREE.Texture | null      convenience for target.texture
+ *   fog.render()                    integrate one frame into fog.target.  Postprocessing SHOULD
+ *                                   call this once per frame immediately before it samples the
+ *                                   target — that gives same-frame depth.  It is deduped per
+ *                                   update tick, so calling it is free if we already did.  If
+ *                                   nothing external calls it, update() drives it itself.
+ *   fog.resize(w, h)                CSS px; the fog buffer is derived from the drawing buffer.
+ *   fog.update(dt, elapsed)         per-frame bookkeeping; also drives render() when there is no
+ *                                   Postprocessing system to drive it.
+ *   fog.dispose()
+ *   fog.setEnabled(bool)
+ *   fog.depthTexture       THREE.DepthTexture | null   the prepass depth THIS module owns; null
+ *                                   when it is borrowing Postprocessing's depth instead.
+ *   fog.resolutionScale    number   0.2..1, settable; reallocates.
+ *   fog.stats              { width, height, steps, scale, standalone, cpuMs }
+ *   fog.params             tunables (density, mist, scattering) — see DEFAULT_PARAMS.
+ *
+ * ---------------------------------------------------------------------------------------------
+ * INTEGRATION NOTES FOR OTHER AGENTS
+ * ---------------------------------------------------------------------------------------------
+ * - If `Postprocessing` exposes `depthTexture`, this module uses it and skips its own depth
+ *   prepass entirely.  Give it a non-linear device-depth `THREE.DepthTexture` at the main
+ *   render resolution and you save a whole scene pass.
+ * - If `Postprocessing` exposes `render()`, this module assumes Postprocessing composites the
+ *   target (`colour = scene * fog.a + fog.rgb`) and removes its own fullscreen quad from the
+ *   scene, so the fog is never applied twice.  Driving is decided separately: if nothing calls
+ *   `fog.render()`, `update()` calls it, so a Postprocessing that binds the texture but forgets
+ *   the call still gets real fog rather than an empty buffer.
+ * - `Sky` may expose `moonLight` / `moon` / `light` (a DirectionalLight).  Otherwise the
+ *   brightest shadow-casting DirectionalLight in the scene is used.
+ * - `Flashlight.light` (SpotLight) and `Props.lights` (array of lights, or of objects with a
+ *   `.light`) are read defensively every frame.
+ * - Nothing here throws if every other system is missing.
+ *
+ * GLSL-in-JS: no backtick may appear inside any shader string, including in comments
+ * (ARCHITECTURE.md §11b).  Shader comments below use 'single quotes'.
+ */
+
+import * as THREE from 'three';
+import { Log } from '../core/Log.js';
+
+// ------------------------------------------------------------------------------------------
+// module-scope scratch — nothing in update()/render() allocates
+// ------------------------------------------------------------------------------------------
+const _v2 = new THREE.Vector2();
+const _v3a = new THREE.Vector3();
+const _v3b = new THREE.Vector3();
+const _col = new THREE.Color();
+const _colB = new THREE.Color();
+
+const MAX_LOCALS = 3;
+const TERRAIN_TEX = 128;          // texels per side of the mist-floor window
+const TERRAIN_SPAN = 320;         // metres covered by that window
+const TERRAIN_RECENTER = 96;      // recentre when the player leaves this radius
+const TERRAIN_ROWS_PER_FRAME = 10;
+const NOISE_TEX = 64;
+
+/**
+ * Art-directed defaults.  Every one of these is live-tunable through `fog.params`.
+ *
+ * THE BUG THAT MADE THIS MODULE INVISIBLE (measured, 2026-08-16).  `floorY` is the fog floor and
+ * it used to be applied as an ABSOLUTE world height (y = -1).  The playable terrain is not at
+ * y = 0: the cabin site sits at y = +17.08 and the player's eye at y = +18.68.  With a 7.6 m
+ * scale height that put the eye 19.7 m up the exponential, so the height fog evaluated to
+ *
+ *     0.00195 / m   at the eye, where it should have been   0.0181 / m
+ *
+ * i.e. the entire medium ran 9.3x too thin everywhere the game is actually played.  Readback of
+ * the target confirmed the consequence exactly: mean in-scatter 0.0142 against a scene whose
+ * mean radiance was 0.0595, and mean transmittance 0.749, so Postprocessing's
+ * `scene * a + rgb` resolved to 0.0595*0.749 + 0.0142 = 0.0588 — a 1% change, a visual no-op.
+ * The fog was never missing.  It was a correctly-integrated near-vacuum.
+ *
+ * The fix is in `densityAt`: the height fog is now referenced to the GROUND under the sample
+ * (the same baked terrain window the mist already used), so `floorY` means "one metre below the
+ * ground" the way ART §5.1 intends, at every altitude in the level.
+ *
+ * SECOND RULE, kept from the previous revision.  The ambient (sky-scatter) term is a PEDESTAL:
+ * it is added at every sample regardless of geometry, so it is the one term that cannot carry an
+ * image.  It is authored so that a ray that saturates (tau >> 1) integrates TO the `fog.far`
+ * swatch and no further — that is the "distance wall" of ART §2.2 — and it is gated by the moon's
+ * shadow map so canopy carves it.  Contrast is the horror (ART §11).
+ */
+const DEFAULT_PARAMS = {
+  /** Base height-fog density at the fog floor, 1/m.  ART §5.1 clear=0.014 .. whiteout=0.078 */
+  density: 0.0105,
+  /**
+   * Fog floor, metres, RELATIVE TO THE GROUND under the sample (ART §5.1 y0 = -1).  It is not a
+   * world height — see the block comment above; treating it as one is what made this module
+   * invisible on a level whose terrain sits 17 m above the origin.
+   */
+  floorY: -1.0,
+  /** Scale height, metres.  ART §5.1: 4.2 clear (shoulder height on the lake path). */
+  scaleHeight: 4.6,
+  /** Henyey-Greenstein g.  ART §5.1: 0.55 clear .. 0.38 whiteout. */
+  hg: 0.62,
+  /** Single-scattering albedo. Water droplets are near-white. */
+  albedo: 0.92,
+  /**
+   * Scale on the ambient sky-scatter pedestal, as a fraction of the `fog.near`/`fog.far`
+   * swatches.  A fully saturated ray integrates to `albedo * ambient * fog.far`, so ~1.0 is the
+   * value that makes the far treeline land ON the ART §2.2 "distance wall" swatch (0.134 linear)
+   * instead of somewhere arbitrary.  See the block comment above — this is the single most
+   * destructive knob in the module, which is why it is derived rather than guessed.
+   */
+  ambient: 0.85,
+  /**
+   * How much the ambient pedestal survives in moon-shadowed volume.  Below 1.0 the canopy's
+   * own shadow map carves the fog, which is what turns a wash into god rays (ART §5.4).
+   */
+  ambientOcclusion: 0.26,
+  /** Metres over which the near->far aerial gradient completes.  Long = the treeline sits back. */
+  aerialDistance: 118,
+  /** Contrast of the drifting density noise. 0 = uniform grey wash (a named failure mode). */
+  noiseContrast: 0.95,
+  /** Ground-mist top above the mist floor, metres, before pooling/wobble. ART §5.2: ~0.55. */
+  mistTop: 0.62,
+  /**
+   * Vertical feather of the mist ceiling, metres.  Small = a distinct LAYER — but too small and
+   * the ceiling reads as a drawn line rather than a body of air, which is exactly what a first
+   * capture of the lake shot showed: a neon strip on the waterline instead of keyart-lake's soft
+   * band.  0.55 keeps the layer unmistakable while giving the top edge somewhere to dissolve.
+   */
+  mistFeather: 0.55,
+  /** Ground-mist density, 1/m.  Much denser than the height fog — that is what makes a layer. */
+  mistDensity: 0.17,
+  /** How much the noise wobbles the mist ceiling, metres.  This is what stops it being a plane. */
+  mistWobble: 0.58,
+  /**
+   * Gain on the mist's own in-scatter.  The mist is LIT (moon + a little sky), not emissive.
+   * A grazing view along the layer integrates to the source radiance, so this number is the
+   * band's saturated brightness against near-black water: keyart-lake's band sits roughly 3-4x
+   * the water, not the 8x that blew it out through bloom at 0.62.
+   */
+  mistTint: 0.45,
+  /**
+   * The moon's volumetric source RADIANCE, linear, absolute — not a multiplier on the light.
+   *
+   * `Sky` authors its DirectionalLight in three.js physical units and the number swings with the
+   * night: it measured 0.031 here, which through the old `intensity * 3.0` multiplier produced a
+   * moon term of 0.019/0.028/0.052 — two stops under the ambient pedestal, i.e. no shafts, ever.
+   * Coupling a volumetric to another module's unit convention is how that happens.  Instead the
+   * light's colour is normalised to unit luminance and its magnitude comes from here, ramped by
+   * a saturating curve of the light's intensity (`moonRef`) so a moon that sets still fades out.
+   * 0.42 puts an open-air shaft at ~0.09 linear against ~0.06 moonlit ground: visible, not a wash.
+   */
+  moonScatter: 0.42,
+  /** Light intensity at which the moon's volumetric drive reaches 63% of `moonScatter`. */
+  moonRef: 0.05,
+  /** Multiplier on the lantern's volumetric contribution (on top of the 1/4pi normalisation). */
+  lanternScatter: 1.0,
+  /**
+   * Finite radius of the lantern's emitting body, metres.  Kills the 1/d^2 singularity of a
+   * source that is parented to the camera — see the comment in the march shader.  0.45 is much
+   * larger than the real glass because it also stands in for the near field the camera cannot
+   * see into (the fixture, the player's hand, the first few centimetres of air).
+   */
+  lanternRadius: 0.45,
+  /** Multiplier on campfire/sodium/torch volumetrics. */
+  localScatter: 0.9,
+  /** Rain streaks inside a light cone are lit at this multiple. ART §5.4. */
+  rainStreak: 2.2,
+  /**
+   * Legibility floor on transmittance in CLEAR air, faded out as the medium thickens.  "Dark but
+   * legible" is the brief; a night that integrates to T=0 has stopped being a photograph of a
+   * forest and become a grey card.  At whiteout (fogAmt 1) this goes to ~0.01 and the medium is
+   * allowed to close completely, because that is Night 5's whole point.
+   */
+  minTransmit: 0.13,
+  /** Far clamp of the march, metres. */
+  maxDistance: 150,
+};
+
+/** ART_DIRECTION §2.2 fog swatches. */
+const PAL = {
+  near: 0x2a3a44,
+  nearThick: 0x4a5d6c,
+  far: 0x54697a,
+  farThick: 0x54697a,
+  lit: 0x8fa6bb,
+  dawnNear: 0x3a4a52,
+  dawnFar: 0x6d7e88,
+};
+
+// ------------------------------------------------------------------------------------------
+// shaders
+// ------------------------------------------------------------------------------------------
+
+const FULLSCREEN_VERT = /* glsl */`
+varying vec2 vUv;
+void main() {
+  vUv = uv;
+  gl_Position = vec4(position.xy, 0.0, 1.0);
+}
+`;
+
+const MARCH_FRAG = /* glsl */`
+precision highp float;
+precision highp sampler2D;
+
+varying vec2 vUv;
+
+uniform sampler2D tDepth;
+uniform sampler2D tNoise;
+uniform sampler2D tBlue;
+uniform sampler2D tTerrain;
+uniform sampler2D tHistory;
+
+// three.js binds shadow maps as comparison samplers under PCFShadowMap and as plain depth
+// textures under Basic / PCFSoft / VSM.  Sampling a comparison texture through a sampler2D is
+// undefined, so the sampler TYPE is a compile-time variant driven by renderer.shadowMap.type.
+#if SHADOW_COMPARE
+  #define SHADOWMAP_T sampler2DShadow
+#else
+  #define SHADOWMAP_T sampler2D
+#endif
+uniform SHADOWMAP_T tMoonShadow;
+uniform SHADOWMAP_T tLampShadow;
+
+uniform mat4  uInvProj;
+uniform mat4  uCamWorld;
+uniform mat4  uPrevViewProj;
+uniform vec3  uCamPos;
+uniform vec2  uNearFar;
+uniform float uFrame;
+uniform float uTime;
+uniform float uRevDepth;
+uniform float uHistoryAmount;
+uniform float uBlueSize;
+
+// x base density, y fog floor y, z 1/scaleHeight, w max march distance
+uniform vec4  uFogA;
+// x hg g, y albedo, z ambient scale, w mist tint
+uniform vec4  uFogB;
+uniform vec3  uFogNear;
+uniform vec3  uFogFar;
+uniform vec3  uFogLit;
+
+// x 1/aerial distance, y ambient survival in moon shadow, z transmittance floor, w unused
+uniform vec4  uScatterCfg;
+
+// x mist top, y mist feather, z mist density, w mist wobble
+uniform vec4  uMist;
+// x noise scale A, y noise scale B, z contrast, w rain streak gain
+uniform vec4  uNoiseCfg;
+uniform vec2  uDriftA;
+uniform vec2  uDriftB;
+
+// xz = window centre, y = 1.0 when the terrain window is valid
+uniform vec3  uTerrainOrigin;
+uniform float uTerrainSpan;
+
+uniform vec3  uMoonDir;
+uniform vec3  uMoonColor;
+uniform mat4  uMoonShadowMat;
+uniform vec2  uMoonShadowCfg;      // x enabled, y bias
+
+uniform vec3  uLampPos;
+uniform vec3  uLampDir;
+uniform vec3  uLampColor;
+uniform vec4  uLampCone;           // x cosOuter, y cosInner, z range, w source radius SQUARED
+uniform mat4  uLampShadowMat;
+uniform vec2  uLampShadowCfg;      // x enabled, y bias
+
+uniform vec3  uLocalPos[LOCALS];
+uniform vec3  uLocalColor[LOCALS];
+uniform vec3  uLocalDir[LOCALS];
+uniform vec4  uLocalParams[LOCALS];  // x cosOuter, y cosInner, z range, w isSpot
+
+uniform vec4  uWeather;            // x rain, y wetness, z lightning, w nightPhase
+uniform vec3  uPlayerPos;
+
+const float PI_INV4 = 0.0795774715;
+
+float sat(float x) { return clamp(x, 0.0, 1.0); }
+
+// Henyey-Greenstein, un-normalised (the 1/4pi is folded into the light intensities), with a
+// small isotropic floor so back-lit fog never goes fully black.  ART §5.3.
+float phaseHG(float c, float g) {
+  float g2 = g * g;
+  float d = 1.0 + g2 - 2.0 * g * c;
+  return ((1.0 - g2) / max(pow(max(d, 1e-4), 1.5), 1e-4)) * 0.88 + 0.12;
+}
+
+// One tap against a three.js shadow map.  Under SHADOW_COMPARE the hardware does the compare
+// (and, with the linear filter three sets, a free 2x2 PCF).
+float shadowTap(SHADOWMAP_T smap, mat4 mtx, vec3 p, float bias) {
+  vec4 sc = mtx * vec4(p, 1.0);
+  if (sc.w <= 0.0) return 1.0;
+  vec3 s = sc.xyz / sc.w;
+  if (s.x < 0.002 || s.x > 0.998 || s.y < 0.002 || s.y > 0.998) return 1.0;
+  if (s.z <= 0.0 || s.z >= 1.0) return 1.0;
+#if SHADOW_COMPARE
+  float ref = s.z - bias * (1.0 - 2.0 * uRevDepth);
+  return texture2D(smap, vec3(s.xy, ref));
+#else
+  float d = texture2D(smap, s.xy).x;
+  float fwd = step(s.z - bias, d);
+  float rev = step(d, s.z + bias);
+  return mix(fwd, rev, uRevDepth);
+#endif
+}
+
+// R = mist floor height (terrain, flattened to the waterline over water)
+// G = water mask, B = pooling (0 ridge .. 1 hollow), A = local density multiplier
+vec4 terrainAt(vec2 xz) {
+  vec2 t = (xz - uTerrainOrigin.xz) / uTerrainSpan + 0.5;
+  return texture2D(tTerrain, clamp(t, 0.001, 0.999));
+}
+
+float densityAt(vec3 p, float dist, out float mistAmt) {
+  // ---- drifting low-frequency structure.  Uniform fog reads as a grey wash; this is the fix.
+  vec2 n1 = p.xz * uNoiseCfg.x + uDriftA + vec2(p.y * 0.011, -p.y * 0.008);
+  vec2 n2 = p.xz * uNoiseCfg.y + uDriftB + vec2(-p.y * 0.023, p.y * 0.017);
+  float n = texture2D(tNoise, n1).r * 0.66 + texture2D(tNoise, n2).g * 0.34;
+  n = mix(0.5, n, uNoiseCfg.z);
+
+  // ---- where the ground is under this sample (baked terrain window, flattened to the waterline)
+  vec4 tr = terrainAt(p.xz);
+  float valid = uTerrainOrigin.y;
+  float floorY = mix(uFogA.y + 0.6, tr.r, valid);
+  float pool = mix(0.5, tr.b, valid);
+  float mult = mix(1.0, tr.a, valid);
+
+  // ---- analytic height fog, referenced to the GROUND and not to world y = 0.
+  // uFogA.y is ART §5.1's y0, which is 'one metre below the ground', not 'one metre below the
+  // world origin'.  This level's terrain sits at y = +17, so measuring the exponential from the
+  // world origin put the player 19.7 m up it and evaluated the whole medium 9.3x too thin.  That
+  // single line is why nothing this module drew was ever visible.  See DEFAULT_PARAMS.
+  float fogFloor = mix(uFogA.y, tr.r + uFogA.y, valid);
+  float base = uFogA.x * exp(-max(p.y - fogFloor, 0.0) * uFogA.z);
+  base *= 0.40 + 1.40 * n;
+
+  float top = floorY + uMist.x * (0.55 + 1.25 * pool) + (n - 0.5) * uMist.w;
+
+  // the monster leaves a wake in the mist (ART §5.2)
+  vec2 dxz = p.xz - uPlayerPos.xz;
+  top -= exp(-dot(dxz, dxz) * 0.85) * 0.42;
+
+  // The ceiling feathers out with distance.  A layer with a distance-independent feather draws a
+  // razor-sharp horizon line where it saturates — the first lake capture put a neon strip on the
+  // waterline instead of keyart-lake's soft band.  Turbulent mixing (and the fact that a metre of
+  // vertical structure is sub-pixel at 100 m) says the far edge should dissolve; this says so too.
+  float feather = uMist.y * (1.0 + dist * 0.030);
+  float band = sat((top - p.y) / max(feather, 0.04));
+  band *= sat((p.y - floorY + 1.30) * 1.5);
+  float clump = smoothstep(0.28, 0.88, n);
+  mistAmt = band * (0.30 + 0.90 * clump) * mult;
+
+  return base + uMist.z * mistAmt;
+}
+
+void main() {
+  // ---------------------------------------------------------------- ray + scene depth
+  float rawD = texture2D(tDepth, vUv).x;
+  rawD = mix(rawD, 1.0 - rawD, uRevDepth);
+
+  vec4 vpos = uInvProj * vec4(vUv * 2.0 - 1.0, 1.0, 1.0);
+  vec3 vdir = normalize(vpos.xyz / vpos.w);
+  vec3 rd = normalize((uCamWorld * vec4(vdir, 0.0)).xyz);
+
+  float sceneDist = uFogA.w;
+  if (rawD < 0.999995) {
+    float viewZ = (uNearFar.x * uNearFar.y) / ((uNearFar.y - uNearFar.x) * rawD - uNearFar.y);
+    sceneDist = min(viewZ / min(vdir.z, -1e-4), uFogA.w);
+  }
+
+  float startD = max(uNearFar.x, 0.10);
+  float span = sceneDist - startD;
+
+  vec3 Lacc = vec3(0.0);
+  float T = 1.0;
+
+  if (span > 0.0) {
+    // ---------------------------------------------------------------- jitter
+    // Animated blue noise on the ray start.  This is what turns slice banding into film grain
+    // and it is not optional (see the brief).  Golden-ratio temporal offset.
+    float bn = texture2D(tBlue, (gl_FragCoord.xy + 0.5) / uBlueSize).r;
+    float jitter = fract(bn + uFrame * 0.6180339887);
+
+    float g = uFogB.x;
+    float albedo = uFogB.y;
+    float invSteps = 1.0 / float(STEPS);
+    const float DISTRIB = 0.34;   // blend of linear and quadratic step distribution
+
+    float phaseMoon = phaseHG(dot(uMoonDir, rd), g);
+
+    float f0 = 0.0;
+    for (int i = 0; i < STEPS; i++) {
+      float u1 = float(i + 1) * invSteps;
+      float f1 = u1 * (DISTRIB + (1.0 - DISTRIB) * u1);
+      float um = (float(i) + jitter) * invSteps;
+      float fm = um * (DISTRIB + (1.0 - DISTRIB) * um);
+      float dz = span * (f1 - f0);
+      f0 = f1;
+
+      float dist = startD + span * fm;
+      vec3 p = uCamPos + rd * dist;
+
+      float mistAmt = 0.0;
+      float sigma = densityAt(p, dist, mistAmt);
+
+      if (sigma > 2e-5) {
+        // ------------------------------------------------ moon shafts (the money shot)
+        // The shadow tap is taken FIRST because it gates the ambient pedestal as well as the
+        // moon's own term.  Ambient that ignores occlusion is a constant, and a constant is the
+        // one thing a volumetric cannot draw a shape with.
+        float shM = mix(0.85, shadowTap(tMoonShadow, uMoonShadowMat, p, uMoonShadowCfg.y),
+                        uMoonShadowCfg.x);
+
+        // ------------------------------------------------ ambient / aerial in-scatter
+        // Deliberately small (see DEFAULT_PARAMS.ambient) and occluded, so that open air over
+        // the plot glows while volume under the canopy stays near-black.  The near->far grade
+        // completes over 'aerialDistance' metres: that gradient IS the aerial perspective that
+        // pushes the far treeline back without lifting the near frame off the floor.
+        float skyVis = mix(uScatterCfg.y, 1.0, shM);
+        vec3 L = mix(uFogNear, uFogFar, sat(dist * uScatterCfg.x)) * (uFogB.z * skyVis);
+
+        // The ground mist is LIT, not emissive: mostly moonlight (so the layer has a bright
+        // side and reads as a body of air), plus a small sky term so it never goes flat black.
+        L += (uFogNear * 0.30 + uMoonColor * (0.24 * shM)) * (mistAmt * uFogB.w);
+
+        L += uFogLit * (uWeather.z * 2.4);
+
+        vec3 Lwarm = vec3(0.0);
+
+        L += uMoonColor * (phaseMoon * shM);
+
+        // ------------------------------------------------ the lantern (keyart-site.png)
+        // uLampCone.w is the SQUARE of a finite source radius, and it is not a fudge.  The held
+        // lantern is parented to the eye, so uLampPos == uCamPos to within a metre; a bare 1/d^2
+        // point source there puts its own singularity inside the first march step and the
+        // in-scatter integral becomes ~I*sigma_s*phase/d_start, i.e. it is decided entirely by
+        // the near plane.  Measured: 5.12 linear at the bottom-centre of site-close against a
+        // scene whose brightest pixel was 0.75 — a fireball that stopped the auto-exposure down
+        // and crushed everything else in frame, which is the other half of why this pass looked
+        // like it was doing nothing.  A real lantern is a flame inside a glass of finite size
+        // and there is no fog between the two, so the source gets a radius and the singularity
+        // goes away.
+        vec3 toL = uLampPos - p;
+        float dl2 = dot(toL, toL);
+        float dl = sqrt(max(dl2, 1e-4));
+        vec3 ld = toL / dl;
+        float coneA = smoothstep(uLampCone.x, uLampCone.y, dot(uLampDir, -ld));
+        if (coneA > 0.0) {
+          float att = 1.0 / (dl2 + uLampCone.w);
+          float rr = dl / max(uLampCone.z, 0.001);
+          rr = rr * rr; rr = rr * rr;
+          att *= pow(sat(1.0 - rr), 2.0);
+          float shL = mix(1.0, shadowTap(tLampShadow, uLampShadowMat, p, uLampShadowCfg.y),
+                          uLampShadowCfg.x);
+          Lwarm += uLampColor * (coneA * att * shL * phaseHG(dot(ld, rd), g));
+        }
+
+        // ------------------------------------------------ campfires / sodium / torches
+        for (int k = 0; k < LOCALS; k++) {
+          vec4 par = uLocalParams[k];
+          if (par.z > 0.0) {
+            vec3 t2 = uLocalPos[k] - p;
+            float d22 = dot(t2, t2);
+            float d2 = sqrt(max(d22, 1e-4));
+            vec3 ld2 = t2 / d2;
+            float att = 1.0 / (d22 + 0.25);   // 0.5 m source radius, same reason as the lantern
+            float r2 = d2 / par.z;
+            r2 = r2 * r2; r2 = r2 * r2;
+            att *= pow(sat(1.0 - r2), 2.0);
+            float cone = mix(1.0, smoothstep(par.x, par.y, dot(uLocalDir[k], -ld2)), par.w);
+            Lwarm += uLocalColor[k] * (att * cone * phaseHG(dot(ld2, rd), g));
+          }
+        }
+
+        // The punctual lights arrive in three.js physical units (candela), so their in-scatter is
+        // sigma_s * p(theta) * I / d^2 with p the NORMALISED phase function — which carries the
+        // 1/4pi that phaseHG() leaves out.  The header claimed that factor was 'folded into the
+        // light intensities'; it never was, and the whole warm term therefore ran 4pi = 12.6x
+        // hot.  The moon does not get it: its radiance is authored directly in
+        // DEFAULT_PARAMS.moonScatter, in linear units, and is already calibrated.
+        Lwarm *= PI_INV4;
+
+        L += Lwarm;
+
+        // ------------------------------------------------ rain streaks inside the cones
+        if (uWeather.x > 0.03) {
+          vec2 sUV = vec2(p.x * 0.55 + p.z * 0.31, -p.y * 0.085 - uTime * 0.85);
+          float st = smoothstep(0.60, 0.95, texture2D(tNoise, sUV).b);
+          L += Lwarm * (st * uWeather.x * uNoiseCfg.w);
+        }
+
+        // ------------------------------------------------ analytic slice integration
+        float Ts = exp(-sigma * dz);
+        Lacc += T * (L * albedo) * (1.0 - Ts);
+        T *= Ts;
+        if (T < 0.006) break;
+      }
+    }
+  }
+
+  // Legibility floor.  Applied to the OUTPUT transmittance only, never inside the integration,
+  // so the in-scatter stays a physical integral and only the composite is prevented from
+  // annihilating the scene.  It also guarantees a non-zero alpha, which keeps Postprocessing's
+  // degenerate-buffer guard (a texel that is zero in rgb AND a is treated as 'no fog') from
+  // ever misreading a legitimately empty patch of clear air as a broken buffer.
+  float Tout = max(clamp(T, 0.0, 1.0), uScatterCfg.z);
+
+  vec4 cur = vec4(max(Lacc, vec3(0.0)), Tout);
+  vec4 outC = cur;
+
+  // ---------------------------------------------------------------- temporal reprojection
+  if (uHistoryAmount > 0.001) {
+    vec3 wp = uCamPos + rd * min(sceneDist, uFogA.w);
+    vec4 pc = uPrevViewProj * vec4(wp, 1.0);
+    if (pc.w > 0.0) {
+      vec2 pUV = pc.xy / pc.w * 0.5 + 0.5;
+      if (pUV.x > 0.002 && pUV.x < 0.998 && pUV.y > 0.002 && pUV.y < 0.998) {
+        vec4 h = texture2D(tHistory, pUV);
+        // Rejection: transmittance is the integral of density to the scene surface, so a
+        // disocclusion (a tree edge sliding past) moves it hard.  Reject on disagreement,
+        // then variance-clamp the radiance so a surviving sample cannot smear.
+        float rej = exp(-abs(h.a - cur.a) * 16.0);
+        vec3 tol = cur.rgb * 0.85 + vec3(0.02);
+        h.rgb = clamp(h.rgb, cur.rgb - tol, cur.rgb + tol);
+        h.a = clamp(h.a, cur.a - 0.14, cur.a + 0.14);
+        outC = mix(cur, h, uHistoryAmount * rej);
+      }
+    }
+  }
+
+  gl_FragColor = outC;
+}
+`;
+
+const COMPOSITE_FRAG = /* glsl */`
+precision highp float;
+varying vec2 vUv;
+
+uniform sampler2D tFog;
+uniform sampler2D tDepth;
+uniform vec2 uFogTexel;
+uniform vec2 uNearFar;
+uniform float uRevDepth;
+uniform float uIntensity;
+
+float linZ(float d) {
+  d = mix(d, 1.0 - d, uRevDepth);
+  return (uNearFar.x * uNearFar.y) / ((uNearFar.y - uNearFar.x) * d - uNearFar.y);
+}
+
+void main() {
+  vec4 f;
+
+#if UPSAMPLE
+  // Depth-aware bilateral upsample.  Without it the fog haloes every silhouette.
+  float dc = linZ(texture2D(tDepth, vUv).x);
+  vec2 o = uFogTexel;
+  vec2 offs[4];
+  offs[0] = vec2(-o.x, -o.y);
+  offs[1] = vec2( o.x, -o.y);
+  offs[2] = vec2(-o.x,  o.y);
+  offs[3] = vec2( o.x,  o.y);
+  vec4 acc = vec4(0.0);
+  float wsum = 0.0;
+  for (int i = 0; i < 4; i++) {
+    vec2 t = vUv + offs[i];
+    float dz = linZ(texture2D(tDepth, t).x);
+    float w = exp(-abs(dz - dc) * 0.65) + 1e-3;
+    acc += texture2D(tFog, t) * w;
+    wsum += w;
+  }
+  f = acc / max(wsum, 1e-4);
+#else
+  f = texture2D(tFog, vUv);
+#endif
+
+  // RGB is linear HDR in-scatter, A is transmittance.  Custom blending downstream resolves
+  // this to  scene * A + RGB.  Tone map the in-scatter with the same operator the scene used.
+  gl_FragColor = vec4(f.rgb * uIntensity, clamp(f.a, 0.0, 1.0));
+
+  #include <tonemapping_fragment>
+  #include <colorspace_fragment>
+}
+`;
+
+const BLIT_FRAG = /* glsl */`
+precision highp float;
+varying vec2 vUv;
+uniform sampler2D tSrc;
+void main() { gl_FragColor = texture2D(tSrc, vUv); }
+`;
+
+// ------------------------------------------------------------------------------------------
+
+export class VolumetricFog {
+  /** @param {any} ctx */
+  constructor(ctx) {
+    this.ctx = ctx ?? {};
+    this.bus = this.ctx.bus ?? null;
+
+    /** Hard off switch.  Nothing is rendered and nothing is composited when false. */
+    this.enabled = true;
+
+    /** @type {THREE.WebGLRenderTarget|null} RGB = in-scatter (linear), A = transmittance. */
+    this.target = null;
+
+    /** @type {THREE.WebGLRenderTarget|null} */
+    this._history = null;
+    /** @type {THREE.WebGLRenderTarget|null} */
+    this._depthRT = null;
+
+    this.params = { ...DEFAULT_PARAMS };
+    this.stats = { width: 0, height: 0, steps: 0, scale: 1, standalone: true, cpuMs: 0 };
+
+    this._scale = 0.5;
+    this._effScale = 0.5;
+    this._steps = 24;
+    this._locals = 2;
+    this._historyAmount = 0.88;
+
+    /**
+     * THE BUDGET, and it is measured, not guessed.
+     *
+     * A raymarch costs `pixels x steps` samples and nothing else moves the needle, so the honest
+     * knob is the PRODUCT.  Timed on the reference machine at ?shot=site-close&quality=ultra by
+     * bracketing `render()` between two `readRenderTargetPixels` stalls (a GL sync; `gl.finish()`
+     * does not block in Chrome's command-buffer model and reported a useless 0.01 ms), with the
+     * engine loop stopped so the main frame did not contaminate the sample:
+     *
+     *      1549x871  x 64 steps  ->  12.55 ms      1099x618 x 64  ->  7.18 ms
+     *      1549x871  x 32 steps  ->   7.00 ms      1099x618 x 32  ->  3.72 ms
+     *      1549x871  x 16 steps  ->   3.53 ms       777x437 x 32  ->  1.92 ms
+     *
+     * which fits `ms ~= 0.50 + 0.139 * Mpixels * steps` to within 8% across the whole set.  The
+     * old cap of 1.35e6 with the old 64 steps therefore bought a 12.6 ms pass against ART §5.3's
+     * 1.80 ms ceiling — 7x over, and the dominant term in a 110 ms frame.
+     *
+     * Solving that fit for the ART ceiling gives `Mpixels * steps <= 9.4`.  The tiers below spend
+     * it as 0.36 Mpx x 32, because resolution and steps are NOT interchangeable here: the blue-
+     * noise ray-start jitter plus 8-frame temporal reprojection already hide step banding, while
+     * nothing hides a march that undersamples a light cone in depth.  Spend on steps, claw the
+     * pixels back with the bilateral upsample.  ART §5.3's own froxel grid is 160x90 — a
+     * screen-space march at 800x450 is five times finer than the spec it replaces.
+     */
+    this.maxFogPixels = 3.6e5;
+    this.maxDepthPixels = 2.15e6;
+
+    this._fw = 1; this._fh = 1;
+    this._dw = 1; this._dh = 1;
+    this._rw = 1; this._rh = 1;
+
+    this._frame = 0;
+    /** Monotonic per-update tick; render() dedupes against it so a double drive is free. */
+    this._tick = 0;
+    this._renderTick = -1;
+    /** Ticks since something OUTSIDE update() called render().  Large => we drive ourselves. */
+    this._extDriveAge = 999;
+    this._ownsDepth = true;
+    this._blitScene = null;
+    this._terrCenterPending = null;
+    this._cand = [];
+    this._time = 0;
+    this._standalone = true;
+    this._inUpdate = false;
+    this._disposed = false;
+    this._ready = false;
+
+    // scene graph bits
+    this._quadGeo = null;
+    this._marchMat = null;
+    this._compositeMat = null;
+    this._blitMat = null;
+    this._marchScene = null;
+    this._marchCam = null;
+    this._marchMesh = null;
+    this._blitMesh = null;
+    this._compositeMesh = null;
+    this._depthMat = null;
+
+    // owned textures
+    this._noiseTex = null;
+    this._blueTex = null;
+    this._blueOwned = false;
+    this._terrainTex = null;
+    this._whiteTex = null;
+    /** 4x4 depth target cleared to far, bound whenever a light has no usable shadow map. */
+    this._shadowFallbackRT = null;
+    this._shadowCompare = -1;
+
+    // terrain window bake
+    this._terrData = null;
+    this._terrStaging = null;
+    this._terrCenter = new THREE.Vector2(0, 0);
+    this._terrPending = false;
+    this._terrRow = 0;
+    this._terrValid = 0;
+
+    // light bookkeeping
+    this._moon = null;
+    this._lightScanAge = 999;
+    /**
+     * Point/spot lights found by walking the scene, refreshed on the same slow cadence as the
+     * moon scan.  The documented sources (Props.lights, CabinSite, Campers) are consulted first,
+     * but they do not cover everything: the site's hung lantern — 2 m from the camera in
+     * keyart-site.png and the single most important local in the game — appears in none of them,
+     * so relying on them alone left its slot empty.  Codes defensively rather than editing a
+     * file this agent does not own.
+     */
+    this._sceneLights = [];
+    this._collectLight = (o) => {
+      if (!o.visible || !o.isLight) return;
+      if (!(o.isSpotLight || o.isPointLight)) return;
+      if (!(o.intensity > 0)) return;
+      if (this._sceneLights.length < 48) this._sceneLights.push(o);
+    };
+    this._depthSkips = [];
+    this._skipScanAge = 999;
+
+    // matrices for reprojection
+    this._prevViewProj = new THREE.Matrix4();
+    this._curViewProj = new THREE.Matrix4();
+    this._prevCamPos = new THREE.Vector3();
+    this._prevCamDir = new THREE.Vector3(0, 0, -1);
+
+    // weather-driven fog state (smoothed)
+    this._fogAmt = 0.5;
+    this._fogAmtTarget = 0.5;
+    this._rain = 0.15;
+
+    this._uniforms = null;
+    this._onWeather = (p) => this._applyWeather(p);
+    this._onSettings = (p) => { if (!p || p.key === 'quality' || p.key === '*') this._applyTier(true); };
+  }
+
+  // ----------------------------------------------------------------------------- lifecycle
+
+  async init() {
+    const ctx = this.ctx;
+    const renderer = ctx.renderer;
+    if (!renderer) {
+      Log.warn('VolumetricFog: no ctx.renderer — disabled.');
+      this.enabled = false;
+      return;
+    }
+
+    try {
+      // half-float colour targets are required; without them we cannot store HDR in-scatter
+      const caps = renderer.capabilities;
+      if (caps && caps.isWebGL2 === false) {
+        Log.warn('VolumetricFog: WebGL1 context — running without temporal accumulation.');
+        this._historyAmount = 0;
+      }
+    } catch { /* capabilities are advisory */ }
+
+    this._applyTier(false);
+    this._buildTextures();
+    this._buildMaterials();
+    this._buildScenes();
+
+    const w = ctx.width || 1, h = ctx.height || 1;
+    this.resize(w, h);
+
+    this._bakeTerrainWindow(true);
+
+    if (this.bus) {
+      this.bus.on('weather:change', this._onWeather);
+      this.bus.on('settings:changed', this._onSettings);
+    }
+
+    // Decide who composites.  Driving is decided per tick in update().
+    const post = ctx.systems?.get?.('Postprocessing');
+    this._standalone = !(post && typeof post.render === 'function');
+    this._extDriveAge = 999;
+    this.stats.standalone = this._standalone;
+    this._syncComposite();
+
+    this._ready = true;
+    Log.debug(`VolumetricFog: ${this._fw}x${this._fh} @ ${this._steps} steps, `
+      + `${this._locals} locals, standalone=${this._standalone}`);
+  }
+
+  /** @param {number} dt @param {number} elapsed */
+  update(dt, elapsed) {
+    if (this._disposed || !this._ready) return;
+    const t0 = performance.now();
+    this._inUpdate = true;
+
+    this._time = Number.isFinite(elapsed) ? elapsed : this._time + (dt || 0);
+    const step = Math.min(Math.max(dt || 0, 0), 0.1);
+    this._tick++;
+    this._extDriveAge++;
+
+    // WHO COMPOSITES is a separate question from WHO DRIVES.
+    //   composite: Postprocessing owns the frame whenever it has a render(); otherwise us.
+    //   drive:     whoever calls render() first this tick.  If nothing external has called it
+    //              for a few ticks we drive it ourselves, so the target is never stale — a
+    //              Postprocessing that binds our texture but forgets to call render() still
+    //              gets real fog instead of an empty buffer.
+    const post = this.ctx.systems?.get?.('Postprocessing');
+    const postComposites = !!(post && !post.__failed && typeof post.render === 'function');
+    const wantStandalone = !postComposites;
+    if (wantStandalone !== this._standalone) {
+      this._standalone = wantStandalone;
+      this._syncComposite();
+      Log.debug(`VolumetricFog: composite -> ${wantStandalone ? 'standalone' : 'Postprocessing'}`);
+    }
+    this.stats.standalone = this._standalone;
+
+    this._tickWeather(step);
+    this._tickTerrain(step);
+
+    if (this._extDriveAge > 2) this.render();
+
+    this._inUpdate = false;
+    this.stats.cpuMs = performance.now() - t0;
+  }
+
+  /**
+   * Integrate one frame of the medium into `this.target`.
+   * Safe to call from Postprocessing before its composite; safe to call twice (second call in
+   * the same frame is ignored).
+   */
+  render() {
+    if (this._disposed || !this._ready) return;
+    if (!this._inUpdate) this._extDriveAge = 0;
+    if (!this.enabled) return;
+    // Our own self-drive stands down if something external already integrated this tick.  An
+    // external call is never blocked (the engine can render while paused, when _tick is frozen).
+    if (this._inUpdate && this._renderTick === this._tick) return;
+    this._renderTick = this._tick;
+
+    const ctx = this.ctx;
+    const renderer = ctx.renderer;
+    const camera = ctx.camera;
+    const scene = ctx.scene;
+    if (!renderer || !camera || !scene || !this.target) return;
+
+    try {
+      const depthTex = this._acquireDepth();
+      this._updateUniforms(depthTex);
+
+      const prevRT = renderer.getRenderTarget();
+      const prevAutoClear = renderer.autoClear;
+      renderer.autoClear = true;
+
+      // 1) march
+      renderer.setRenderTarget(this.target);
+      renderer.render(this._marchScene, this._marchCam);
+
+      // 2) history blit (keeps `this.target` a stable object for downstream consumers)
+      if (this._historyAmount > 0.001 && this._history) {
+        this._blitMat.uniforms.tSrc.value = this.target.texture;
+        this._blitMesh.visible = true;
+        renderer.setRenderTarget(this._history);
+        renderer.render(this._blitScene, this._marchCam);
+      }
+
+      renderer.setRenderTarget(prevRT);
+      renderer.autoClear = prevAutoClear;
+
+      this._frame++;
+      this._captureHistoryMatrices();
+    } catch (e) {
+      Log.once('fog:render', 'VolumetricFog.render() threw — disabling volumetrics.', e);
+      this.enabled = false;
+      this._syncComposite();
+    }
+  }
+
+  /** @param {number} w @param {number} h — CSS px (the drawing buffer is derived). */
+  resize(w, h) {
+    if (this._disposed) return;
+    const renderer = this.ctx.renderer;
+    if (!renderer) return;
+
+    let dw = Math.max(1, Math.round(w || 1));
+    let dh = Math.max(1, Math.round(h || 1));
+    try {
+      renderer.getDrawingBufferSize(_v2);
+      if (_v2.x > 0 && _v2.y > 0) { dw = Math.round(_v2.x); dh = Math.round(_v2.y); }
+    } catch { /* fall back to CSS px */ }
+
+    this._rw = dw; this._rh = dh;
+
+    // Effective scale = the tier's ask, clamped by the area cap.
+    let scale = this._scale;
+    const area = dw * dh;
+    if (area * scale * scale > this.maxFogPixels) {
+      scale = Math.sqrt(this.maxFogPixels / Math.max(area, 1));
+    }
+    scale = Math.min(1, Math.max(0.15, scale));
+    this._effScale = scale;
+
+    const fw = Math.max(8, Math.round(dw * scale));
+    const fh = Math.max(8, Math.round(dh * scale));
+
+    // Depth prepass: full drawing buffer, but never past its own cap, and never below the fog.
+    let ds = 1;
+    if (area > this.maxDepthPixels) ds = Math.sqrt(this.maxDepthPixels / area);
+    const pw = Math.max(fw, Math.round(dw * ds));
+    const ph = Math.max(fh, Math.round(dh * ds));
+
+    if (fw === this._fw && fh === this._fh && pw === this._dw && ph === this._dh
+        && this.target && this._depthRT) return;
+
+    this._fw = fw; this._fh = fh;
+    this._dw = pw; this._dh = ph;
+
+    const opts = {
+      minFilter: THREE.LinearFilter,
+      magFilter: THREE.LinearFilter,
+      format: THREE.RGBAFormat,
+      type: THREE.HalfFloatType,
+      depthBuffer: false,
+      stencilBuffer: false,
+      generateMipmaps: false,
+    };
+
+    if (this.target) this.target.dispose();
+    this.target = new THREE.WebGLRenderTarget(fw, fh, opts);
+    this.target.texture.name = 'VolumetricFog.scatter';
+
+    if (this._history) { this._history.dispose(); this._history = null; }
+    if (this._historyAmount > 0.001) {
+      this._history = new THREE.WebGLRenderTarget(fw, fh, opts);
+      this._history.texture.name = 'VolumetricFog.history';
+    }
+
+    this._allocDepthRT(pw, ph);
+
+    if (this._marchMat) {
+      this._marchMat.uniforms.tHistory.value = this._history ? this._history.texture : this._whiteTex;
+    }
+    if (this._compositeMat) {
+      this._compositeMat.uniforms.tFog.value = this.target.texture;
+      this._compositeMat.uniforms.uFogTexel.value.set(0.5 / fw, 0.5 / fh);
+      const up = (fw < dw - 1 || fh < dh - 1) ? 1 : 0;
+      if (this._compositeMat.defines.UPSAMPLE !== up) {
+        this._compositeMat.defines.UPSAMPLE = up;
+        this._compositeMat.needsUpdate = true;
+      }
+    }
+
+    this.stats.width = fw; this.stats.height = fh; this.stats.scale = scale;
+  }
+
+  dispose() {
+    if (this._disposed) return;
+    this._disposed = true;
+    this.enabled = false;
+
+    if (this.bus) {
+      this.bus.off?.('weather:change', this._onWeather);
+      this.bus.off?.('settings:changed', this._onSettings);
+    }
+
+    if (this._compositeMesh && this._compositeMesh.parent) {
+      this._compositeMesh.parent.remove(this._compositeMesh);
+    }
+
+    const kill = (rt) => { if (rt) { rt.depthTexture?.dispose?.(); rt.dispose(); } };
+    kill(this.target); this.target = null;
+    kill(this._history); this._history = null;
+    kill(this._depthRT); this._depthRT = null;
+    kill(this._shadowFallbackRT); this._shadowFallbackRT = null;
+
+    this._quadGeo?.dispose?.(); this._quadGeo = null;
+    this._marchMat?.dispose?.(); this._marchMat = null;
+    this._compositeMat?.dispose?.(); this._compositeMat = null;
+    this._blitMat?.dispose?.(); this._blitMat = null;
+    this._depthMat?.dispose?.(); this._depthMat = null;
+
+    this._noiseTex?.dispose?.(); this._noiseTex = null;
+    this._terrainTex?.dispose?.(); this._terrainTex = null;
+    this._whiteTex?.dispose?.(); this._whiteTex = null;
+    if (this._blueOwned) this._blueTex?.dispose?.();
+    this._blueTex = null;
+
+    this._marchScene = null; this._blitScene = null; this._marchCam = null;
+    this._marchMesh = null; this._blitMesh = null; this._compositeMesh = null;
+    this._terrData = null; this._terrStaging = null;
+    this._moon = null; this._depthSkips.length = 0; this._sceneLights.length = 0;
+    this._uniforms = null;
+    this._ready = false;
+  }
+
+  // ----------------------------------------------------------------------------- accessors
+
+  /** @returns {THREE.Texture|null} */
+  get texture() { return this.target ? this.target.texture : null; }
+
+  /** The depth this module owns (null when borrowing Postprocessing's). */
+  get depthTexture() { return this._ownsDepth ? (this._depthRT?.depthTexture ?? null) : null; }
+
+  /** True when this module is compositing itself into the main framebuffer. */
+  get standalone() { return this._standalone; }
+
+  get resolutionScale() { return this._scale; }
+  set resolutionScale(v) {
+    const s = Math.min(1, Math.max(0.2, Number(v) || 0.5));
+    if (Math.abs(s - this._scale) < 1e-3) return;
+    this._scale = s;
+    this._fw = -1;
+    this.resize(this.ctx.width || this._rw, this.ctx.height || this._rh);
+  }
+
+  /** Hard on/off. @param {boolean} v */
+  setEnabled(v) {
+    this.enabled = !!v;
+    this._syncComposite();
+  }
+
+  // ----------------------------------------------------------------------------- tiers
+
+  _applyTier(rebuild) {
+    const s = this.ctx.settings;
+    const tier = (l, m, h, u) => (s && typeof s.tier === 'function' ? s.tier(l, m, h, u) : h);
+
+    // Ask for half the drawing buffer at every tier above 'low'; the area cap above is what
+    // actually decides, and it is the thing with a measured budget behind it.  Predicted cost
+    // from the fit in the constructor, at the tier's own cap:
+    //   low  0.12 Mpx x 12 = 0.70 ms   high  0.30 Mpx x 26 = 1.58 ms
+    //   med  0.22 Mpx x 20 = 1.11 ms   ultra 0.36 Mpx x 32 = 2.10 ms
+    this._scale = tier(0.25, 0.5, 0.5, 0.5);
+    this._steps = tier(12, 20, 26, 32);
+    // ART §5.3's ultra row is 'moon + lantern + nearest 2 locals'; 3 was over spec and over cost.
+    this._locals = tier(1, 1, 2, 2);
+    this._historyAmount = tier(0.0, 0.82, 0.88, 0.92);
+    this.maxFogPixels = tier(1.2e5, 2.2e5, 3.0e5, 3.6e5);
+
+    this.stats.steps = this._steps;
+    this.stats.scale = this._scale;
+
+    if (rebuild && this._marchMat) {
+      this._marchMat.defines.STEPS = this._steps;
+      this._marchMat.defines.LOCALS = Math.max(1, this._locals);
+      this._marchMat.needsUpdate = true;
+      this._rebuildLocalUniformArrays();
+      this._fw = -1;
+      this.resize(this.ctx.width || this._rw, this.ctx.height || this._rh);
+    }
+  }
+
+  _rebuildLocalUniformArrays() {
+    const n = Math.max(1, this._locals);
+    const u = this._marchMat?.uniforms;
+    if (!u) return;
+    const grow = (arr, make) => {
+      while (arr.length < n) arr.push(make());
+      arr.length = n;
+    };
+    grow(u.uLocalPos.value, () => new THREE.Vector3());
+    grow(u.uLocalColor.value, () => new THREE.Vector3());
+    grow(u.uLocalDir.value, () => new THREE.Vector3(0, -1, 0));
+    grow(u.uLocalParams.value, () => new THREE.Vector4(0, 0, 0, 0));
+  }
+
+  // ----------------------------------------------------------------------------- resources
+
+  _buildTextures() {
+    // ---- 1x1 white, used as a stand-in for every optional sampler
+    const wd = new Uint8Array([255, 255, 255, 255]);
+    this._whiteTex = new THREE.DataTexture(wd, 1, 1, THREE.RGBAFormat);
+    this._whiteTex.needsUpdate = true;
+
+    // ---- tiling multi-octave value noise (fog structure + rain streaks)
+    this._noiseTex = this._makeNoiseTexture(NOISE_TEX);
+
+    // ---- blue noise: prefer the shared one from the texture bakery
+    const tex = this.ctx.systems?.get?.('Textures');
+    let bn = null;
+    try { bn = tex?.blueNoise ?? null; } catch { bn = null; }
+    if (bn && bn.image) {
+      this._blueTex = bn;
+      this._blueOwned = false;
+    } else {
+      this._blueTex = this._makeFallbackBlueNoise(64);
+      this._blueOwned = true;
+    }
+
+    // ---- terrain / mist-floor window
+    this._terrData = new Float32Array(TERRAIN_TEX * TERRAIN_TEX * 4);
+    this._terrStaging = new Float32Array(TERRAIN_TEX * TERRAIN_TEX * 4);
+    for (let i = 0; i < this._terrData.length; i += 4) {
+      this._terrData[i] = 0; this._terrData[i + 1] = 0;
+      this._terrData[i + 2] = 0.5; this._terrData[i + 3] = 1;
+    }
+    this._terrainTex = new THREE.DataTexture(
+      this._terrData, TERRAIN_TEX, TERRAIN_TEX, THREE.RGBAFormat, THREE.FloatType,
+    );
+    this._terrainTex.minFilter = THREE.LinearFilter;
+    this._terrainTex.magFilter = THREE.LinearFilter;
+    this._terrainTex.wrapS = THREE.ClampToEdgeWrapping;
+    this._terrainTex.wrapT = THREE.ClampToEdgeWrapping;
+    this._terrainTex.generateMipmaps = false;
+    this._terrainTex.needsUpdate = true;
+  }
+
+  /**
+   * Tileable value noise, 4 octaves in 4 channels.  Deterministic — driven by ctx.rand when it
+   * exists, otherwise by an internal integer hash.  No Math.random anywhere.
+   */
+  _makeNoiseTexture(size) {
+    const rand = this.ctx.rand;
+    const seedInt = (this.ctx.settings?.get?.('seed') ?? 0x51A5CAB) | 0;
+    let state = (seedInt ^ 0x9E3779B9) >>> 0;
+    const nextf = () => {
+      if (rand && typeof rand.next === 'function') return rand.next();
+      state = (state * 1664525 + 1013904223) >>> 0;
+      return state / 4294967296;
+    };
+
+    const lattices = [4, 8, 16, 2];
+    const grids = lattices.map((L) => {
+      const g = new Float32Array(L * L);
+      for (let i = 0; i < g.length; i++) g[i] = nextf();
+      return g;
+    });
+
+    const smooth = (t) => t * t * (3 - 2 * t);
+    const sample = (g, L, u, v) => {
+      const fx = u * L, fz = v * L;
+      const ix = Math.floor(fx), iz = Math.floor(fz);
+      const tx = smooth(fx - ix), tz = smooth(fz - iz);
+      const x0 = ((ix % L) + L) % L, x1 = (x0 + 1) % L;
+      const z0 = ((iz % L) + L) % L, z1 = (z0 + 1) % L;
+      const a = g[z0 * L + x0] + (g[z0 * L + x1] - g[z0 * L + x0]) * tx;
+      const b = g[z1 * L + x0] + (g[z1 * L + x1] - g[z1 * L + x0]) * tx;
+      return a + (b - a) * tz;
+    };
+
+    const data = new Uint8Array(size * size * 4);
+    for (let z = 0; z < size; z++) {
+      for (let x = 0; x < size; x++) {
+        const u = x / size, v = z / size;
+        // R: two octaves of the big lattice — the drifting fog banks
+        let r = sample(grids[0], lattices[0], u, v) * 0.68
+              + sample(grids[1], lattices[1], u, v) * 0.32;
+        // G: finer structure for the second density layer
+        let g = sample(grids[1], lattices[1], u, v) * 0.6
+              + sample(grids[2], lattices[2], u, v) * 0.4;
+        // B: high frequency — rain streaks read off this one
+        let b = sample(grids[2], lattices[2], u, v);
+        // A: very low frequency — reserved
+        let a = sample(grids[3], lattices[3], u, v);
+        const i = (z * size + x) * 4;
+        data[i] = Math.max(0, Math.min(255, (r * 255) | 0));
+        data[i + 1] = Math.max(0, Math.min(255, (g * 255) | 0));
+        data[i + 2] = Math.max(0, Math.min(255, (b * 255) | 0));
+        data[i + 3] = Math.max(0, Math.min(255, (a * 255) | 0));
+      }
+    }
+
+    const t = new THREE.DataTexture(data, size, size, THREE.RGBAFormat);
+    t.wrapS = THREE.RepeatWrapping;
+    t.wrapT = THREE.RepeatWrapping;
+    t.minFilter = THREE.LinearFilter;
+    t.magFilter = THREE.LinearFilter;
+    t.generateMipmaps = false;
+    t.needsUpdate = true;
+    t.name = 'VolumetricFog.noise';
+    return t;
+  }
+
+  /** Cheap void-and-cluster-ish fallback if Textures is missing.  Deterministic. */
+  _makeFallbackBlueNoise(size) {
+    const seedInt = (this.ctx.settings?.get?.('seed') ?? 0x51A5CAB) | 0;
+    let state = (seedInt ^ 0x2545F491) >>> 0;
+    const nextf = () => {
+      state ^= state << 13; state >>>= 0;
+      state ^= state >> 17;
+      state ^= state << 5; state >>>= 0;
+      return state / 4294967296;
+    };
+    const n = size * size;
+    const vals = new Float32Array(n);
+    for (let i = 0; i < n; i++) vals[i] = nextf();
+    // A few relaxation passes push the spectrum toward blue: subtract the local mean.
+    const tmp = new Float32Array(n);
+    for (let pass = 0; pass < 3; pass++) {
+      for (let y = 0; y < size; y++) {
+        for (let x = 0; x < size; x++) {
+          let s = 0;
+          for (let dy = -1; dy <= 1; dy++) {
+            for (let dx = -1; dx <= 1; dx++) {
+              const xx = (x + dx + size) % size, yy = (y + dy + size) % size;
+              s += vals[yy * size + xx];
+            }
+          }
+          tmp[y * size + x] = vals[y * size + x] - (s / 9 - 0.5) * 0.85;
+        }
+      }
+      vals.set(tmp);
+    }
+    // rank-normalise to a flat histogram
+    const idx = Array.from({ length: n }, (_, i) => i).sort((a, b) => vals[a] - vals[b]);
+    const data = new Uint8Array(n * 4);
+    for (let r = 0; r < n; r++) {
+      const v = Math.min(255, ((r / n) * 256) | 0);
+      const i = idx[r] * 4;
+      data[i] = v; data[i + 1] = v; data[i + 2] = v; data[i + 3] = 255;
+    }
+    const t = new THREE.DataTexture(data, size, size, THREE.RGBAFormat);
+    t.wrapS = THREE.RepeatWrapping;
+    t.wrapT = THREE.RepeatWrapping;
+    t.minFilter = THREE.NearestFilter;
+    t.magFilter = THREE.NearestFilter;
+    t.generateMipmaps = false;
+    t.needsUpdate = true;
+    t.name = 'VolumetricFog.blueNoiseFallback';
+    return t;
+  }
+
+  _buildMaterials() {
+    const n = Math.max(1, this._locals);
+    const localPos = []; const localCol = []; const localDir = []; const localPar = [];
+    for (let i = 0; i < n; i++) {
+      localPos.push(new THREE.Vector3());
+      localCol.push(new THREE.Vector3());
+      localDir.push(new THREE.Vector3(0, -1, 0));
+      localPar.push(new THREE.Vector4(0, 0, 0, 0));
+    }
+
+    const u = {
+      tDepth: { value: this._whiteTex },
+      tNoise: { value: this._noiseTex },
+      tBlue: { value: this._blueTex },
+      tTerrain: { value: this._terrainTex },
+      tHistory: { value: this._whiteTex },
+      tMoonShadow: { value: this._whiteTex },
+      tLampShadow: { value: this._whiteTex },
+
+      uInvProj: { value: new THREE.Matrix4() },
+      uCamWorld: { value: new THREE.Matrix4() },
+      uPrevViewProj: { value: new THREE.Matrix4() },
+      uCamPos: { value: new THREE.Vector3() },
+      uNearFar: { value: new THREE.Vector2(0.05, 1200) },
+      uFrame: { value: 0 },
+      uTime: { value: 0 },
+      uRevDepth: { value: 0 },
+      uHistoryAmount: { value: this._historyAmount },
+      uBlueSize: { value: 128 },
+
+      uFogA: { value: new THREE.Vector4(0.0105, -1.0, 1 / 4.6, 150) },
+      uFogB: { value: new THREE.Vector4(0.62, 0.92, 0.16, 0.45) },
+      uFogNear: { value: new THREE.Vector3() },
+      uFogFar: { value: new THREE.Vector3() },
+      uFogLit: { value: new THREE.Vector3() },
+
+      uScatterCfg: { value: new THREE.Vector4(1 / 118, 0.26, 0.13, 0) },
+      uMist: { value: new THREE.Vector4(0.62, 0.55, 0.17, 0.58) },
+      uNoiseCfg: { value: new THREE.Vector4(0.0125, 0.045, 0.95, 2.2) },
+      uDriftA: { value: new THREE.Vector2() },
+      uDriftB: { value: new THREE.Vector2() },
+
+      uTerrainOrigin: { value: new THREE.Vector3(0, 0, 0) },
+      uTerrainSpan: { value: TERRAIN_SPAN },
+
+      uMoonDir: { value: new THREE.Vector3(0.794, 0.438, 0.421) },
+      uMoonColor: { value: new THREE.Vector3(0, 0, 0) },
+      uMoonShadowMat: { value: new THREE.Matrix4() },
+      uMoonShadowCfg: { value: new THREE.Vector2(0, 0.0008) },
+
+      uLampPos: { value: new THREE.Vector3() },
+      uLampDir: { value: new THREE.Vector3(0, 0, -1) },
+      uLampColor: { value: new THREE.Vector3(0, 0, 0) },
+      uLampCone: { value: new THREE.Vector4(0.9, 0.95, 14, 0.2) },
+      uLampShadowMat: { value: new THREE.Matrix4() },
+      uLampShadowCfg: { value: new THREE.Vector2(0, 0.0015) },
+
+      uLocalPos: { value: localPos },
+      uLocalColor: { value: localCol },
+      uLocalDir: { value: localDir },
+      uLocalParams: { value: localPar },
+
+      uWeather: { value: new THREE.Vector4(0.15, 0.3, 0, 0) },
+      uPlayerPos: { value: new THREE.Vector3(0, 1.7, 0) },
+    };
+
+    // colour defaults (linear working space; THREE.Color converts from sRGB for us)
+    _col.setHex(PAL.near); u.uFogNear.value.set(_col.r, _col.g, _col.b);
+    _col.setHex(PAL.far); u.uFogFar.value.set(_col.r, _col.g, _col.b);
+    _col.setHex(PAL.lit); u.uFogLit.value.set(_col.r, _col.g, _col.b);
+
+    this._uniforms = u;
+
+    this._marchMat = new THREE.ShaderMaterial({
+      name: 'VolumetricFog.march',
+      defines: { STEPS: this._steps, LOCALS: n, SHADOW_COMPARE: 0 },
+      uniforms: u,
+      vertexShader: FULLSCREEN_VERT,
+      fragmentShader: MARCH_FRAG,
+      depthTest: false,
+      depthWrite: false,
+      blending: THREE.NoBlending,
+      toneMapped: false,
+    });
+
+    this._compositeMat = new THREE.ShaderMaterial({
+      name: 'VolumetricFog.composite',
+      defines: { UPSAMPLE: this._scale < 0.999 ? 1 : 0 },
+      uniforms: {
+        tFog: { value: null },
+        tDepth: { value: this._whiteTex },
+        uFogTexel: { value: new THREE.Vector2(0.001, 0.001) },
+        uNearFar: { value: new THREE.Vector2(0.05, 1200) },
+        uRevDepth: { value: 0 },
+        uIntensity: { value: 1 },
+      },
+      vertexShader: FULLSCREEN_VERT,
+      fragmentShader: COMPOSITE_FRAG,
+      depthTest: false,
+      depthWrite: false,
+      transparent: true,
+      toneMapped: true,
+      // result = inScatter + scene * transmittance
+      blending: THREE.CustomBlending,
+      blendEquation: THREE.AddEquation,
+      blendSrc: THREE.OneFactor,
+      blendDst: THREE.SrcAlphaFactor,
+      blendEquationAlpha: THREE.AddEquation,
+      blendSrcAlpha: THREE.ZeroFactor,
+      blendDstAlpha: THREE.OneFactor,
+    });
+
+    this._blitMat = new THREE.ShaderMaterial({
+      name: 'VolumetricFog.blit',
+      uniforms: { tSrc: { value: null } },
+      vertexShader: FULLSCREEN_VERT,
+      fragmentShader: BLIT_FRAG,
+      depthTest: false,
+      depthWrite: false,
+      blending: THREE.NoBlending,
+      toneMapped: false,
+    });
+
+    this._depthMat = new THREE.MeshBasicMaterial({ colorWrite: false });
+    this._depthMat.name = 'VolumetricFog.depthPrepass';
+  }
+
+  _buildScenes() {
+    this._quadGeo = new THREE.PlaneGeometry(2, 2);
+    this._marchCam = new THREE.Camera();
+
+    this._marchScene = new THREE.Scene();
+    this._marchMesh = new THREE.Mesh(this._quadGeo, this._marchMat);
+    this._marchMesh.frustumCulled = false;
+    this._marchScene.add(this._marchMesh);
+
+    this._blitScene = new THREE.Scene();
+    this._blitMesh = new THREE.Mesh(this._quadGeo, this._blitMat);
+    this._blitMesh.frustumCulled = false;
+    this._blitScene.add(this._blitMesh);
+
+    this._compositeMesh = new THREE.Mesh(this._quadGeo, this._compositeMat);
+    this._compositeMesh.frustumCulled = false;
+    this._compositeMesh.renderOrder = 10000;
+    this._compositeMesh.name = 'VolumetricFogComposite';
+    this._compositeMesh.matrixAutoUpdate = false;
+    this._compositeMesh.userData.fogSkipDepth = true;
+  }
+
+  _allocDepthRT(w, h) {
+    if (this._depthRT) { this._depthRT.depthTexture?.dispose?.(); this._depthRT.dispose(); }
+    const rt = new THREE.WebGLRenderTarget(w, h, {
+      minFilter: THREE.NearestFilter,
+      magFilter: THREE.NearestFilter,
+      format: THREE.RGBAFormat,
+      type: THREE.UnsignedByteType,
+      depthBuffer: true,
+      stencilBuffer: false,
+      generateMipmaps: false,
+    });
+    rt.depthTexture = new THREE.DepthTexture(w, h, THREE.UnsignedIntType);
+    rt.depthTexture.format = THREE.DepthFormat;
+    rt.depthTexture.minFilter = THREE.NearestFilter;
+    rt.depthTexture.magFilter = THREE.NearestFilter;
+    rt.texture.name = 'VolumetricFog.depthColour';
+    this._depthRT = rt;
+  }
+
+  /** Attach or detach the standalone fullscreen composite. */
+  _syncComposite() {
+    const mesh = this._compositeMesh;
+    const scene = this.ctx.scene;
+    if (!mesh || !scene) return;
+    const want = this.enabled && this._standalone && !this._disposed;
+    if (want && mesh.parent !== scene) scene.add(mesh);
+    if (!want && mesh.parent) mesh.parent.remove(mesh);
+    mesh.visible = want;
+  }
+
+  // ----------------------------------------------------------------------------- depth
+
+  /**
+   * Prefer Postprocessing's depth (free).  Otherwise render our own prepass with an override
+   * material.  Shadow-map updating is suspended during the prepass so we do not pay for the
+   * shadow pass twice — the override material is unlit and does not read them anyway.
+   */
+  _acquireDepth() {
+    const post = this.ctx.systems?.get?.('Postprocessing');
+    const ext = post && !post.__failed ? post.depthTexture : null;
+    if (ext && ext.isTexture) {
+      this._ownsDepth = false;
+      return ext;
+    }
+    this._ownsDepth = true;
+    this._renderDepthPrepass();
+    return this._depthRT ? this._depthRT.depthTexture : this._whiteTex;
+  }
+
+  _renderDepthPrepass() {
+    const { renderer, scene, camera } = this.ctx;
+    if (!renderer || !scene || !camera || !this._depthRT) return;
+
+    this._skipScanAge++;
+    if (this._skipScanAge > 30) { this._collectDepthSkips(); this._skipScanAge = 0; }
+
+    const prevRT = renderer.getRenderTarget();
+    const prevOverride = scene.overrideMaterial;
+    const prevBg = scene.background;
+    const prevShadowAuto = renderer.shadowMap.autoUpdate;
+    const prevAutoClear = renderer.autoClear;
+
+    const skips = this._depthSkips;
+    for (let i = 0; i < skips.length; i++) skips[i].visible = false;
+    if (this._compositeMesh) this._compositeMesh.visible = false;
+
+    scene.overrideMaterial = this._depthMat;
+    scene.background = null;
+    renderer.shadowMap.autoUpdate = false;
+    renderer.autoClear = true;
+
+    try {
+      renderer.setRenderTarget(this._depthRT);
+      renderer.clear(true, true, false);
+      renderer.render(scene, camera);
+    } catch (e) {
+      Log.once('fog:depth', 'VolumetricFog: depth prepass failed.', e);
+    }
+
+    renderer.setRenderTarget(prevRT);
+    scene.overrideMaterial = prevOverride;
+    scene.background = prevBg;
+    renderer.shadowMap.autoUpdate = prevShadowAuto;
+    renderer.autoClear = prevAutoClear;
+
+    for (let i = 0; i < skips.length; i++) skips[i].visible = true;
+    this._syncComposite();
+  }
+
+  /**
+   * Objects that must not contribute to the depth prepass: sky domes, particle sheets, anything
+   * that has opted out of depth writes.  Refreshed occasionally, not every frame.
+   */
+  _collectDepthSkips() {
+    const scene = this.ctx.scene;
+    const out = this._depthSkips;
+    out.length = 0;
+    if (!scene) return;
+    scene.traverse((o) => {
+      if (!o.visible) return;
+      if (o === this._compositeMesh) return;
+      const ud = o.userData;
+      if (ud && (ud.fogSkipDepth || ud.isSky || ud.skipDepth)) { out.push(o); return; }
+      const m = o.material;
+      if (!m) return;
+      const one = Array.isArray(m) ? m[0] : m;
+      if (one && one.depthWrite === false && (o.isMesh || o.isPoints || o.isLine)) out.push(o);
+    });
+  }
+
+  // ----------------------------------------------------------------------------- weather
+
+  _applyWeather(p) {
+    if (!p) return;
+    if (Number.isFinite(p.fog)) this._fogAmtTarget = Math.min(1, Math.max(0, p.fog));
+    if (Number.isFinite(p.rain)) this._rain = Math.min(1, Math.max(0, p.rain));
+  }
+
+  _tickWeather(dt) {
+    const weather = this.ctx.systems?.get?.('Weather');
+    if (weather && Number.isFinite(weather.fog)) this._fogAmtTarget = Math.min(1, Math.max(0, weather.fog));
+
+    const g = this._globals();
+    if (g && Number.isFinite(g.uRain?.value)) this._rain = g.uRain.value;
+    else if (weather && Number.isFinite(weather.rain)) this._rain = weather.rain;
+
+    // 2 s time constant so a weather:change does not snap the whole medium
+    const k = 1 - Math.exp(-dt / 2.0);
+    this._fogAmt += (this._fogAmtTarget - this._fogAmt) * k;
+  }
+
+  /** @returns {any} Materials.globalUniforms, or null. */
+  _globals() {
+    const m = this.ctx.systems?.get?.('Materials');
+    const g = m && m.globalUniforms;
+    return g && typeof g === 'object' ? g : null;
+  }
+
+  // ----------------------------------------------------------------------------- terrain
+
+  _tickTerrain() {
+    const terrain = this.ctx.systems?.get?.('Terrain');
+    if (!terrain || typeof terrain.heightAt !== 'function') return;
+
+    if (!this._terrPending) {
+      const p = this._playerPos(_v3a);
+      const dx = p.x - this._terrCenter.x;
+      const dz = p.z - this._terrCenter.y;
+      if (this._terrValid === 0 || dx * dx + dz * dz > TERRAIN_RECENTER * TERRAIN_RECENTER) {
+        this._terrCenterPending = { x: p.x, z: p.z };
+        this._terrPending = true;
+        this._terrRow = 0;
+      }
+    }
+
+    if (this._terrPending) this._bakeTerrainRows(TERRAIN_ROWS_PER_FRAME);
+  }
+
+  _bakeTerrainWindow(sync) {
+    const terrain = this.ctx.systems?.get?.('Terrain');
+    if (!terrain || typeof terrain.heightAt !== 'function') return;
+    const p = this._playerPos(_v3a);
+    this._terrCenterPending = { x: p.x, z: p.z };
+    this._terrPending = true;
+    this._terrRow = 0;
+    if (sync) this._bakeTerrainRows(TERRAIN_TEX);
+  }
+
+  _bakeTerrainRows(rows) {
+    const terrain = this.ctx.systems?.get?.('Terrain');
+    if (!terrain || typeof terrain.heightAt !== 'function') { this._terrPending = false; return; }
+
+    const N = TERRAIN_TEX;
+    const S = TERRAIN_SPAN;
+    const c = this._terrCenterPending || { x: 0, z: 0 };
+    const stg = this._terrStaging;
+    const waterLevel = Number.isFinite(terrain.waterLevel) ? terrain.waterLevel : 0;
+
+    const pad = terrain.buildSiteCenter;
+    const padX = pad && Number.isFinite(pad.x) ? pad.x : 1e9;
+    const padZ = pad && Number.isFinite(pad.z) ? pad.z : 1e9;
+    const padR = 16;
+
+    const step = S / (N - 1);
+    const end = Math.min(N, this._terrRow + rows);
+
+    for (let j = this._terrRow; j < end; j++) {
+      const z = c.z - S * 0.5 + j * step;
+      for (let i = 0; i < N; i++) {
+        const x = c.x - S * 0.5 + i * step;
+        const h = terrain.heightAt(x, z);
+        const isWater = h <= waterLevel + 0.05;
+        const floorY = isWater ? waterLevel : h;
+
+        // pooling: hollow if the neighbourhood mean sits above us
+        const hm = 0.25 * (terrain.heightAt(x + 7, z) + terrain.heightAt(x - 7, z)
+          + terrain.heightAt(x, z + 7) + terrain.heightAt(x, z - 7));
+        let pool = 0.5 + (hm - h) * 0.30;
+        pool = pool < 0 ? 0 : (pool > 1 ? 1 : pool);
+
+        // density multiplier: heavier on water (ART x1.6), heaviest in the cold excavation
+        let mult = isWater ? 1.75 : 1.0;
+        const ddx = x - padX, ddz = z - padZ;
+        const d2 = ddx * ddx + ddz * ddz;
+        if (d2 < padR * padR) {
+          const f = 1 - Math.sqrt(d2) / padR;
+          mult *= 1 + 1.2 * f * f;
+        }
+
+        const o = (j * N + i) * 4;
+        stg[o] = floorY;
+        stg[o + 1] = isWater ? 1 : 0;
+        stg[o + 2] = pool;
+        stg[o + 3] = mult;
+      }
+    }
+
+    this._terrRow = end;
+    if (this._terrRow >= N) {
+      this._terrData.set(stg);
+      this._terrainTex.needsUpdate = true;
+      this._terrCenter.set(c.x, c.z);
+      this._terrValid = 1;
+      this._terrPending = false;
+    }
+  }
+
+  _playerPos(out) {
+    const pl = this.ctx.systems?.get?.('Player');
+    if (pl && pl.position && Number.isFinite(pl.position.x)) return out.copy(pl.position);
+    const g = this._globals();
+    if (g && g.uPlayerPos && Number.isFinite(g.uPlayerPos.value?.x)) return out.copy(g.uPlayerPos.value);
+    if (this.ctx.camera) return out.copy(this.ctx.camera.position);
+    return out.set(0, 1.7, 0);
+  }
+
+  // ----------------------------------------------------------------------------- uniforms
+
+  _updateUniforms(depthTex) {
+    const u = this._uniforms;
+    const ctx = this.ctx;
+    const camera = ctx.camera;
+    const g = this._globals();
+
+    u.tDepth.value = depthTex || this._whiteTex;
+    u.tHistory.value = this._history ? this._history.texture : this._whiteTex;
+    u.tBlue.value = this._blueTex || this._whiteTex;
+    u.uBlueSize.value = this._blueTex?.image?.width || 128;
+
+    // ---- camera
+    camera.updateMatrixWorld();
+    u.uInvProj.value.copy(camera.projectionMatrixInverse);
+    u.uCamWorld.value.copy(camera.matrixWorld);
+    u.uCamPos.value.setFromMatrixPosition(camera.matrixWorld);
+    u.uNearFar.value.set(camera.near, camera.far);
+    u.uPrevViewProj.value.copy(this._prevViewProj);
+
+    let reversed = 0;
+    try {
+      reversed = ctx.renderer.state?.buffers?.depth?.getReversed?.() ? 1 : 0;
+    } catch { reversed = 0; }
+    u.uRevDepth.value = reversed;
+
+    // ---- weather / time
+    const rain = this._rain;
+    const lightning = g?.uLightning?.value ?? 0;
+    const wetness = g?.uWetness?.value ?? 0.3;
+    const nightPhase = g?.uNightPhase?.value
+      ?? (Number.isFinite(ctx.state?.timeOfNight) ? ctx.state.timeOfNight : 0);
+    u.uWeather.value.set(rain, wetness, lightning, nightPhase);
+    u.uTime.value = this._time;
+    u.uFrame.value = this._frame % 4096;
+    this._playerPos(u.uPlayerPos.value);
+
+    // ---- density profile from the weather state (ART_DIRECTION §5.1)
+    // The old ramp was linear in fogAmt (density = base + f*0.052), which put a mid-weather
+    // night at 0.05/m: an opaque wall at 25 m, so the treeline did not "sit back", it ceased to
+    // exist.  ART §5.1 wants 0.014 clear and 0.078 at whiteout; a 2.2 power lands both ends and
+    // keeps the middle nights transparent enough to read depth through.
+    const P = this.params;
+    const f = this._fogAmt;
+    const density = (P.density + Math.pow(f, 2.2) * 0.062 + rain * 0.005) * (1 + lightning * 0.15);
+    const H = P.scaleHeight + f * 5.5 + rain * 1.0;
+    u.uFogA.value.set(density, P.floorY, 1 / Math.max(H, 0.5), P.maxDistance);
+
+    // thick fog multiply-scatters and loses its forward lobe — that is why a whiteout has no
+    // visible shafts (ART §5.3).  g goes 0.62 -> 0.38 as the medium thickens.
+    const hg = Math.max(0.05, Math.min(0.9, P.hg - f * 0.24));
+    u.uFogB.value.set(hg, P.albedo, P.ambient * (0.62 + f * 0.55), P.mistTint);
+
+    // ---- aerial rate, ambient occlusion floor, legibility floor on transmittance
+    u.uScatterCfg.value.set(
+      1 / Math.max(20, P.aerialDistance),
+      Math.min(1, Math.max(0, P.ambientOcclusion)),
+      Math.max(0, P.minTransmit) * (1 - f) * (1 - f) + 0.008,
+      0,
+    );
+
+    // colours: thicker fog lifts and cools, dawn warms.  No allocation — two module scratches.
+    const dawn = Math.min(1, Math.max(0, (nightPhase - 0.85) / 0.15));
+    _col.setHex(PAL.near);
+    _colB.setHex(PAL.nearThick);
+    _col.lerp(_colB, f);
+    if (dawn > 0) { _colB.setHex(PAL.dawnNear); _col.lerp(_colB, dawn); }
+    u.uFogNear.value.set(_col.r, _col.g, _col.b);
+
+    _col.setHex(PAL.far);
+    _colB.setHex(PAL.farThick);
+    _col.lerp(_colB, f);
+    if (dawn > 0) { _colB.setHex(PAL.dawnFar); _col.lerp(_colB, dawn); }
+    u.uFogFar.value.set(_col.r, _col.g, _col.b);
+
+    _col.setHex(PAL.lit);
+    u.uFogLit.value.set(_col.r, _col.g, _col.b);
+
+    // ---- ground mist.  A LAYER: it grows in density and a little in height with the weather,
+    // but its ceiling stays near knee/waist so the world above it is never lost.
+    u.uMist.value.set(
+      P.mistTop * (0.85 + f * 0.75),
+      P.mistFeather * (1 + f * 0.5),
+      P.mistDensity * (0.50 + f * 1.10) * (1 + rain * 0.30),
+      P.mistWobble,
+    );
+
+    // ---- noise drift with the wind
+    const wind = g?.uWind?.value;
+    const wx = wind && Number.isFinite(wind.x) ? wind.x : 0.7;
+    const wz = wind && Number.isFinite(wind.z) ? wind.z : 0.35;
+    const t = this._time;
+    u.uDriftA.value.set(-wx * t * 0.0016, -wz * t * 0.0016);
+    u.uDriftB.value.set(-wx * t * 0.0052 + 0.37, -wz * t * 0.0052 - 0.19);
+    u.uNoiseCfg.value.set(0.0125, 0.047, P.noiseContrast, P.rainStreak);
+
+    // ---- terrain window
+    u.uTerrainOrigin.value.set(this._terrCenter.x, this._terrValid, this._terrCenter.y);
+    u.uTerrainSpan.value = TERRAIN_SPAN;
+
+    // ---- lights
+    this._lightScanAge++;
+    if (this._lightScanAge > 20) {
+      this._findMoon();
+      this._sceneLights.length = 0;
+      this.ctx.scene?.traverse?.(this._collectLight);
+      this._lightScanAge = 0;
+    }
+    this._syncShadowMode();
+    this._updateMoon(u, g);
+    this._updateLantern(u);
+    this._updateLocals(u);
+
+    // ---- temporal
+    let hist = this._history ? this._historyAmount : 0;
+    if (hist > 0) {
+      // Fast rotation invalidates most of the history; ease it out rather than smear.
+      camera.getWorldDirection(_v3b);
+      const dot = Math.max(-1, Math.min(1, _v3b.dot(this._prevCamDir)));
+      const ang = Math.acos(dot);
+      const move = _v3a.copy(u.uCamPos.value).sub(this._prevCamPos).length();
+      hist *= Math.exp(-ang * 3.2) * Math.exp(-move * 0.35);
+    }
+    u.uHistoryAmount.value = this._frame < 2 ? 0 : hist;
+
+    // ---- composite uniforms
+    if (this._compositeMat) {
+      const cu = this._compositeMat.uniforms;
+      cu.tFog.value = this.target ? this.target.texture : null;
+      cu.tDepth.value = depthTex || this._whiteTex;
+      cu.uNearFar.value.set(camera.near, camera.far);
+      cu.uRevDepth.value = reversed;
+      cu.uFogTexel.value.set(0.5 / Math.max(1, this._fw), 0.5 / Math.max(1, this._fh));
+    }
+  }
+
+  _captureHistoryMatrices() {
+    const camera = this.ctx.camera;
+    if (!camera) return;
+    this._prevViewProj.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse);
+    this._prevCamPos.setFromMatrixPosition(camera.matrixWorld);
+    camera.getWorldDirection(this._prevCamDir);
+  }
+
+  /**
+   * Keep the sampler variant in step with whatever shadow-map type the renderer is using.
+   * Another module may change `renderer.shadowMap.type` at any time; a mismatch here is a
+   * silently black shadow term, not a crash, so it is checked every frame (it is two reads).
+   */
+  _syncShadowMode() {
+    const renderer = this.ctx.renderer;
+    if (!renderer || !this._marchMat) return;
+
+    let compare = renderer.shadowMap?.type === THREE.PCFShadowMap ? 1 : 0;
+    const probe = this._moon?.shadow?.map?.depthTexture
+      ?? this.ctx.systems?.get?.('Flashlight')?.light?.shadow?.map?.depthTexture ?? null;
+    if (probe) compare = probe.compareFunction ? 1 : 0;
+
+    if (compare === this._shadowCompare) return;
+    this._shadowCompare = compare;
+    this._marchMat.defines.SHADOW_COMPARE = compare;
+    this._marchMat.needsUpdate = true;
+
+    // Rebuild the "no shadow map" stand-in so its sampler type matches the variant.
+    if (this._shadowFallbackRT) {
+      this._shadowFallbackRT.depthTexture?.dispose?.();
+      this._shadowFallbackRT.dispose();
+    }
+    const rt = new THREE.WebGLRenderTarget(4, 4, {
+      depthBuffer: true, stencilBuffer: false, generateMipmaps: false,
+    });
+    rt.depthTexture = new THREE.DepthTexture(4, 4, THREE.UnsignedIntType);
+    rt.depthTexture.format = THREE.DepthFormat;
+    rt.depthTexture.compareFunction = compare ? THREE.LessEqualCompare : null;
+    rt.depthTexture.minFilter = THREE.NearestFilter;
+    rt.depthTexture.magFilter = THREE.NearestFilter;
+    rt.texture.name = 'VolumetricFog.shadowFallback';
+    this._shadowFallbackRT = rt;
+
+    // Clear it to the far plane so every tap reads as "lit".
+    try {
+      const prev = renderer.getRenderTarget();
+      renderer.setRenderTarget(rt);
+      renderer.clear(true, true, false);
+      renderer.setRenderTarget(prev);
+    } catch { /* a cleared-on-first-use target is still valid */ }
+
+    Log.debug(`VolumetricFog: shadow sampler variant -> ${compare ? 'compare' : 'depth'}`);
+  }
+
+  /** The stand-in bound whenever a light has no usable map. */
+  get _noShadow() {
+    return this._shadowFallbackRT ? this._shadowFallbackRT.depthTexture : this._whiteTex;
+  }
+
+  _findMoon() {
+    const sky = this.ctx.systems?.get?.('Sky');
+    let moon = null;
+    for (const key of ['moonLight', 'moon', 'light', 'directional']) {
+      const c = sky ? sky[key] : null;
+      if (c && c.isDirectionalLight) { moon = c; break; }
+    }
+    if (!moon) {
+      let best = -1;
+      this.ctx.scene?.traverse?.((o) => {
+        if (!o.isDirectionalLight || !o.visible) return;
+        const score = (o.castShadow ? 1000 : 1) * Math.max(o.intensity, 0.0001);
+        if (score > best) { best = score; moon = o; }
+      });
+    }
+    this._moon = moon;
+  }
+
+  _updateMoon(u, g) {
+    const moon = this._moon;
+    const P = this.params;
+
+    if (moon && moon.visible && moon.intensity > 0) {
+      moon.updateMatrixWorld();
+      _v3a.setFromMatrixPosition(moon.matrixWorld);
+      if (moon.target) { moon.target.updateMatrixWorld(); _v3b.setFromMatrixPosition(moon.target.matrixWorld); }
+      else _v3b.set(0, 0, 0);
+      _v3a.sub(_v3b);
+      if (_v3a.lengthSq() < 1e-8) _v3a.set(0.794, 0.438, 0.421);
+      _v3a.normalize();
+      u.uMoonDir.value.copy(_v3a);
+
+      // Decouple from Sky's light units.  Normalise the colour to unit luminance so the swatch
+      // survives, and drive the magnitude from an art-directed radiance ramped by a saturating
+      // curve of the light's intensity: a moon that sets still fades the shafts out, but a moon
+      // whose intensity is authored at 0.03 instead of 3.0 does not silently delete them.
+      const c = moon.color;
+      const lum = Math.max(0.2126 * c.r + 0.7152 * c.g + 0.0722 * c.b, 1e-4);
+      const drive = P.moonScatter
+        * (1 - Math.exp(-Math.max(moon.intensity, 0) / Math.max(P.moonRef, 1e-4)));
+      const s = drive / lum;
+      u.uMoonColor.value.set(c.r * s, c.g * s, c.b * s);
+
+      const sm = moon.shadow;
+      const dtex = sm && sm.map && sm.map.depthTexture;
+      const usable = !!(moon.castShadow && dtex
+        && (!!dtex.compareFunction) === (this._shadowCompare === 1));
+      if (usable) {
+        u.tMoonShadow.value = dtex;
+        u.uMoonShadowMat.value.copy(sm.matrix);
+        u.uMoonShadowCfg.value.set(1, Math.abs(sm.bias || 0) + 0.0009);
+      } else {
+        u.tMoonShadow.value = this._noShadow;
+        u.uMoonShadowCfg.value.set(0, 0.001);
+      }
+    } else {
+      // No moon light in the scene yet — keep a faint sky direction so the phase term is sane.
+      const md = g?.uMoonDir?.value;
+      if (md && Number.isFinite(md.x)) u.uMoonDir.value.copy(md);
+      u.uMoonColor.value.set(0, 0, 0);
+      u.tMoonShadow.value = this._noShadow;
+      u.uMoonShadowCfg.value.set(0, 0.001);
+    }
+  }
+
+  _updateLantern(u) {
+    const lamp = this.ctx.systems?.get?.('Flashlight');
+    const light = lamp && lamp.light;
+    const P = this.params;
+
+    if (light && light.isSpotLight && light.visible && light.intensity > 0) {
+      light.updateMatrixWorld();
+      u.uLampPos.value.setFromMatrixPosition(light.matrixWorld);
+      if (light.target) {
+        light.target.updateMatrixWorld();
+        _v3a.setFromMatrixPosition(light.target.matrixWorld);
+      } else _v3a.set(0, 0, 0);
+      _v3b.copy(_v3a).sub(u.uLampPos.value);
+      if (_v3b.lengthSq() < 1e-8) _v3b.set(0, 0, -1);
+      u.uLampDir.value.copy(_v3b.normalize());
+
+      const s = light.intensity * P.lanternScatter;
+      u.uLampColor.value.set(light.color.r * s, light.color.g * s, light.color.b * s);
+
+      const cosOuter = Math.cos(light.angle);
+      const cosInner = Math.cos(light.angle * (1 - (light.penumbra ?? 0)));
+      const range = light.distance > 0 ? light.distance : 24;
+      const rad = Math.max(0.05, P.lanternRadius);
+      u.uLampCone.value.set(cosOuter, Math.max(cosInner, cosOuter + 1e-4), range, rad * rad);
+
+      const sm = light.shadow;
+      const dtex = sm && sm.map && sm.map.depthTexture;
+      const usable = !!(light.castShadow && dtex
+        && (!!dtex.compareFunction) === (this._shadowCompare === 1));
+      if (usable) {
+        u.tLampShadow.value = dtex;
+        u.uLampShadowMat.value.copy(sm.matrix);
+        u.uLampShadowCfg.value.set(1, Math.abs(sm.bias || 0) + 0.0016);
+      } else {
+        u.tLampShadow.value = this._noShadow;
+        u.uLampShadowCfg.value.set(0, 0.002);
+      }
+    } else {
+      u.uLampColor.value.set(0, 0, 0);
+      u.uLampCone.value.set(1, 1, 0, 0);
+      u.tLampShadow.value = this._noShadow;
+      u.uLampShadowCfg.value.set(0, 0.002);
+    }
+  }
+
+  _updateLocals(u) {
+    const n = Math.max(1, this._locals);
+    const P = this.params;
+    const camPos = u.uCamPos.value;
+
+    // gather candidates without allocating: reuse a persistent array
+    if (!this._cand) this._cand = [];
+    const cand = this._cand;
+    cand.length = 0;
+
+    // The lantern already has its own dedicated, shadowed term in the march.  Its spill cone and
+    // the manual's page bounce are the SAME physical source, so letting them win local slots
+    // scored them a second and third helping of warm in-scatter right in front of the camera —
+    // a broad amber haze that filled the frame and buried the cone's shape — while starving the
+    // slots the campfires and the sodium lamp were supposed to occupy (ART §5.4).
+    const lamp = this.ctx.systems?.get?.('Flashlight');
+    const isLanternPart = (light) => !!lamp
+      && (light === lamp.light || light === lamp.spill || light === lamp.pageLight
+        || light === lamp.glow);
+
+    const push = (l) => {
+      if (!l) return;
+      const light = l.isLight ? l : (l.light && l.light.isLight ? l.light : null);
+      if (!light || !light.visible || !(light.intensity > 0)) return;
+      if (!(light.isSpotLight || light.isPointLight)) return;
+      if (isLanternPart(light)) return;
+      if (cand.length < 24) cand.push(light);
+    };
+
+    const props = this.ctx.systems?.get?.('Props');
+    const pl = props && props.lights;
+    if (Array.isArray(pl)) { for (let i = 0; i < pl.length; i++) push(pl[i]); }
+
+    const site = this.ctx.systems?.get?.('CabinSite');
+    if (site) { push(site.lantern); push(site.light); }
+
+    const campers = this.ctx.systems?.get?.('Campers');
+    const agents = campers && campers.agents;
+    if (Array.isArray(agents)) {
+      for (let i = 0; i < agents.length && cand.length < 24; i++) push(agents[i]?.torch ?? agents[i]?.light);
+    }
+
+    // ...then everything else in the scene, deduped.  See this._sceneLights.
+    const sl = this._sceneLights;
+    for (let i = 0; i < sl.length && cand.length < 24; i++) {
+      const l = sl[i];
+      if (cand.indexOf(l) < 0) push(l);
+    }
+
+    // score by intensity / (1 + d^2) — the same rule Materials.assignLights uses
+    for (let i = 0; i < cand.length; i++) {
+      const l = cand[i];
+      l.updateMatrixWorld();
+      _v3a.setFromMatrixPosition(l.matrixWorld);
+      cand[i].__fogScore = l.intensity / (1 + _v3a.distanceToSquared(camPos));
+    }
+    cand.sort((a, b) => b.__fogScore - a.__fogScore);
+
+    for (let k = 0; k < n; k++) {
+      const par = u.uLocalParams.value[k];
+      const l = cand[k];
+      if (!l) { par.set(0, 0, 0, 0); u.uLocalColor.value[k].set(0, 0, 0); continue; }
+
+      u.uLocalPos.value[k].setFromMatrixPosition(l.matrixWorld);
+      const s = l.intensity * P.localScatter;
+      u.uLocalColor.value[k].set(l.color.r * s, l.color.g * s, l.color.b * s);
+
+      const range = l.distance > 0 ? l.distance : 16;
+      if (l.isSpotLight) {
+        if (l.target) { l.target.updateMatrixWorld(); _v3a.setFromMatrixPosition(l.target.matrixWorld); }
+        else _v3a.set(0, 0, 0);
+        _v3b.copy(_v3a).sub(u.uLocalPos.value[k]);
+        if (_v3b.lengthSq() < 1e-8) _v3b.set(0, -1, 0);
+        u.uLocalDir.value[k].copy(_v3b.normalize());
+        const co = Math.cos(l.angle);
+        const ci = Math.cos(l.angle * (1 - (l.penumbra ?? 0)));
+        par.set(co, Math.max(ci, co + 1e-4), range, 1);
+      } else {
+        u.uLocalDir.value[k].set(0, -1, 0);
+        par.set(-1, -0.999, range, 0);
+      }
+    }
+  }
+}
+
+export default VolumetricFog;

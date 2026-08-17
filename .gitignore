@@ -1,0 +1,20 @@
+node_modules/
+dist/
+.DS_Store
+*.log
+.vite/
+# Generated assets are committed by CI, but never local scratch renders:
+/shots/
+/.scratch/
+
+# Local secret cache — pulled from Netlify. NEVER commit.
+.env
+.netlify/
+
+# Scratch/harness files agents create while verifying their own work.
+# These were being swept into commits by `git add -A`.
+_*.mjs
+_*.js
+.*-smoke.mjs
+*.smoke.mjs
+/scratch/

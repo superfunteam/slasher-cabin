@@ -1,0 +1,64 @@
+name: Regenerate assets
+
+# Assets are committed to the repo, so normal builds never need API keys. Run this only when
+# the source prompts or the VO script change, or on demand.
+on:
+  workflow_dispatch:
+    inputs:
+      target:
+        description: 'What to regenerate'
+        required: true
+        default: 'all'
+        type: choice
+        options: [all, voices, audio, images]
+      force:
+        description: 'Overwrite assets that already exist'
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: write
+
+jobs:
+  generate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci
+
+      - name: Generate voice lines
+        if: inputs.target == 'all' || inputs.target == 'voices'
+        env:
+          ELEVEN: ${{ secrets.ELEVEN }}
+        run: node tools/generate-voices.mjs ${{ inputs.force && '--force' || '' }}
+
+      - name: Generate ambience, SFX and score
+        if: inputs.target == 'all' || inputs.target == 'audio'
+        env:
+          ELEVEN: ${{ secrets.ELEVEN }}
+        run: node tools/generate-audio.mjs ${{ inputs.force && '--force' || '' }}
+
+      - name: Generate images
+        if: inputs.target == 'all' || inputs.target == 'images'
+        env:
+          GPTIMAGE: ${{ secrets.GPTIMAGE }}
+        run: node tools/generate-images.mjs ${{ inputs.force && '--force' || '' }}
+
+      - name: Commit regenerated assets
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add public/
+          if git diff --staged --quiet; then
+            echo "No asset changes."
+          else
+            git commit -m "chore: regenerate ${{ inputs.target }} assets"
+            git push
+          fi
