@@ -166,6 +166,16 @@ would push `site-close` out of spec, so this needs judgement rather than a tweak
   gate waits on a frame actually presented and on `splash-title.png` **decoded**, not merely on
   the engine reporting ready. Do not "improve" this by showing the title earlier. There is a
   640 ms floor so a warm cache still reads as a deliberate reveal rather than a flash.
+- **The night auto-starting under the title screen is the HARNESS, not a bug.** `NightManager.init()`
+  arms a 1.2 s auto-start so headless runs, screenshot harnesses and UI-less builds still play.
+  `Menu`'s *constructor* disarms it — the only moment early enough, since every constructor runs
+  before any `init()` — but **only when the URL carries no `shot`, `shots` or `nomenu` param**. So
+  posing a capture legitimately starts the night: phase goes to `build`, the lamp lights, and
+  `%warm` jumps. An agent hit this and reported the game "sometimes auto-starts underneath the
+  title screen". It is working as designed. **Do not remove the auto-start** — without it every
+  headless run renders a menu forever; and do not remove Menu's disarm, or the title screen is
+  built, shown, and destroyed 1.2 s later by `night:begin`, which is precisely how it once went
+  unseen.
 - **`Menu.update()` already drifts the title camera** — a 4½-minute orbit at 27 m breathing ±2.4 m,
   with handheld noise, per `ART §11`'s "never let the frame be still". It yields to `Shots.active`
   so the capture harness always wins. Add light, not more camera.
