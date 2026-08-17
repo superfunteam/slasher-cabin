@@ -17,7 +17,7 @@ torque 1.0, and `build:stage-complete {stage:1}` fired.
 | Modules | 36/36, **0 fatal**, clean production build |
 | Frame cost | ~3 ms at 720p (an earlier "9 fps" was browser contention, not cost) |
 | Draw calls | **352–358 — over the 220 budget in ARCHITECTURE §10.** Unresolved. |
-| Visual, honest | ~5/10 mean over 13 canonical shots; `site-close` and `opening` reach 7 |
+| Visual, honest | ~5/10 mean over 13 shots; `site-close`/`opening` reach 7; lightning now lands |
 | Assets | 14 generated images, 33 audio beds/SFX/score, 90 VO lines |
 | Docs | ~12,400 lines across five binding documents |
 
@@ -66,25 +66,37 @@ one caused a committed regression. Two were inside the tool built to prevent the
 
 ---
 
-## In flight at pause
+## The two in-flight fixes LANDED — and each corrected the brief it was given
 
-A workflow (`wf_d714b60b-fee`) was finishing two fixes. **Verify these landed before building on
-them:**
+Both are committed. Worth reading, because both agents refused a handed-down diagnosis and were
+right to.
 
-1. **`Postprocessing._meterTarget()` — the lightning flash.** Lightning fires correctly now
-   (`flashSeq` increments, `Sky.flash()` runs, 4.5 key light, thunder, mask window) but the
-   auto-exposure **stops down 11.7×, harder than the flash brightens**, so the peak gets *darker*
-   (p99.9 0.2934 → 0.1990). `_meterTarget()` has a row per weather state and none for a flash.
-   With the meter pinned, the same frame reads **p99.9 1.0, 7.26% blown** — see
-   `shots/w4-unmetered-fixed.png`. That is the money shot and it is one line away. Freezing
-   `tAdapt` during a flash is probably better than scaling: a real eye does not adapt in 120 ms,
-   which is why lightning blinds.
-2. **`Forest.js` — hundreds of hard dark bars over the fog.** ~557 `pine-l2-v0` + 611
-   `fir-l2-v0` LOD2 instances rendering as unlit, aliased, randomly-oriented sticks. Originally
-   misattributed to rain; disproved three ways (`shots/w0-norain.png`, `w0-noweather.png`,
-   `w0-solidred.png`).
+**1. The lightning flash works.** p99.9 **0.2411 -> 0.9975**, blown pixels **0 -> 4.7%**. Blown
+white sky through the canopy, the forest legible past 60 m, the near trunk a hard black silhouette
+against it, rain lit as white streaks, wet ground a field of specular sparkle. `site-close` is
+untouched and still PASSES (meanY 0.02712).
 
----
+**The suggested one-line fix would have made the game worse, and the agent caught it.**
+`uParams.value.set(this._dt, 2.6, ...)` is a **tau of 2.6 s, not a rate of 2.6/s**. So
+`target * (1 + 11*flash)` steps instantly while the meter has not moved: the gain jumps ~12x and
+pins at `EXPOSURE_GAIN_MAX`. Simulated against measured constants, a real 120 ms strike would have
+rendered at exposure **3.74 against a pre-flash 0.899, on a scene already 11.7x brighter** — a
+white card with the camper invisible in it. In its words: *"the capture would pass and the game
+would get worse."* It instead compensates the METER'S RESPONSE, low-passed at the same tau, so the
+result is invariant at every timescale and `flash = 0` is bit-identical to the old path.
+
+**2. The dark bars are gone, and the cause was not any of the four I suggested.** LOD2 foliage was
+already fully lit, textured, mipped and anisotropic — it shares the *same material instance* as
+LOD0. The real cause: 34 quads per tree at 3.71 m x 4.90 m with long-axis elevation **-11 deg to
+-36 deg (below horizontal)**, spun through 360 deg of azimuth — and `alphaTest 0.085` sitting
+**below the card's ~0.106 mean alpha**, so once mip-averaged at 78-165 m *every card passed
+everywhere* and drew as a solid plane. Roughly **36,000 solid near-horizontal planes**. Fixed by
+giving LOD2 the impostor's crown-mass treatment with every card's long axis on +Y.
+
+**One open item from that work:** `ridge` now measures meanY 0.02981 against the 0.028 ceiling —
+6% over. The Postprocessing agent proved it is not theirs (`_meterFlash` reads exactly 1 there and
+the target is bit-identical), and points at the concurrent `Forest.js` change. Pulling ridge down
+would push `site-close` out of spec, so this needs judgement rather than a tweak.
 
 ## Top gaps, in priority order
 

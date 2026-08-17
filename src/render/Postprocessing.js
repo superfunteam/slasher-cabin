@@ -460,6 +460,54 @@ const NIGHT_METER_STATE = [
   'clear', 'clear', 'drizzle', 'windy-mist', 'rain', 'whiteout', 'storm', 'clear',
 ];
 
+/**
+ * The adaptation time constant, in seconds. Shared by the adapt pass (`FRAG_ADAPT`, via
+ * `uParams.y`) and by the lightning compensation below, and it MUST be one number: the
+ * compensation works by running a filter with the meter's own response, so if the two drift apart
+ * the compensation over- or under-shoots by exactly the amount they disagree.
+ */
+const METER_TAU = 2.6;
+
+/**
+ * THE FLASH ROW THE §3.1.1 TABLE DOES NOT HAVE, AND WHY IT IS A FILTER RATHER THAN A ROW.
+ *
+ * The meter is a full auto-exposure: `gain = target / meter`, and `meter` is an adapted average of
+ * the frame AFTER the scripted exposure has already been multiplied in. So once adaptation has
+ * converged the whole pipeline collapses to
+ *
+ *     frame mean luminance  ==  meter target
+ *
+ * for ANY scene and ANY scripted curve. Measured on the shipping build with `?shot=lightning`
+ * (`uLightning` pinned at 1.0): target 0.0225, captured mean Y 0.02702 — a full 4.5-intensity
+ * lightning key, and the frame lands on the clear-night key as if nothing had happened. The
+ * scripted §3.1.2 stop-down (`_lightningExp` -> 0.48) is cancelled by the same mechanism, so the
+ * deliberate exposure trade the bible asks for never reaches the screen either.
+ *
+ * The naive fix — multiply the target by a constant while `uLightning > 0` — fixes the capture and
+ * BREAKS THE GAME. `target` is a uniform: it steps instantly. `meter` has a 2.6 s tau, so a real
+ * 120 ms strike moves it by 1 - exp(-0.12/2.6) = 4.5%. Step the target 12x against a meter that
+ * moved 4.5% and the gain jumps 12x, pins at EXPOSURE_GAIN_MAX, and the money shot of §16 Shot 11
+ * — every surface within 200 m lit, the camp in silhouette, Dana one step closer — renders as a
+ * white card with nothing in it. The capture would look right and the game would look worse.
+ *
+ * So compensate the meter's OWN RESPONSE, not the flash. `_meterFlash` is the flash's disturbance
+ * to the metered signal run through a filter with the meter's tau, and dividing it back out makes
+ * the gain invariant to the flash AT EVERY TIMESCALE:
+ *
+ *     120 ms strike   `_meterFlash` has barely moved -> gain barely moves -> the flash lands on
+ *                     screen at full strength, times the scripted 0.48. What §3.1.2 asks for.
+ *     held pin        both converge -> the gain returns to EXACTLY its pre-flash value -> the
+ *                     capture shows the player's frame instead of a re-metered fiction.
+ *
+ * `LIGHTNING_METER_GAIN` is how much brighter the scene itself gets at `uLightning = 1`. Measured:
+ * pre-flash meter 0.04654, held-flash meter 0.26221 (5.634x) with the scripted curve contributing
+ * 0.8928/1.860 = 0.48 of that, so the scene alone is 5.634/0.48 = 11.74x, i.e. 1 + 10.74.
+ * Note the error budget: this constant only sets the STEADY STATE, which only a held pin ever
+ * reaches. A real strike is out of the sky before the filter has absorbed 5% of it, so getting
+ * this number wrong costs 5% of the error in the game and 100% of it only in the harness.
+ */
+const LIGHTNING_METER_GAIN = 10.74;
+
 /** Halton(2,3) — the TAA jitter sequence, phase-locked with the alpha hash (§10.3). */
 const HALTON = (() => {
   const h = (i, b) => { let f = 1, r = 0, n = i; while (n > 0) { f /= b; r += f * (n % b); n = Math.floor(n / b); } return r; };
@@ -1957,6 +2005,8 @@ export class Postprocessing {
     this._exposureTarget = EXPOSURE_BASE;
     this._exposureRate = 1 / 0.55;
     this._lightningExp = 1;
+    /** Lightning's disturbance to the metered signal, filtered at the meter's own tau. See above. */
+    this._meterFlash = 1;
     /** §3.1.1 row multiplier for the meter target. Derived from `state.night` + `weather:change`. */
     this._weatherScale = METER_TARGET_SCALE.clear;
     this._lastFog = 0;
@@ -2103,6 +2153,18 @@ export class Postprocessing {
     const rate = target < this._lightningExp ? (1 / 0.06) : (1 / 1.4);
     this._lightningExp += (target - this._lightningExp) * (1 - Math.exp(-this._dt * rate));
     this._flash = flash;
+
+    // --- and the meter's answer to it. `disturb` is everything the strike does to the signal the
+    // meter reads: the scene gets LIGHTNING_METER_GAIN brighter AND the scripted curve has already
+    // been multiplied into the metered frame (`uExposureIn` in `_renderExposure`), so both terms
+    // belong here. Filtered at METER_TAU it tracks the meter exactly, and `_meterTarget()` divides
+    // it back out. Seeded on the first frames for the same reason FRAG_ADAPT seeds itself there:
+    // the harness pins `uLightning` from frame zero, so a filter that starts at 1 would spend a
+    // full tau disagreeing with a meter that started converged.
+    const disturb = (1 + LIGHTNING_METER_GAIN * flash) * this._lightningExp;
+    this._meterFlash = this._frame <= 2
+      ? disturb
+      : this._meterFlash + (disturb - this._meterFlash) * (1 - Math.exp(-this._dt / METER_TAU));
 
     this._refreshWeatherScale(NaN);
 
@@ -2921,9 +2983,11 @@ export class Postprocessing {
     a.tLum.value = this._lum1.texture;
     a.tPrev.value = src.texture;
     a.uNearFar.value.set(this.ctx.camera?.near ?? 0.05, this.ctx.camera?.far ?? 1200);
-    // 2.6 s luminance tau: slow enough that walking past the campfire is a slow bloom-down rather
-    // than a camcorder's pump, which is the thing §3.1.2 was really objecting to.
-    a.uParams.value.set(this._dt, 2.6, 0.22, this._frame <= 2 ? 1 : 0);
+    // METER_TAU (2.6 s) luminance tau: slow enough that walking past the campfire is a slow
+    // bloom-down rather than a camcorder's pump, which is the thing §3.1.2 was really objecting
+    // to. It is a module constant because the lightning compensation in `update()` runs a filter
+    // with the same tau against this one, and a literal here would eventually drift from it.
+    a.uParams.value.set(this._dt, METER_TAU, 0.22, this._frame <= 2 ? 1 : 0);
     renderer.setRenderTarget(dst);
     this._adaptQuad.quad.render(renderer);
     this._adaptIndex = 1 - this._adaptIndex;
@@ -2943,11 +3007,20 @@ export class Postprocessing {
   _meterTarget() {
     const base = this._weatherScale;
     const ton = this.ctx?.state?.timeOfNight;
+    let scale;
     if (Number.isFinite(ton) && ton > 0.88) {
       const t = Math.min(1, (ton - 0.88) / 0.12);
-      return EXPOSURE_KEY * (base + (METER_TARGET_SCALE.dawn - base) * t);
+      scale = base + (METER_TARGET_SCALE.dawn - base) * t;
+    } else {
+      scale = Number.isFinite(base) ? base : 1;
     }
-    return EXPOSURE_KEY * (Number.isFinite(base) ? base : 1);
+    // The row the table does not have. §3.1.1 suspends its assert for a flash and 1.6 s of
+    // recovery, which is the bible saying a flash frame has no key — so the meter must not
+    // impose one. Multiplying the target by the meter's own filtered response to the strike
+    // holds `gain` at its pre-flash value for as long as the strike lasts, which is the whole
+    // point: `_lightningExp`'s 0.48 is a DELIBERATE trade (§3.1.1) and the trim was eating it.
+    const f = this._meterFlash;
+    return EXPOSURE_KEY * scale * (Number.isFinite(f) && f > 0 ? f : 1);
   }
 
   /**

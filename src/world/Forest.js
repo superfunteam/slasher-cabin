@@ -499,6 +499,89 @@ function emitCross(buf, p, up, side, w, h, nrm, taper = 0.55, tiled = false) {
     w, h, nrm.x, nrm.y, nrm.z, taper, tu, tv);
 }
 
+/** One card, always tiled at NEEDLE_TILE_M. Scratch-free: the caller owns the vectors. */
+function emitCardT(buf, p, up, side, w, h, nrm, taper) {
+  emitCard(buf, p.x, p.y, p.z, up.x, up.y, up.z, side.x, side.y, side.z,
+    w, h, nrm.x, nrm.y, nrm.z, taper, tileFor(w), tileFor(h));
+}
+
+/**
+ * THE LOD2 CROWN — the fix for "hundreds of hard dark bars over the fog".
+ *
+ * MEASURED at ?shot=lightning before this existed: `fir-l2-v0.foliage` carried 607 instances
+ * of 34 quads and `pine-l2-v0.foliage` 591 of 26 — about 36 000 quads on screen. Every one of
+ * them was 3.71 m x 4.90 m with UVs 0..1 (a single 1024^2 needle sprig stretched across 18 m2),
+ * and its LONG axis was the BRANCH direction. Fir droop is -0.30, so that axis measured 11-36
+ * degrees BELOW the horizon, at every azimuth. Two independent things then went wrong:
+ *
+ *  - ORIENTATION. A near-horizontal 4.9 m card, spun through 360 degrees of azimuth, projects
+ *    to a dash at every screen angle from horizontal to vertical. That is why the defect was
+ *    misfiled as rain and why hiding Weather changed nothing: rain there falls 0.2 degrees off
+ *    vertical and cannot produce a horizontal streak.
+ *  - OPACITY. `FOLIAGE_ALPHA_TEST['foliage-pine']` is 0.085 and the card's mean alpha is 0.106.
+ *    Sitting BELOW the mean is correct for LOD0, where a dozen small tiled cards overlap into a
+ *    needle mass. But a mip chain averages alpha toward that mean, and at 78-165 m every LOD2
+ *    card samples the coarsest mips — where alpha IS the mean, i.e. 0.106 > 0.085 EVERYWHERE.
+ *    So each quad passed in full and drew as a solid #131f1a plane, one per branch, with no
+ *    neighbour to overlap it. A solid dark plane on a lit fog wall is a scratch on the lens.
+ *
+ * The LOD3 impostor never had this problem, because it is three cards crossed about the
+ * VERTICAL. LOD2 is now built the same way with one tier of detail added: three through-axis
+ * planes tapered to the species silhouette, plus four whorl tiers of radial cards that lobe
+ * the cone's outline. **Every card's long axis is +Y.** The worst thing a card can now present
+ * is a vertical sliver, which reads as a stem; the union reads as a tree-shaped mass, which is
+ * all ART_DIRECTION section 1 asks of a distant conifer ("silhouette mass rather than
+ * individual leaves").
+ *
+ * The cards TILE. Untiled, the coarse mip of a 5 m card is a flat 0.106 and its edge is a hard
+ * straight line — hard is the other half of the complaint. Tiled ~4x, that same mip still
+ * carries needle variance, so the silhouette dissolves into speckle instead of ending at a
+ * ruled edge, and the tree loses contrast into the fog while keeping its shape.
+ *
+ * 15 quads per fir against 34, and 15 per pine against 26: the band gets cheaper as well as
+ * quieter. Draw calls are untouched — the bucket count does not change.
+ */
+function emitCrownMass(buf, rand, isFir, t0, crown0, H) {
+  const y0 = t0 * H;
+  const hc = H * 0.99 - y0;
+  const R = crown0 * (isFir ? 0.98 : 0.88);
+  const up = new THREE.Vector3(0, 1, 0);
+  const side = new THREE.Vector3(), nrm = new THREE.Vector3(), p = new THREE.Vector3();
+
+  // Three planes through the trunk axis. These carry the silhouette; a fir tapers almost to a
+  // point, a pine's upswept crown stays blunt.
+  const taper = isFir ? 0.13 : 0.34;
+  for (let k = 0; k < 3; k++) {
+    const a = (k / 3) * Math.PI + rand.range(-0.14, 0.14);
+    const ca = Math.cos(a), sa = Math.sin(a);
+    side.set(ca, 0, sa);
+    // Perpendicular to the card, tilted up so the moon rims the crown's top edge rather than
+    // lighting the plane flat-on (ART_DIRECTION: moonlight rims the canopy, it does not fill).
+    nrm.set(sa, 0.26, -ca).normalize();
+    p.set(0, y0, 0);
+    emitCardT(buf, p, up, side, R * 2, hc, nrm, taper);
+  }
+
+  // Four whorl tiers. Each card stands VERTICAL in the plane of its own branch, anchored just
+  // off the trunk and reaching ~1.3x the cone radius, so the outline is lobed rather than a
+  // ruled triangle. Height shrinks with the tier so nothing spikes above the leader.
+  const tiers = 4;
+  for (let w = 0; w < tiers; w++) {
+    const t = (w + 0.28) / tiers;
+    const rr = R * Math.pow(1 - t * 0.94, isFir ? 0.80 : 0.55) * rand.range(0.78, 1.04);
+    const ht = (hc / tiers) * 1.85 * (1 - t * 0.72);
+    const y = y0 + hc * t - ht * 0.22;
+    for (let b = 0; b < 3; b++) {
+      const a = w * PHYLLO + (b / 3) * TAU + rand.range(-0.20, 0.20);
+      const ca = Math.cos(a), sa = Math.sin(a);
+      side.set(ca, 0, sa);              // radial: the card lies in its branch's VERTICAL plane
+      nrm.set(-sa, 0.34, ca).normalize();
+      p.set(ca * rr * 0.34, y, sa * rr * 0.34);
+      emitCardT(buf, p, up, side, rr * 1.9, ht, nrm, 0.42);
+    }
+  }
+}
+
 export class Forest {
   constructor(ctx) {
     this.ctx = ctx ?? null;
@@ -1198,6 +1281,15 @@ export class Forest {
     const t0 = isFir ? 0.24 : 0.46;
     const droop = isFir ? -0.30 : 0.12;
     const crown0 = (isFir ? 0.190 : 0.170) * H;
+
+    /**
+     * LOD2 GETS NO BRANCH-ALIGNED CARDS AT ALL. `droop` above is the whole problem: it points
+     * the card's long axis 11-36 degrees below horizontal, and at 78-165 m the alpha cutout
+     * cannot cut anything out of the coarse mip, so each one lands as a solid dark dash on the
+     * fog. See emitCrownMass for the measurement and the replacement.
+     */
+    if (lod >= 2) { emitCrownMass(fol, rand, isFir, t0, crown0, H); return r0; }
+
     const up = new THREE.Vector3(), side = new THREE.Vector3();
     const nrm = new THREE.Vector3(), base = new THREE.Vector3();
     const core = new THREE.Vector3();
@@ -1259,17 +1351,17 @@ export class Forest {
             emitCross(fol, core, up, side, L * 0.56 * wob, L * 0.36 * wob, nrm,
               0.44 + 0.30 * t, true);
           }
-        } else if (lod === 1) {
-          // Mid-ground wants mass, not parallax: two long cards, untiled so the mip chain keeps
-          // them alive out to the 78 m ring.
+        } else {
+          // LOD1 (34-78 m). Mid-ground wants mass, not parallax: two long cards, untiled so the
+          // mip chain keeps them alive out to the 78 m ring. These are branch-aligned like
+          // LOD0's, and they get away with it where LOD2's did not because there are 8 whorls x
+          // 5 branches x 2 crosses = 160 of them per tree and they overlap into a mass instead
+          // of standing alone. Do not thin this band without re-reading emitCrownMass.
           emitCross(fol, base, up, side, L * (isFir ? 0.80 : 0.92), L * 1.06, nrm,
             isFir ? 0.34 : 0.46);
           core.set(base.x + up.x * L * 0.50, base.y + up.y * L * 0.50,
             base.z + up.z * L * 0.50);
           emitCross(fol, core, up, side, L * 0.52, L * 0.62, nrm, 0.30);
-        } else {
-          emitCross(fol, base, up, side, L * (isFir ? 0.86 : 0.96), L * 1.10, nrm,
-            isFir ? 0.34 : 0.46);
         }
       }
     }
