@@ -30,6 +30,13 @@
  *   this.moonVisibility  number 0..1     getter: (1 - occlusion), zero when the moon is down.
  *   this.lightningLevel  number 0..1     the current flash envelope value.
  *   this.cloudCover      number 0..1     current coverage; setCloudCover(v, immediate) to force.
+ *   this.occlusionBias   number 0..1     WRITABLE. Added to the computed occlusion before the
+ *                                        low-pass, so a caller can put cloud over the moon that
+ *                                        the drifting field did not happen to supply. Drives the
+ *                                        dome, the stars, the key light, the sky bounce and the
+ *                                        fog through the SAME path as real cloud, so nothing can
+ *                                        desynchronise. 0 in play; Menu uses it on the title
+ *                                        screen. Whoever sets it owns putting it back.
  *   this.flash(i)        method          fire a ~120 ms 3-stage lightning spike that lights the
  *                                        whole scene and writes Materials uLightning.
  *
@@ -728,6 +735,16 @@ export class Sky {
     this.moonPosition = new THREE.Vector3();
     /** 0..1 fraction of the moon currently behind cloud. */
     this.moonOcclusion = 0;
+    /**
+     * 0..1 added to the sampled occlusion before the low-pass. Lets a caller drive a cloud
+     * across the moon when the field did not happen to put one there — at the cover the attract
+     * screen runs (~0.25) the sampled value sits at exactly 0 for minutes at a time, so the key
+     * light, the sky bounce and the fog are all perfectly flat. Additive rather than a setter
+     * because it must go through `_updateOcclusion`'s low-pass and reach every consumer, and
+     * because it leaves the real cloud field authoritative whenever it is 0 (which is always,
+     * in play).
+     */
+    this.occlusionBias = 0;
     /** 0..1 illuminated fraction of the disc (waxing gibbous across the seven nights). */
     this.moonPhase = 0.72;
     /** The moon key light. Null until init(). */
@@ -1329,7 +1346,8 @@ export class Sky {
       sum += cloudDensityJS(_v4.x, _v4.y, _v4.z, this._driftX, this._driftY, cov, this._oct);
       wsum += 1;
     }
-    const target = clamp01(sum / wsum);
+    const bias = Number.isFinite(this.occlusionBias) ? this.occlusionBias : 0;
+    const target = clamp01(sum / wsum + bias);
     // Light low-pass so a single-frame noise spike never strobes the key light. Framerate
     // independent: a fixed per-frame lerp would make the darkness event arrive twice as fast
     // at 120 Hz as at 60.

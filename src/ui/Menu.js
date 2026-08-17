@@ -1260,6 +1260,11 @@ export class Menu {
     this._camCx = 0; this._camCy = 0; this._camCz = 0;
     this._camReady = false;
 
+    // Title-screen "signs of life" — see _stepSignsOfLife(). Scalars only, same rule.
+    this._liveT = 0;
+    this._liveArmed = false;
+    this._lampFuelHold = -1;
+
     this._imgCover = null;      // pause sheet, deferred — a plain URL is enough behind a scrim
     this._imgCard = null;       // night card, deferred — likewise
 
@@ -1453,6 +1458,10 @@ export class Menu {
       Math.atan2(-dx, -dz) + nx,
       Math.sin(t * 0.29) * 0.0035,
     );
+
+    // Reached only on the title screen and only when no capture is posed — both guards are
+    // above, and the `Shots.active` return is why this is here rather than in its own hook.
+    this._stepSignsOfLife(step);
   }
 
   resize(_w, _h) {
@@ -1470,6 +1479,10 @@ export class Menu {
 
   dispose() {
     if (this._disposed) return;
+    // Before `_disposed` is set: the release reads systems off ctx and must not be skipped by
+    // its own guards. A Menu that leaves a cloud parked over the moon is a Menu that broke the
+    // game it was torn down from.
+    try { this._releaseSignsOfLife(); } catch (e) { Log.warn('Menu: signs-of-life release failed.', e); }
     this._disposed = true;
 
     for (const off of this._unsubs) { try { off(); } catch { /* noop */ } }
@@ -1569,6 +1582,7 @@ export class Menu {
   /** Close whatever is up and give the world back its pointer. */
   hide() {
     if (this._disposed) { this.screen = null; return; }
+    this._releaseSignsOfLife();
     if (!this._root || this.screen === null) { this.screen = null; return; }
     const wasPaused = this._enginePaused;
     this.screen = null;
@@ -2121,6 +2135,9 @@ export class Menu {
 
   _open(name, html, opts) {
     if (this._disposed) return;
+    // Before the headless early-return below, so the world is never left modulated by a screen
+    // change that happened without a DOM.
+    if (name === 'title') this._armSignsOfLife(); else this._releaseSignsOfLife();
     // No DOM (headless / construction failed): record the screen so state queries stay coherent,
     // but never claim to have opened anything.
     if (!this._root || !this._stage) { this.screen = name; return; }
@@ -3257,6 +3274,120 @@ export class Menu {
       if (Number.isFinite(h)) this._camCy = h;
     }
     this._camReady = true;
+  }
+
+  /* ------------------------------------------------------ title screen: signs of life
+   *
+   * MEASURED FIRST, because the obvious answer was wrong twice over.
+   *
+   * The brief was "put some flicker on the fire". There is no fire in this frame. The title
+   * camera orbits `Terrain.buildSiteCenter` (-140, 128); `Props.firePosition` is the camp fire
+   * at (124, -14) — 302 m away, behind the whole forest and ~0.5 of fog. It also already has a
+   * three-octave flicker of its own (`Props.update`, intensity 26 x (1 +/- 0.18) plus a colour
+   * lerp and a positional jitter), and so does the lantern (`Flashlight._stepFlicker`, three
+   * octaves at 0.9 / 3.7 / 11.5 Hz, +/-8.7% at rest). Modulating either would have been
+   * duplicated work that changed not one pixel of this screen.
+   *
+   * And the lantern is not lit here either: `NightManager._lightTheLamp` lights it at the start
+   * of NIGHT 1, deliberately, and the title screen is `phase === 'menu'`. Measured on a pinned
+   * camera pose over 135 s of a normal session, `Flashlight.on` stayed false and the attract
+   * frame read %warm 0.02-0.04 — three hundredths of one percent of the pixels, i.e. nothing
+   * a person would call a warm light. (Start a night behind the menu and the lamp lights and
+   * the same frame reads %warm 3.9, which is how the confusion arose in the first place.)
+   *
+   * So the whole picture is moonlight, fog and silhouette — and that was completely static.
+   * Measured over 60 s with the pose pinned and nothing else changed:
+   *
+   *     moonOcclusion      0.0000 -> 0.0000   (dead flat; the sampled cloud field never
+   *                                            puts anything over the moon at cover ~0.25)
+   *     moonLight.intensity  0.06376 -> 0.06388   +0.19%
+   *     hemiLight.intensity  0.37454 -> 0.37207   -0.66%
+   *     frame meanY          0.04063 / 0.04054 / 0.04152 at t = 20 / 40 / 60 s
+   *
+   * Sky HAS the mechanism — it drifts the cloud field and resamples occlusion every frame — it
+   * just never fires at this cover. So the one honest change is to put a cloud over the moon,
+   * through Sky's own model, and let the dome, the stars, the key light, the sky bounce and the
+   * fog all respond together the way they already know how to. That is `Sky.occlusionBias`.
+   *
+   * RESTRAINT IS THE BRIEF. Three cosine octaves at deliberately incommensurate periods
+   * (73.0 / 41.3 / 26.9 s), all raised so the bias is never negative, summing to a peak of
+   * 0.144 and a mean of 0.072. Through Sky's `1 - 0.90 * occ` that is a key light between
+   * 0.870 and 1.000 of nominal, and through `1 - 0.42 * occ` a sky bounce between 0.940 and
+   * 1.000. No period is short enough to read as a cycle and no two share a common multiple
+   * inside any session a person will sit through, so it never repeats audibly-in-the-eye.
+   *
+   * NO per-frame randomness anywhere (ARCHITECTURE §6): the whole thing is a pure function of
+   * `_liveT`, which is a pure function of the frame deltas since the title opened. Two runs that
+   * reach the same `_liveT` light the scene identically, which is what screenshot regression
+   * needs. `Shots.active` returns out of update()
+   * above, so `_liveT` stops advancing and the bias holds at a fixed phase for a posed capture
+   * — HANDOFF failure #4 (a posed shot that drifted because the lantern burned down) is exactly
+   * the class of bug this avoids.
+   */
+
+  /** Latch the world state we are about to modulate. Called from `_open('title', ...)`. */
+  _armSignsOfLife() {
+    if (this._disposed || this._liveArmed) return;
+    this._liveArmed = true;
+    this._liveT = 0;
+
+    // The wick burns 0.55 units/s whenever it is lit, tank included — 3:02 end to end. It is
+    // normally unlit here, but a session that reaches the title with a lit lamp (returning to
+    // the menu mid-night) would otherwise spend the player's kerosene on an attract screen, and
+    // would make the attract screen itself dim over its first three minutes. Hold the level we
+    // found and give it back untouched on the way out. Flashlight does the same thing for
+    // `Shots.active`; this is the same defect on a screen the harness never poses.
+    const lamp = this.ctx.systems?.get?.('Flashlight');
+    this._lampFuelHold = (lamp && Number.isFinite(lamp.fuelUnits)) ? lamp.fuelUnits : -1;
+  }
+
+  /**
+   * Put everything back. Called on any screen change away from the title, on hide(), and on
+   * dispose(). Idempotent — nothing here cares how many times it runs.
+   */
+  _releaseSignsOfLife() {
+    if (!this._liveArmed) return;
+    this._liveArmed = false;
+
+    const sky = this.ctx.systems?.get?.('Sky');
+    if (sky && 'occlusionBias' in sky) sky.occlusionBias = 0;
+
+    const lamp = this.ctx.systems?.get?.('Flashlight');
+    if (lamp && this._lampFuelHold >= 0 && typeof lamp.setFuelUnits === 'function') {
+      lamp.setFuelUnits(this._lampFuelHold);
+    }
+    this._lampFuelHold = -1;
+  }
+
+  /**
+   * One frame of it. Scalar arithmetic on preallocated fields — no allocation, no RNG.
+   * @param {number} dt seconds, already clamped by update().
+   */
+  _stepSignsOfLife(dt) {
+    if (!this._liveArmed) {
+      // Defensive: a title opened before this class armed it (a subclass, a test, a screen
+      // restored by hand) still gets the effect rather than silently getting nothing.
+      this._armSignsOfLife();
+    }
+    this._liveT += dt;
+    const t = this._liveT;
+
+    // A cloud crossing the moon. Raised cosines so each term is 0..2a and the sum never asks
+    // Sky for a negative occlusion (which would clamp and flatten the trough into a plateau).
+    const occ = 0.052 * (1 - Math.cos(t * 0.086063))     // 73.0 s
+      + 0.014 * (1 - Math.cos(t * 0.152137))             // 41.3 s
+      + 0.006 * (1 - Math.cos(t * 0.233573));            // 26.9 s
+
+    const sky = this.ctx.systems?.get?.('Sky');
+    if (sky && 'occlusionBias' in sky) sky.occlusionBias = occ;
+
+    // Hold the tank. Cheap, and it is the difference between an attract screen that looks the
+    // same at 20 s and at 5 min and one that does not.
+    const lamp = this.ctx.systems?.get?.('Flashlight');
+    if (lamp && this._lampFuelHold >= 0 && lamp.on && typeof lamp.setFuelUnits === 'function'
+      && lamp.fuelUnits < this._lampFuelHold) {
+      lamp.setFuelUnits(this._lampFuelHold);
+    }
   }
 
   _sessionSeconds() {
