@@ -14,14 +14,22 @@
  *
  * Usage: node luma.mjs <file.png> [more.png ...]
  */
-import { readFileSync } from 'node:fs';
+import { readFileSync, existsSync, rmSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { basename } from 'node:path';
 
 /** Decode a PNG to raw RGBA via macOS sips (no npm deps). */
 function decode(path) {
+  // A missing input used to leave the PREVIOUS image sitting in the temp file, so this returned
+  // the last successfully decoded picture — in practice the calibration reference — and the tool
+  // reported the keyart's numbers for a file that did not exist. An agent caught it only because
+  // the row was byte-identical to keyart-site.png. Fail loudly instead; a measurement tool that
+  // silently substitutes a different subject is worse than no tool.
+  if (!existsSync(path)) throw new Error(`no such file: ${path}`);
   const tmp = `/tmp/_luma_${process.pid}.tiff`;
+  rmSync(tmp, { force: true });
   execFileSync('sips', ['-s', 'format', 'tiff', path, '--out', tmp], { stdio: 'ignore' });
+  if (!existsSync(tmp)) throw new Error(`sips produced no output for: ${path}`);
   const buf = readFileSync(tmp);
   // Minimal TIFF walk: find StripOffsets/width/height from the IFD.
   const le = buf.readUInt16LE(0) === 0x4949;
