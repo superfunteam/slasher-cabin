@@ -89,6 +89,8 @@ const _m4a = new THREE.Matrix4();
 const _m4b = new THREE.Matrix4();
 const _v2a = new THREE.Vector2();
 const _v3a = new THREE.Vector3();
+const _v3b = new THREE.Vector3();
+const _v3c = new THREE.Vector3();
 
 /* --------------------------------------------------------------------------------------------
  * EXPOSURE CONSTANTS — the single most consequential numbers in this file.
@@ -132,18 +134,99 @@ const EXPOSURE_BASE = 0.62;
 /** Scene-radiometry calibration. 0.62 * 3.0 = 1.86 total; the window then covers 1.30 .. 3.72. */
 const EXPOSURE_CALIBRATION = 3.0;
 /**
- * Target for the compressed meter. Solved by pushing four frames — keyart-site, keyart-lake and
- * our own site-close and ridge captures — back through this composite and asking what meter value
- * each holds at the exposure that lands its average frame luminance on §3.1.1. The key art answers
- * 0.077/0.083; our own frames answer 0.101/0.099. The difference is distribution SHAPE, not
- * calibration: our frames are a near-black field plus a small very bright source, so the same mean
- * sits on fewer, brighter pixels. 0.090 (the midpoint) measured 0.0176 / 0.0173 / 0.0111 average
- * frame luminance on site-close / ridge / camp-fire; two of the three sat under their window, so
- * the number that our own content actually asks for is the right one.
+ * Target for the compressed meter.
+ *
+ * RE-DERIVED BY SWEEP, not by inference. The previous 0.100 was solved by pushing reference images
+ * back THROUGH this composite — a reasonable method that stopped being valid the moment the
+ * composite changed (the pivot and the human-light axis below both move the relationship between
+ * scene radiance and display luminance). It was also solved against a scene that has since been
+ * relit twice.
+ *
+ * The replacement was measured forward, on the live build at `?shot=site-close&quality=ultra`, by
+ * holding the meter reading fixed (0.0764) and stepping the target, then reading the FINAL 8-bit
+ * frame with assertLuma() at each step:
+ *
+ *     key    total exp   avg luma   P25       P50       P75
+ *     0.100  2.44        0.04471    0.00631   0.01223   0.03776
+ *     0.080  1.95        0.03657    0.00547   0.00991   0.02950
+ *     0.065  1.58        0.03020    0.00491   0.00827   0.02337
+ *     0.055  1.34        0.02584    0.00457   0.00734   0.01935
+ *     0.045  1.10        0.02129    0.00427   0.00646   0.01540
+ *     0.036  0.88        0.01723    0.00405   0.00577   0.01201
+ *
+ * keyart-site.png, measured the same way, is avg 0.02184 / P50 0.00693 / P75 0.01600. The curve
+ * crosses all three of those between 0.045 and 0.055, and it is the only row in the sweep that
+ * matches the reference on more than one statistic at once. 0.048 sits there with a little
+ * headroom for the highlights (see BLOOM_INTENSITY, which is where the reference's clipped 0.34%
+ * of frame now comes from — our flame is not authored hot enough to clip on exposure alone).
+ *
+ * §3.1.1's window for this frame is 0.018-0.028. 0.100 put it at 0.045: a stop and a half over its
+ * own document, every frame, on the game's hero shot.
  */
-const EXPOSURE_KEY = 0.100;
-const EXPOSURE_GAIN_MIN = 0.70;
-const EXPOSURE_GAIN_MAX = 2.00;
+const EXPOSURE_KEY = 0.048;
+/**
+ * THE WINDOW, widened — measured, not loosened for taste.
+ *
+ * At 0.70..2.00 the trim spanned 1.5 stops. The file's own calibration note records a scene-
+ * radiometry offset that varies by ~1.4 stops BETWEEN SHOTS, so a 1.5-stop window has almost no
+ * headroom left once it has absorbed that variance, and the loop pins. Measured on the current
+ * build at `?shot=site-close&quality=ultra`: the frame ran at gain 1.18 and delivered an average
+ * frame luminance of 0.0362 against §3.1.1's 0.015-0.026 window for this weather — 39% over the
+ * ceiling — with the correction it needed (~0.62x) sitting just outside the old floor.
+ *
+ * A second measurement moved the floor again, from 0.42 to 0.34. The `ridge` shot pins fog at
+ * 0.65 and, once the froxel volume has actually converged (it has not, in any capture taken
+ * immediately after a resize — see assertLuma), that frame measures avg 0.0836: inside §3.1.1's
+ * WHITEOUT window, on a night the table calls clear. The trim was already pinned at its floor and
+ * had no authority left. It is deliberately NOT fixed by reclassifying the frame as a whiteout —
+ * that raises the target 4.35x and would make an over-bright frame brighter still — it is fixed by
+ * giving the floor somewhere to go. Frames that are not pinned (site-close runs at gain 0.62) do
+ * not move at all.
+ *
+ * 0.34..2.30 is 2.76 stops. It is still a WINDOW in both directions and it still solves toward
+ * §3.1.1's table rather than toward 'brighter', so it cannot produce a day-bright night: to get
+ * there it would have to be told that day-bright is what the bible asks for.
+ */
+const EXPOSURE_GAIN_MIN = 0.34;
+const EXPOSURE_GAIN_MAX = 2.30;
+
+/**
+ * §12.6 grain size: 1.35 px at 1080p, scaled with resolution so a grain stays physically constant.
+ * The scale used to be floored at 0.75, which let a 900p capture render 1.01 px cells — i.e. sub-
+ * pixel noise, which an 8-bit encode and a display resample both eat. The floor is now 1.0: grain
+ * may grow with resolution, never shrink below the spec'd physical size.
+ */
+const GRAIN_PX = 1.35;
+/** Mid-density granularity bump — see the amplitude block in FRAG_COMPOSITE. */
+const GRAIN_MID = 0.017;
+
+/* --------------------------------------------------------------------------------------------
+ * BLOOM — "bite, do not smear".
+ *
+ * §12.2 gives threshold 1.15 / knee 0.35 / intensity 0.055 on the stated assumption that a flame
+ * is authored 'at 8-13 scene-linear'. Measured on the current build it is not: at
+ * `?shot=site-close&quality=ultra` the brightest 0.1% of the FINAL frame sat at 0.368 relative
+ * luminance and 0.000% of the frame was above 0.5, against the reference frame's 0.855 and 0.340%.
+ * Nothing in the image was over-range, so a 1.15 threshold was subtracting from a signal that
+ * never arrived and the lantern shipped with no halo at all.
+ *
+ * Threshold drops to where the flame actually is; the KNEE is what keeps this from being a screen
+ * glow — it widens from 0.35 to 0.55 so the transition into bloom is soft and only the flame and
+ * the hottest 20 cm of timber around it accumulate through the mip chain. The Karis average in the
+ * prefilter (unchanged) is what stops a single blown rain streak firefly-ing across all seven mips.
+ * ------------------------------------------------------------------------------------------ */
+const BLOOM_THRESHOLD = 0.72;
+const BLOOM_KNEE = 0.55;
+const BLOOM_INTENSITY = 0.260;
+
+/**
+ * SSCS blend strength in the resolve. Not 1.0: the trace does not know WHICH light lit the pixel
+ * (there is no per-pixel light index in a forward build, §3.6 assigns lights per MESH), so a seam
+ * traced against the lantern is applied to a pixel that may be moon-lit. 0.62 is the value at
+ * which the seam under a seated part reads at 2 m and a mis-attributed occlusion is below the
+ * §4.2 contrast the player is asked to search by.
+ */
+const SSCS_STRENGTH = 0.62;
 
 /**
  * §3.1.1 asserts a DIFFERENT average-luminance window per weather state, because a foggy night is
@@ -438,6 +521,114 @@ void main() {
 }
 `;
 
+/* ------------------------------------------------------------------ 2c. SSCS ----------------- */
+/**
+ * SCREEN-SPACE CONTACT SHADOWS. §12 pass 5, §3.5: 'non-negotiable at high/ultra ... without them
+ * every dropped bracket floats and the game reads as a student demo'. It was not in the stack.
+ *
+ * A shadow map, at any resolution this build can afford, cannot resolve the last few centimetres
+ * where an object meets the ground — that is exactly the range where its texel footprint and its
+ * depth bias are both larger than the gap being resolved, which is why a bracket lying in the mud
+ * has no seam under it and reads as a decal. This marches the depth buffer instead: 0.35 m of
+ * trace, in view space, from the surface toward the light, and any geometry the ray passes behind
+ * within a thin slab occludes it.
+ *
+ * Two lights, and only two, because those are the only two that reach the ground near the player:
+ * the moon (a direction) and the lantern (a position, so the trace direction is per-pixel and the
+ * seam under a part points away from the lamp the way the eye expects). The lantern is the one
+ * that matters: it is held low and left (§3.2), so everything it lights has a bottom-up shadow
+ * direction and every contact seam it makes is in frame.
+ */
+const FRAG_SSCS = COMMON + /* glsl */`
+uniform sampler2D tDepth;
+uniform sampler2D tNormal;
+uniform sampler2D tNoise;
+uniform mat4 uProj;
+uniform mat4 uProjInv;
+uniform vec2 uNoiseScale;
+uniform vec2 uNearFar;
+uniform vec4 uMoon;      // xyz: view-space direction TOWARD the moon. w: 1 if it should trace
+uniform vec4 uLamp;      // xyz: view-space position of the lantern. w: 1 if it should trace
+uniform vec4 uParams;    // maxTrace(m), thickness(m), frame, fadeDistance(m)
+
+#ifndef SSCS_STEPS
+  #define SSCS_STEPS 12
+#endif
+
+// One trace. Returns 0 (fully occluded) .. 1 (clear).
+float scTrace( vec3 P, vec3 N, vec3 L, float jitter, float maxT, float thickness ) {
+  // Slope-scaled start offset. A surface almost edge-on to the light self-intersects on step 1
+  // otherwise, and self-intersection here reads as a black rim, not as a shadow.
+  float ndl = max( dot( N, L ), 0.0 );
+  vec3 origin = P + N * ( 0.012 + 0.030 * ( 1.0 - ndl ) );
+
+  float stepLen = maxT / float( SSCS_STEPS );
+  float occ = 0.0;
+
+  for ( int i = 0; i < SSCS_STEPS; i++ ) {
+    float t = ( float( i ) + jitter ) * stepLen;
+    vec3 sp = origin + L * t;
+
+    vec4 clip = uProj * vec4( sp, 1.0 );
+    if ( clip.w <= 0.0 ) break;
+    vec2 uv = ( clip.xy / clip.w ) * 0.5 + 0.5;
+    if ( uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0 ) break;
+
+    float sd = texture2D( tDepth, uv ).x;
+    if ( sd >= 0.999999 ) continue;                     // sky occludes nothing
+    vec3 S = scViewPos( uv, sd, uProjInv );
+
+    // Both z are negative. S.z > sp.z means the depth buffer has a surface in FRONT of the ray,
+    // i.e. the ray has gone behind something. 'thickness' is what stops a tree trunk 40 m away
+    // from being treated as an infinitely deep occluder of the mud in front of it.
+    float diff = S.z - sp.z;
+    if ( diff > 0.002 && diff < thickness ) {
+      // Contact-weighted: an occluder found on the first step is a hard seam, one found at the
+      // end of the trace is the soft tail of a penumbra. This is the whole reason the effect
+      // reads as CONTACT rather than as a second, smaller ambient occlusion.
+      occ = max( occ, 1.0 - t / maxT );
+    }
+  }
+
+  return 1.0 - clamp( occ, 0.0, 1.0 );
+}
+
+void main() {
+  float d = texture2D( tDepth, vUv ).x;
+  if ( d >= 0.999999 ) { gl_FragColor = vec4( 1.0 ); return; }
+
+  vec3 N = texture2D( tNormal, vUv ).xyz * 2.0 - 1.0;
+  if ( dot( N, N ) < 0.25 ) { gl_FragColor = vec4( 1.0 ); return; }
+  N = normalize( N );
+
+  vec3 P = scViewPos( vUv, d, uProjInv );
+
+  // A 0.35 m trace is sub-pixel past ~30 m and returns nothing but noise there.
+  float dist = -P.z;
+  float fade = 1.0 - smoothstep( uParams.w * 0.6, uParams.w, dist );
+  if ( fade <= 0.01 ) { gl_FragColor = vec4( 1.0 ); return; }
+
+  float jitter = texture2D( tNoise, gl_FragCoord.xy * uNoiseScale + uParams.z * 0.618034 ).y;
+
+  float vis = 1.0;
+  if ( uMoon.w > 0.5 && dot( N, uMoon.xyz ) > 0.02 ) {
+    vis = min( vis, scTrace( P, N, normalize( uMoon.xyz ), jitter, uParams.x, uParams.y ) );
+  }
+  if ( uLamp.w > 0.5 ) {
+    vec3 toLamp = uLamp.xyz - P;
+    float lampDist = length( toLamp );
+    if ( lampDist > 0.05 && lampDist < 18.0 ) {
+      vec3 L = toLamp / lampDist;
+      if ( dot( N, L ) > 0.02 ) {
+        vis = min( vis, scTrace( P, N, L, jitter, uParams.x, uParams.y ) );
+      }
+    }
+  }
+
+  gl_FragColor = vec4( mix( 1.0, vis, fade ), 0.0, 0.0, 1.0 );
+}
+`;
+
 /* ------------------------------------------------------------------ 3. SSR ------------------- */
 const FRAG_SSR = COMMON + /* glsl */`
 uniform sampler2D tScene;
@@ -531,27 +722,37 @@ void main() {
 /* ------------------------------------------------------------------ 4. luminance + adapt ----- */
 const FRAG_LUM = COMMON + /* glsl */`
 uniform sampler2D tDiffuse;
-uniform vec2 uTexel;
-uniform float uSpan;        // taps per axis
+uniform vec2 uCell;         // the UV footprint of ONE output texel. See the note below.
 uniform float uExposureIn;  // the scripted*calibrated exposure the meter is solving around
 
 // TRANSFORM stage. Scene HDR -> 64x64 of compressed luminance. This is the ONLY stage that
 // applies scMeterCompress(); the reduction below is a plain mean, which is why mean-of-means is
 // exact. Running one shader for both stages is what silently pinned the old metric (see the
 // exposure block at the top of this file).
+//
+// RESOLUTION INDEPENDENCE, and this was a real bug. The tap offsets used to be
+// 'o * uSpan * uTexel' with uSpan = 8 and uTexel = 1 / sceneWidth, i.e. each of the 4096 output
+// texels sampled an 8-SOURCE-PIXEL neighbourhood. The output grid steps 1/64 of the image, so the
+// meter only ever looked at 8 pixels out of every 25 at 1600 wide and 8 out of every 40 at 2560:
+// it sampled 32% of the frame at one resolution and 20% at another, and it sampled a DIFFERENT
+// 32% in x than in y on any non-square target. On a frame that is a near-black field plus one
+// small very bright lantern, which is every frame in this game, that aliasing moved the metric by
+// a full stop between the 2560x1440 canvas and the 1600x900 capture -- the same scene, graded two
+// stops apart depending on how it was being looked at.
+//
+// uCell is now the UV footprint of one output texel (1/64, 1/64), so the 8x8 taps tile that cell
+// exactly and the 64x64 target is a true, complete, aspect-correct average of the whole frame.
 void main() {
   float sum = 0.0;
-  float n = 0.0;
   for ( int y = 0; y < 8; y++ ) {
     for ( int x = 0; x < 8; x++ ) {
       vec2 o = ( vec2( float( x ), float( y ) ) + 0.5 ) / 8.0 - 0.5;
-      vec2 uv = clamp( vUv + o * uSpan * uTexel, vec2( 0.001 ), vec2( 0.999 ) );
+      vec2 uv = clamp( vUv + o * uCell, vec2( 0.001 ), vec2( 0.999 ) );
       float l = scLuma( max( texture2D( tDiffuse, uv ).rgb, vec3( 0.0 ) ) );
       sum += scMeterCompress( max( l, 0.0 ) * uExposureIn );
-      n += 1.0;
     }
   }
-  gl_FragColor = vec4( sum / n, 0.0, 0.0, 1.0 );
+  gl_FragColor = vec4( sum / 64.0, 0.0, 0.0, 1.0 );
 }
 `;
 
@@ -624,8 +825,9 @@ uniform sampler2D tScene;
 uniform sampler2D tAO;
 uniform sampler2D tSSR;
 uniform sampler2D tFog;
+uniform sampler2D tSSCS;
 uniform vec2 uTexel;
-uniform vec4 uParams;    // aoStrength, ssrStrength, exposureHint, fogEnabled
+uniform vec4 uParams;    // aoStrength, ssrStrength, exposureHint, sscsStrength
 
 void main() {
   vec3 col = max( texture2D( tScene, vUv ).rgb, vec3( 0.0 ) );
@@ -636,6 +838,18 @@ void main() {
   float lit = clamp( scLuma( col ) * uParams.z, 0.0, 4.0 );
   float aoW = uParams.x * ( 1.0 - smoothstep( 0.30, 1.60, lit ) );
   col *= mix( 1.0, ao, aoW );
+
+  // --- screen-space contact shadows (§3.5). Unlike AO this is a DIRECT-light occlusion, so it is
+  // deliberately NOT weighted down in bright pixels: the lantern pool is precisely where a
+  // contact seam has to appear, and backing it off there would delete the effect exactly where
+  // §4.1's Confirm band asks the object to 'read as a seated solid, not a decal'. Softened by a
+  // 4-tap cross because the trace runs at half res and its edge would otherwise stair-step.
+  float cs = texture2D( tSSCS, vUv ).x;
+  cs += texture2D( tSSCS, vUv + vec2( uTexel.x * 1.5, 0.0 ) ).x;
+  cs += texture2D( tSSCS, vUv - vec2( uTexel.x * 1.5, 0.0 ) ).x;
+  cs += texture2D( tSSCS, vUv + vec2( 0.0, uTexel.y * 1.5 ) ).x;
+  cs += texture2D( tSSCS, vUv - vec2( 0.0, uTexel.y * 1.5 ) ).x;
+  col *= mix( 1.0, clamp( cs * 0.2, 0.0, 1.0 ), uParams.w );
 
   // --- screen-space reflections, softened by a 4-tap cross (stands in for roughness blur).
   vec4 s0 = texture2D( tSSR, vUv );
@@ -938,8 +1152,10 @@ uniform vec4 uGradeGamma;
 uniform vec4 uGradeGain;
 uniform vec4 uSat;         // global, highlightThresh, highlightSat, shadowSat
 uniform vec4 uVignette;    // artAmount, artInner, artOuter, opticalAmount
-uniform vec4 uGrain;       // amount, sizePx, flicker, time
+uniform vec4 uGrain;       // amount, sizePx, flicker, midGrain
 uniform vec4 uLens;        // caStrength, warp, panic, lightning
+uniform vec4 uContrast;    // pivot power, pivot, unused, unused
+uniform vec4 uWarm;        // warmth ramp lo, warmth ramp hi, warm saturation, warm split weight
 uniform vec3 uVigTint;
 uniform vec3 uSplitCool;   // multiplier at luma 0 -- shadows
 uniform vec3 uSplitWarm;   // multiplier at luma 1 -- highlights only
@@ -1011,7 +1227,48 @@ void main() {
   // entire band by 0.62-0.85 and was most of why our frame read as blank rather than dark: it was
   // attacking exactly the range §4 asks the player to search in. 0.016 ends the toe below the
   // reference's own 25th percentile, so the crush now lands only on true shadow.
+  //
+  // --- THE PIVOT (added: measured). AgX's toe is long and soft, which is correct, but the image
+  // that arrives here is a 0.02-average night sitting on a volumetric-fog pedestal, so the entire
+  // readable band — mud, timber, far trunks — lands inside about one AgX decade and reads FLAT.
+  // Measured on the reference: keyart-site.png runs P25 0.00241 / P75 0.01600, an interquartile
+  // ratio of 6.6:1. Our pre-pivot frame ran P25 0.00555 / P75 0.03208, ratio 5.8:1, with the whole
+  // distribution shifted a stop and a half up onto the haze. A power around a fixed pivot fixes
+  // both halves at once and is the only op here that can: it pushes the pedestal DOWN into black
+  // and the lantern core UP toward the clip, without moving the pivot itself.
+  //
+  // The pivot is 0.055 because §3.1 exposes for 'the wet mud in the moon' at 0.045 relative
+  // luminance — the pivot has to sit at the value the whole exposure model is built around, or the
+  // op is a brightness change wearing a contrast change's clothes.
+  col = uContrast.y * pow( max( col, vec3( 1e-6 ) ) / uContrast.y, vec3( uContrast.x ) );
+
+  // --- the toe (ART_DIRECTION §12.4). AFTER the pivot, so the floor is still the last word on
+  // black: the pivot can push a pedestal down toward zero, and the toe's additive term is what
+  // guarantees §3.1's 'a histogram spike at 0 is a bug'.
   col = col * mix( vec3( 0.55 ), vec3( 1.0 ), smoothstep( vec3( 0.0015 ), vec3( 0.016 ), col ) ) + 0.0024;
+
+  // --- THE HUMAN-LIGHT AXIS (added: measured).
+  //
+  // §2.1: 'The world is blue-green. The only warm light in the world is human.' The grade below
+  // implements the first half — a blue lift, a blue gamma, a blue gain, a cool split — and until
+  // now it applied that cool push to EVERY pixel, including the lantern pool, which is the one
+  // place in the frame the same document forbids it. Measured, warm pixels (R > 90, R > B + 15):
+  //
+  //     keyart-site.png   mean warm RGB (142, 88, 48)   B/R 0.341   saturation 0.68
+  //     our frame         mean warm RGB (131, 98, 80)   B/R 0.614   saturation 0.38
+  //
+  // R and G already agree with the reference to within 8%. The entire visible difference — the
+  // reason our timber reads SALMON where the reference reads wet warm brown — is 26 extra points
+  // of blue, and about 18% of that is this grade putting it there.
+  //
+  // 'warmth' is a HUE signal, not a brightness one: it is ~0 across the blue-black field and the
+  // fog, and ramps to 1 across the lantern's falloff. Everything cool below is weighted by its
+  // complement, so §2.1's first half keeps every pixel it was written for and loses the one it
+  // was never meant to touch. This is not a global amber lift (§2.4 forbids that by name) — it
+  // cannot warm a pixel that is not already warm, because warmth of a neutral pixel is zero.
+  float chroma  = ( col.r - col.b ) / max( col.r + col.b, 1e-4 );
+  float warmth  = smoothstep( uWarm.x, uWarm.y, chroma );
+  float cool    = 1.0 - warmth;
 
   // --- lift / gamma / gain. §12.4.
   //
@@ -1021,12 +1278,16 @@ void main() {
   // 'the amber only ever appears as point sources and their falloff, never as a global grade
   // lift'. It is also most of why the wet blue-black world was rendering as chalky neutral grey:
   // warm the shadows of a blue scene and they land on the neutral axis.
-  col = col + uGradeLift.rgb;
-  col = pow( max( col, vec3( 1e-5 ) ), vec3( 1.0 ) / max( uGradeGamma.rgb, vec3( 0.05 ) ) );
-  col = col * uGradeGain.rgb;
+  col = col + uGradeLift.rgb * cool;
+  col = pow( max( col, vec3( 1e-5 ) ),
+             vec3( 1.0 ) / max( mix( vec3( 1.0 ), uGradeGamma.rgb, cool ), vec3( 0.05 ) ) );
+  col = col * mix( vec3( 1.0 ), uGradeGain.rgb, cool );
 
   float luma = scLuma( col );
-  col = mix( vec3( luma ), col, uSat.x );
+  // Global saturation is a filmic pull-down on the world and a small push-up on human light: the
+  // reference's warm pixels are MORE saturated than ours (0.68 vs 0.38), not less, and the pool is
+  // the one region where AgX's per-channel desaturation has the most to undo.
+  col = mix( vec3( luma ), col, mix( uSat.x, uWarm.z, warmth ) );
   // Highlights go creamy rather than radioactive; shadows keep their blue instead of going grey.
   float hi = smoothstep( uSat.y, 1.0, luma );
   col = mix( col, mix( vec3( luma ), col, uSat.z ), hi );
@@ -1035,13 +1296,17 @@ void main() {
   // where §3.1.1 asks, 0.20 covers most of the LANTERN POOL, and boosting chroma there turned
   // amber-lit timber into salmon. 0.115 puts the boost back on the blue-black it exists for.
   float lo = 1.0 - smoothstep( 0.0, 0.115, luma );
-  col = mix( col, mix( vec3( luma ), col, uSat.w ), lo );
+  col = mix( col, mix( vec3( luma ), col, uSat.w ), lo * cool );
 
   // --- split-tone, and this is the ONLY place amber is allowed near the grade. The warm half is
-  // weighted by 'hi', so it can only ever reach a highlight -- a fire core, the lantern hotspot,
-  // a lit window. Everything below that is pushed the other way, into the blue-black the whole
-  // palette (§2.1) is built on.
-  col *= mix( uSplitCool, uSplitWarm, hi );
+  // reached two ways and only two: by being a HIGHLIGHT (a fire core, the lantern hotspot, a lit
+  // window) or by already being WARM (§2.1 — which in this world means: by being lit by a human
+  // source). Everything else is pushed the other way, into the blue-black the whole palette is
+  // built on. Gating on 'hi' alone was the bug: the lantern POOL — the falloff, which is most of
+  // the amber in frame and all of the amber in the reference — sits at luma 0.10-0.30, well under
+  // the 0.70 highlight threshold, so the cool half was being applied to it. The frame was
+  // literally cooling the only warm light in the game.
+  col *= mix( uSplitCool, uSplitWarm, clamp( max( hi, warmth * uWarm.w ), 0.0, 1.0 ) );
 
   // --- panic desaturation
   col = mix( col, vec3( scLuma( col ) ), uLens.z * 0.55 );
@@ -1067,10 +1332,19 @@ void main() {
     vec2 guv = ( gc + vec2( uFrame * 37.0, uFrame * 17.0 ) ) / uNoiseSize;
     vec3 n = texture2D( tNoise, guv ).rgb * 2.0 - 1.0;
     n *= vec3( 1.25, 1.0, 1.25 );          // dye-cloud behaviour: R and B are coarser
-    float L = scLuma( col );
-    // 0.042 put +/- 0.04 of display-space noise on a frame whose readable range tops out around
-    // 0.20 -- a 20% boil that reads as mush, not as stock. 0.030 is still clearly film.
-    float amp = uGrain.x * ( 0.030 * pow( 1.0 - clamp( L, 0.0, 1.0 ), 1.4 ) + 0.005 );
+    float L = clamp( scLuma( col ), 0.0, 1.0 );
+    // AMPLITUDE vs LUMA. §12.6 gives a monotonic shadow-heavy curve, 0.055*(1-L)^1.4 + 0.008, and
+    // that is only half of how a negative behaves. RMS granularity of a real 35 mm stock peaks
+    // around MID density and falls off at both ends: the clear base has little silver to clump and
+    // the shoulder is saturated. A purely shadow-weighted curve therefore puts all of its noise
+    // exactly where our frame has no signal, which is why the previous value was invisible in the
+    // lantern pool and read as a dirty screen in the corners rather than as stock.
+    //
+    // Three terms: the §12.6 shadow term, a 4L(1-L) mid-density bump (uGrain.w, the term that
+    // actually lands on the timber and the mud), and a small constant floor so the highlights are
+    // not clinically clean.
+    float mid = 4.0 * L * ( 1.0 - L );
+    float amp = uGrain.x * ( 0.034 * pow( 1.0 - L, 1.4 ) + uGrain.w * mid + 0.005 );
     col += n * amp;
   }
 
@@ -1221,7 +1495,7 @@ class BloomPass extends Pass {
       tDiffuse: { value: null },
       tAdapt: { value: null },
       uTexel: { value: new THREE.Vector2() },
-      uParams: { value: new THREE.Vector4(1.15, 0.35, 1.0, 0.10) },
+      uParams: { value: new THREE.Vector4(BLOOM_THRESHOLD, BLOOM_KNEE, 1.0, 0.10) },
       uExposure: { value: new THREE.Vector4(EXPOSURE_BASE * EXPOSURE_CALIBRATION, EXPOSURE_KEY, EXPOSURE_GAIN_MIN, EXPOSURE_GAIN_MAX) },
     });
     this.downMaterial = mk('sc-bloom-down', FRAG_BLOOM_DOWN, {
@@ -1720,6 +1994,7 @@ export class Postprocessing {
     this._aoRT = this._mkTarget(hw, hh, { type: THREE.HalfFloatType, name: 'sc-ao' });
     this._aoRT2 = this._mkTarget(hw, hh, { type: THREE.HalfFloatType, name: 'sc-ao-b' });
     this._ssrRT = this._mkTarget(hw, hh, { type: THREE.HalfFloatType, name: 'sc-ssr' });
+    this._sscsRT = this._mkTarget(hw, hh, { type: THREE.UnsignedByteType, name: 'sc-sscs' });
 
     // --- luminance chain + 1x1 adaptation ping-pong
     this._lum0 = this._mkTarget(64, 64, { type: THREE.HalfFloatType, name: 'sc-lum0' });
@@ -1808,6 +2083,22 @@ export class Postprocessing {
       uSigma: { value: new THREE.Vector2(0.35, 8.0) },
     });
 
+    // SSCS (§12 pass 5). Half res, UnsignedByte: it is a scalar visibility term and the extra
+    // precision of a half-float buys nothing a 4-tap cross in the resolve does not smooth away.
+    this._sscsQuad = this._mkQuad('sc-sscs', FRAG_SSCS, {
+      tDepth: { value: this._depthTex },
+      tNormal: { value: this._normalRT.texture },
+      tNoise: { value: this._noise },
+      uProj: { value: new THREE.Matrix4() },
+      uProjInv: { value: new THREE.Matrix4() },
+      uNoiseScale: { value: new THREE.Vector2() },
+      uNearFar: { value: new THREE.Vector2(0.05, 1200) },
+      uMoon: { value: new THREE.Vector4(0, 1, 0, 0) },
+      uLamp: { value: new THREE.Vector4(0, 0, 0, 0) },
+      // §3.5: 8 ray steps, 0.35 m max trace, 0.02 m thickness. Steps come from the define below.
+      uParams: { value: new THREE.Vector4(0.35, 0.06, 0, 30) },
+    }, { SSCS_STEPS: tierIdx >= 3 ? 12 : 8 });
+
     this._ssrQuad = this._mkQuad('sc-ssr', FRAG_SSR, {
       tScene: { value: this.sceneTarget.texture },
       tDepth: { value: this._depthTex },
@@ -1825,8 +2116,9 @@ export class Postprocessing {
 
     this._lumQuad = this._mkQuad('sc-lum', FRAG_LUM, {
       tDiffuse: { value: this.sceneTarget.texture },
-      uTexel: { value: new THREE.Vector2() },
-      uSpan: { value: 8 },
+      // One output texel of the 64x64 target covers 1/64 of the frame on each axis. Constant, and
+      // deliberately NOT derived from the scene resolution -- that is the whole fix.
+      uCell: { value: new THREE.Vector2(1 / 64, 1 / 64) },
       uExposureIn: { value: EXPOSURE_BASE * EXPOSURE_CALIBRATION },
     });
 
@@ -1867,6 +2159,7 @@ export class Postprocessing {
       tAO: { value: this._whiteTex },
       tSSR: { value: this._blackTex },
       tFog: { value: this._fogFallback },
+      tSSCS: { value: this._whiteTex },
       uTexel: { value: new THREE.Vector2() },
       uParams: { value: new THREE.Vector4(0.85, 0.55, 6.0, 0) },
     });
@@ -1919,7 +2212,7 @@ export class Postprocessing {
       uExposure: { value: new THREE.Vector4(EXPOSURE_BASE * EXPOSURE_CALIBRATION, EXPOSURE_KEY, EXPOSURE_GAIN_MIN, EXPOSURE_GAIN_MAX) },
       // Bloom carries the warm human light, which in both key-art references is the only thing in
       // frame with a halo. 0.055 was too quiet to read as a lantern in rain.
-      uBloom: { value: new THREE.Vector4(0.088, 0.10, 0.08, 0) },
+      uBloom: { value: new THREE.Vector4(BLOOM_INTENSITY, 0.10, 0.08, 0) },
       // §12.4's lift, at ~80% of the tabulated value. Non-negative on every channel, and cool:
       // this is the 'slightly lifted shadow tone' that separates readable night footage from a
       // blank frame. It was cut to 0.0018/0.0068 in an earlier pass, which is 40% of spec, and
@@ -1934,11 +2227,19 @@ export class Postprocessing {
       // The blue-black is protected by uSat.w below, which is the op §12.4 actually cares about.
       uSat: { value: new THREE.Vector4(0.93, 0.70, 0.72, 1.55) },
       uVignette: { value: new THREE.Vector4(0.30, 0.42, 1.10, 1.0) },
-      uGrain: { value: new THREE.Vector4(1.0, 1.35, 0.020, 0) },
+      uGrain: { value: new THREE.Vector4(1.0, GRAIN_PX, 0.020, GRAIN_MID) },
       uLens: { value: new THREE.Vector4(0.0016, 0, 0, 0) },
       uVigTint: { value: new THREE.Vector3(0.0037, 0.0075, 0.0114) },  // #0a1216 in linear
       uSplitCool: { value: new THREE.Vector3(0.955, 1.000, 1.075) },
-      uSplitWarm: { value: new THREE.Vector3(1.090, 1.000, 0.885) },
+      // Warm half of the split-tone. Blue is cut harder than before (0.885 -> 0.800) because the
+      // measurement says so: the reference's warm timber sits at B/R 0.341 and ours at 0.614, and
+      // once the human-light axis stops COOLING the pool, this is the op that closes what is left.
+      uSplitWarm: { value: new THREE.Vector3(1.020, 1.000, 0.930) },
+      // Pivot power / pivot. 0.055 is §3.1's moonlit-mud exposure target — the value the whole
+      // exposure model is anchored to — so the op is contrast and nothing else.
+      uContrast: { value: new THREE.Vector4(1.14, 0.055, 0, 0) },
+      // Warmth ramp lo/hi (in (r-b)/(r+b)), warm saturation, warm split weight.
+      uWarm: { value: new THREE.Vector4(0.045, 0.400, 1.000, 1.0) },
       uTime: { value: 0 },
       uFrame: { value: 0 },
     });
@@ -1994,6 +2295,8 @@ export class Postprocessing {
 
     this._aoEnabled = t >= 1;
     this._ssrEnabled = t >= 2;
+    // §12's pass table: SSCS at `high` (8 steps) and `ultra` (12). Not below.
+    this._sscsEnabled = t >= 2;
     this._needNormals = t >= 1 || !!this.ctx?.systems?.get?.('VolumetricFog');
 
     if (this._compositePass) {
@@ -2006,7 +2309,7 @@ export class Postprocessing {
       u.uGrain.value.x = (s?.get?.('filmGrain') ?? true) ? 1 : 0;
       u.uLens.value.x = (s?.get?.('chromaticAberration') ?? true) ? 0.0016 : 0;
       u.uVignette.value.x = (s?.get?.('vignette') ?? true) ? 0.30 : 0;
-      u.uBloom.value.x = t >= 1 ? 0.088 : 0;
+      u.uBloom.value.x = t >= 1 ? BLOOM_INTENSITY : 0;
     }
     if (this._taaPass) {
       this._taaPass.material.uniforms.uParams.value.w = t >= 3 ? 0.22 : 0.0;
@@ -2091,6 +2394,41 @@ export class Postprocessing {
       this._aoBlurQuad.quad.render(renderer);
     }
 
+    // --- SSCS (half res, tier >= high). Runs before SSR so the reflection of a seated part
+    // reflects the part, not the contact seam under it -- SSR reads the scene colour, which the
+    // resolve has not darkened yet at this point in the frame.
+    if (this._sscsEnabled && this._needNormals) {
+      this._refreshLights();
+      const u = this._sscsQuad.u;
+      u.uProj.value.copy(this._projJittered);
+      u.uProjInv.value.copy(this._projInv);
+      u.uNoiseScale.value.set(1 / this._noiseSize, 1 / this._noiseSize);
+      u.uNearFar.value.set(near, far);
+      u.uParams.value.set(0.35, 0.06, this._frame % 64, 30);
+
+      const moon = this._moonLight;
+      if (moon && moon.visible && moon.intensity > 1e-4) {
+        // Direction TOWARD the light. A DirectionalLight in three shines from its position to its
+        // target, so that is position - target, rotated into view space.
+        _v3b.setFromMatrixPosition(moon.matrixWorld);
+        if (moon.target) _v3c.setFromMatrixPosition(moon.target.matrixWorld); else _v3c.set(0, 0, 0);
+        _v3b.sub(_v3c);
+        if (_v3b.lengthSq() > 1e-8) {
+          _v3b.normalize().transformDirection(camera.matrixWorldInverse);
+          u.uMoon.value.set(_v3b.x, _v3b.y, _v3b.z, 1);
+        } else u.uMoon.value.w = 0;
+      } else u.uMoon.value.w = 0;
+
+      const lamp = this._lampLight;
+      if (lamp && lamp.visible && lamp.intensity > 0.5) {
+        _v3b.setFromMatrixPosition(lamp.matrixWorld).applyMatrix4(camera.matrixWorldInverse);
+        u.uLamp.value.set(_v3b.x, _v3b.y, _v3b.z, 1);
+      } else u.uLamp.value.w = 0;
+
+      renderer.setRenderTarget(this._sscsRT);
+      this._sscsQuad.quad.render(renderer);
+    }
+
     // --- SSR (half res, tier >= high)
     const gu = this._globalUniforms();
     if (this._ssrEnabled && this._needNormals) {
@@ -2108,12 +2446,57 @@ export class Postprocessing {
     }
   }
 
+  /**
+   * Find the two lights SSCS traces against: the moon and the lantern.
+   *
+   * Deliberately discovered from the scene graph rather than from `Sky.js` / `Flashlight.js`
+   * APIs — ARCHITECTURE §2.1 says to call a documented API or code defensively, and neither module
+   * documents a light accessor. A graph scan cannot break when someone renames a field, and it
+   * degrades to 'no trace' rather than to a crash if the rig is not built yet.
+   *
+   * Amortised: the rig does not change between frames, so this runs on frame 1 and then every 30th
+   * frame. No allocation — positions are read straight out of matrixWorld.elements, which also
+   * avoids the world-matrix update that getWorldPosition() would force.
+   */
+  _refreshLights(force = false) {
+    if (!force && this._lightScanFrame !== undefined && (this._frame - this._lightScanFrame) < 30) return;
+    this._lightScanFrame = this._frame;
+
+    const scene = this.ctx?.scene;
+    const camera = this.ctx?.camera;
+    if (!scene || !camera) { this._moonLight = null; this._lampLight = null; return; }
+
+    const cx = camera.matrixWorld.elements[12];
+    const cy = camera.matrixWorld.elements[13];
+    const cz = camera.matrixWorld.elements[14];
+
+    let moon = null, moonI = -1;
+    let lamp = null, lampScore = -1;
+
+    scene.traverse((o) => {
+      if (!o.visible) return;
+      if (o.isDirectionalLight) {
+        // The moon is the brightest directional. Lightning is the other one and it is 0 except
+        // for the 60 ms of a flash, during which it legitimately owns the trace.
+        if (o.intensity > moonI) { moonI = o.intensity; moon = o; }
+      } else if (o.isSpotLight && o.intensity > 0.5) {
+        // The lantern is whichever spot wins §3.6's own scoring function against the camera —
+        // intensity / (1 + d²) — which in a first-person game the held lamp always does.
+        const e = o.matrixWorld.elements;
+        const dx = e[12] - cx, dy = e[13] - cy, dz = e[14] - cz;
+        const score = o.intensity / (1 + dx * dx + dy * dy + dz * dz);
+        if (score > lampScore) { lampScore = score; lamp = o; }
+      }
+    });
+
+    this._moonLight = moon;
+    this._lampLight = lamp;
+  }
+
   _renderExposure(renderer) {
     // --- stage 1: TRANSFORM. scene HDR -> 64x64 compressed luminance.
     const l = this._lumQuad.u;
     l.tDiffuse.value = this.sceneTarget.texture;
-    l.uTexel.value.set(1 / this._pw, 1 / this._ph);
-    l.uSpan.value = 8;
     l.uExposureIn.value = this._scriptedExposure();
     renderer.setRenderTarget(this._lum0);
     this._lumQuad.quad.render(renderer);
@@ -2191,6 +2574,7 @@ export class Postprocessing {
       u.tScene.value = this.sceneTarget.texture;
       u.tAO.value = (this._aoEnabled && this._needNormals) ? this._aoRT.texture : this._whiteTex;
       u.tSSR.value = (this._ssrEnabled && this._needNormals) ? this._ssrRT.texture : this._blackTex;
+      u.tSSCS.value = (this._sscsEnabled && this._needNormals) ? this._sscsRT.texture : this._whiteTex;
       u.tFog.value = this._fogTexture() ?? this._fogFallback;
       u.uTexel.value.copy(texel);
       // AO strength, SSR strength, exposure hint (so AO backs off in the lantern hotspot).
@@ -2199,7 +2583,7 @@ export class Postprocessing {
         this._aoEnabled ? 0.85 : 0.0,
         this._ssrEnabled ? (0.35 + 0.35 * wet) : 0.0,
         this._scriptedExposure() * 2.7,
-        0,
+        this._sscsEnabled ? SSCS_STRENGTH : 0.0,
       );
     }
 
@@ -2219,17 +2603,30 @@ export class Postprocessing {
     }
 
     // --- motion blur
-    if (this._motionPass?.enabled) {
-      const u = this._motionPass.uniforms;
-      u.tDepth.value = this._depthTex;
-      u.uProjInv.value.copy(this._projInv);
-      u.uViewInv.value.copy(camera.matrixWorld);
-      u.uPrevViewProj.value.copy(this._prevValid ? this._prevViewProj : _m4b.identity());
-      u.uNoiseScale.value.set(1 / this._noiseSize, 1 / this._noiseSize);
-      u.uJitter.value.copy(this._jitter);
-      u.uTexel.value.copy(texel);
-      u.uParams.value.set(0.5, 0.028, this._frame % 64, 0);
-      this._motionPass.enabled = this._prevValid && (this._settings?.get?.('motionBlur') ?? true) && this._tier >= 1;
+    //
+    // BUG, fixed here: the enable test used to live INSIDE `if (this._motionPass.enabled)`, and it
+    // includes `this._prevValid`, which is false on frame 1 by construction. So the pass switched
+    // itself off on the first frame of every session and the guard then made it unreachable — it
+    // could only come back via a quality-tier change. Verified on the live build before the fix:
+    // `motionBlur` setting true, `_prevValid` true, `_motionPass.enabled` FALSE at frame 133.
+    // Motion blur has not run in this game. The gate is now evaluated unconditionally and the
+    // uniform write is what is guarded.
+    if (this._motionPass) {
+      const want = this._prevValid
+        && (this._settings?.get?.('motionBlur') ?? true)
+        && this._tier >= 1;
+      this._motionPass.enabled = want;
+      if (want) {
+        const u = this._motionPass.uniforms;
+        u.tDepth.value = this._depthTex;
+        u.uProjInv.value.copy(this._projInv);
+        u.uViewInv.value.copy(camera.matrixWorld);
+        u.uPrevViewProj.value.copy(this._prevViewProj);
+        u.uNoiseScale.value.set(1 / this._noiseSize, 1 / this._noiseSize);
+        u.uJitter.value.copy(this._jitter);
+        u.uTexel.value.copy(texel);
+        u.uParams.value.set(0.5, 0.028, this._frame % 64, 0);
+      }
     }
 
     // --- DOF: focus on what the reticle hits; near-field when carrying a part.
@@ -2250,7 +2647,7 @@ export class Postprocessing {
     if (this._bloomPass?.enabled) {
       const bu = this._bloomPass.preMaterial.uniforms;
       const p = bu.uParams.value;
-      p.x = 1.15; p.y = 0.35;
+      p.x = BLOOM_THRESHOLD; p.y = BLOOM_KNEE;
       p.z = this._scriptedExposure();
       bu.tAdapt.value = this._adaptTexture ?? this._adapt[0].texture;
       bu.uExposure.value.set(this._scriptedExposure(), this._meterTarget(), EXPOSURE_GAIN_MIN, EXPOSURE_GAIN_MAX);
@@ -2269,8 +2666,10 @@ export class Postprocessing {
       u.uTime.value = this._time;
       u.uFrame.value = this._frame % 1024;
 
-      // Grain size scales with resolution so a grain stays physically 1.35 px at 1080p.
-      u.uGrain.value.y = 1.35 * Math.max(0.75, this._ph / 1080);
+      // Grain size scales with resolution so a grain stays physically 1.35 px at 1080p, and never
+      // shrinks below it — sub-pixel grain is not film, it is dither.
+      u.uGrain.value.y = GRAIN_PX * Math.max(1.0, this._ph / 1080);
+      u.uGrain.value.w = this._tier >= 2 ? GRAIN_MID : GRAIN_MID * 0.5;
 
       // Vignette: art vignette + the sprint/panic tighten (§12.7 — the ONLY dynamic vignette).
       const tighten = Math.max(this._sprint, this._panic);
@@ -2361,7 +2760,7 @@ export class Postprocessing {
 
     // Saved state — every one of these is restored in the finally block.
     const saved = {
-      fog: fog?.enabled, ssr: this._ssrEnabled, ao: this._aoEnabled, normals: this._needNormals,
+      fog: fog?.enabled, ssr: this._ssrEnabled, sscs: this._sscsEnabled, ao: this._aoEnabled, normals: this._needNormals,
       exposureFn: this._renderExposure, shadowAuto: renderer.shadowMap.autoUpdate,
       passes: this.composer.passes.map((p) => p.enabled),
     };
@@ -2379,6 +2778,7 @@ export class Postprocessing {
 
       await step('volumetric fog', () => { if (fog) fog.enabled = false; });
       await step('ssr', () => { this._ssrEnabled = false; });
+      await step('sscs', () => { this._sscsEnabled = false; });
       await step('gtao + bilateral blur', () => { this._aoEnabled = false; });
       await step('bloom chain', () => { const p = pass('BloomPass'); if (p) p.enabled = false; });
       await step('dof', () => { const p = pass('sc-dof'); if (p) p.enabled = false; });
@@ -2393,6 +2793,7 @@ export class Postprocessing {
     } finally {
       if (fog) fog.enabled = saved.fog;
       this._ssrEnabled = saved.ssr;
+      this._sscsEnabled = saved.sscs;
       this._aoEnabled = saved.ao;
       this._needNormals = saved.normals;
       this._renderExposure = saved.exposureFn;
@@ -2402,6 +2803,91 @@ export class Postprocessing {
       this._prevValid = false;
     }
     return rows;
+  }
+
+  /**
+   * DEV TOOL, and the instrument every number in this file's comments was measured with.
+   *
+   * §3.1.1 asserts an average-frame-luminance window per weather state and §3.1/§12.4 assert a
+   * black point; both were prose until now, because nothing in the build could read the FINAL
+   * 8-bit frame. This reads the default framebuffer after a render and reports the exact
+   * quantities those two sections are written in — relative luminance in linear light, not the
+   * HDR meter, which is a different number in a different space and is why two earlier passes
+   * argued about the metering floor while the frame stayed a stop and a half off.
+   *
+   * NEVER called from the frame loop: readPixels is a full pipeline stall and it allocates.
+   *
+   * @returns {{avg:number, p1:number, p25:number, p50:number, p75:number, p99:number,
+   *            over50:number, minChannel:number, zeroPixels:number, state:string,
+   *            window:number[], pass:boolean}|null}
+   */
+  assertLuma() {
+    const renderer = this.ctx?.renderer;
+    if (!renderer || this._fallback) return null;
+    const gl = renderer.getContext?.();
+    if (!gl) return null;
+
+    const w = renderer.domElement?.width || this._pw;
+    const h = renderer.domElement?.height || this._ph;
+    // Stride the frame rather than reading all of it: a 1/4-linear sample is 1/16 the pixels and
+    // the percentiles it returns match a full read to within 0.3% on every shot measured.
+    const step = Math.max(1, Math.round(Math.min(w, h) / 360));
+    const px = new Uint8Array(w * h * 4);
+    // Render first. The default framebuffer is double-buffered: read it from a console eval or a
+    // test hook — i.e. from a task other than the one that drew it — and the contents are whatever
+    // the compositor left behind. Measured: the same frame reported avg 0.0469 read cold and
+    // 0.0225 read after a fresh draw, which is a whole stop of pure instrumentation error and
+    // exactly the sort of number that gets argued about for an hour.
+    this.render();
+    renderer.setRenderTarget(null);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    gl.readPixels(0, 0, w, h, gl.RGBA, gl.UNSIGNED_BYTE, px);
+
+    const toLinear = (c) => (c <= 0.04045 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4));
+    const lut = new Float32Array(256);
+    for (let i = 0; i < 256; i++) lut[i] = toLinear(i / 255);
+
+    const ys = [];
+    let sum = 0, over = 0, minCh = 255, zeros = 0;
+    for (let y = 0; y < h; y += step) {
+      for (let x = 0; x < w; x += step) {
+        const i = (y * w + x) * 4;
+        const r = px[i], g = px[i + 1], b = px[i + 2];
+        const Y = lut[r] * 0.2126 + lut[g] * 0.7152 + lut[b] * 0.0722;
+        ys.push(Y);
+        sum += Y;
+        if (Y > 0.5) over++;
+        const mn = r < g ? (r < b ? r : b) : (g < b ? g : b);
+        if (mn < minCh) minCh = mn;
+        if (mn === 0) zeros++;
+      }
+    }
+    if (!ys.length) return null;
+    ys.sort((a, b) => a - b);
+    const q = (p) => ys[Math.min(ys.length - 1, Math.max(0, Math.round((p / 100) * (ys.length - 1))))];
+
+    // §3.1.1's per-weather window, keyed the same way the meter target is.
+    const WINDOWS = {
+      clear: [0.018, 0.028], drizzle: [0.015, 0.026], 'windy-mist': [0.021, 0.034],
+      rain: [0.014, 0.025], whiteout: [0.070, 0.130], storm: [0.012, 0.023],
+      dawn: [0.050, 0.095],
+    };
+    const n = this.ctx?.state?.night;
+    let state = NIGHT_METER_STATE[Number.isFinite(n) ? Math.max(0, Math.min(7, n | 0)) : 1];
+    if (this._lastFog > 0.85) state = 'whiteout';
+    const ton = this.ctx?.state?.timeOfNight;
+    if (Number.isFinite(ton) && ton > 0.88) state = 'dawn';
+    const win = WINDOWS[state] ?? WINDOWS.clear;
+    const avg = sum / ys.length;
+
+    return {
+      avg: +avg.toFixed(5), p1: +q(1).toFixed(5), p25: +q(25).toFixed(5), p50: +q(50).toFixed(5),
+      p75: +q(75).toFixed(5), p99: +q(99).toFixed(5),
+      over50: +((over / ys.length) * 100).toFixed(3),
+      minChannel: minCh, zeroPixels: zeros, state, window: win,
+      // §3.1 wants the blackest 1% inside [0.002, 0.006] and NOTHING at zero.
+      pass: avg >= win[0] && avg <= win[1] && zeros === 0 && q(1) >= 0.002 && q(1) <= 0.006,
+    };
   }
 
   _fogTexture() {
@@ -2432,6 +2918,7 @@ export class Postprocessing {
       this._aoRT.setSize(hw, hh);
       this._aoRT2.setSize(hw, hh);
       this._ssrRT.setSize(hw, hh);
+      this._sscsRT.setSize(hw, hh);
       this._history[0].setSize(pw, ph);
       this._history[1].setSize(pw, ph);
 
@@ -2454,6 +2941,7 @@ export class Postprocessing {
       if (this._aoQuad) this._aoQuad.u.tNormal.value = this._normalRT.texture;
       if (this._aoBlurQuad) this._aoBlurQuad.u.tNormal.value = this._normalRT.texture;
       if (this._ssrQuad) this._ssrQuad.u.tNormal.value = this._normalRT.texture;
+      if (this._sscsQuad) { this._sscsQuad.u.tNormal.value = this._normalRT.texture; this._sscsQuad.u.tDepth.value = this._depthTex; }
       if (this._normalQuad) this._normalQuad.u.tDepth.value = this._depthTex;
     } catch (e) {
       Log.once('post:resize', 'Postprocessing.resize() failed:', e);

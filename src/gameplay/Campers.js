@@ -39,6 +39,19 @@
  *   camp.notifyBodyFound()                  escalation rung 4, if something else found it first
  *   camp.interruptReport(id)                the intercept, §9.7
  *   camp.familiarityOf(id, featureId)       0..1, persists across nights via ctx.state
+ *   camp.lum                 0..1           §9.3's illumination ON the player, sampled at 10 Hz
+ *   camp.lumParts            {moon,lantern,manual,camp,sky} — the same number, itemised
+ *   camp.lightF              0.25 + 1.97*lum — §9.3's light term, so a balance pass can read it
+ *
+ * ---------------------------------------------------------------------------------------------
+ * WHAT `lum` IS MADE OF, AND WHY THE MANUAL IS IN IT
+ * ---------------------------------------------------------------------------------------------
+ * moon + terrain exposure + Flashlight.illumination + **BlueprintUI.lumBonus** + camp lamps +
+ * lightning residual. The manual term is not an afterthought: ART §13.8 mounts a real SpotLight
+ * on the open page and BlueprintUI publishes `lumBonus` (0.26 at full open) precisely so this
+ * file can add it. Without that one term, standing in the middle of their camp reading the
+ * instructions was free — measured at 15 m, moonlit: 15.14 s to be seen with it closed, 6.14 s
+ * with it open. That 2.47x is the joke acquiring teeth.
  *
  * ---------------------------------------------------------------------------------------------
  * WHERE THE NUMBERS COME FROM (every one is cited; nothing here is invented where a doc gives one)
@@ -207,6 +220,14 @@ export const CAMPER_TUNING = {
   sweepJitterDeg: 2,
   torchStopTime: 1.4,           // §8.7 — the sweep stops within 1.4 s. The whole detection language.
   torchHoldTime: 2.1,
+  // Slew ceilings, rad/s. These are the numbers the player actually learns: a calm beam CANNOT
+  // move faster than sweepCalmRate, so if it does, it is looking for you. The peak speed a ±34°
+  // 0.11 Hz sweep demands is 0.593*2π*0.11 = 0.41 rad/s, so 0.90 tracks it with headroom and
+  // still sits 4x below the search ceiling. Do not close that gap; the gap IS the tell.
+  sweepCalmRate: 0.90,
+  sweepSearchRate: 3.60,
+  torchTurnDeg: 16,             // §8.7 — after the hold, it rotates onto the thing at 16°/s
+  headFollowRate: 2.40,         // the head follows the beam. People look where they point a torch.
 
   // --- render
   cullDistance: 190,
@@ -1614,12 +1635,14 @@ export class Campers {
         break;
       }
 
-      case 1: {                                    // stop, look around, 90° sweep
+      case 1: {                                    // stop, square up to the guess, look around
         a.speed = 0; a.hasGoal = false;
         a.searchDwell += dt;
-        const sweep = Math.sin(a.searchDwell * 2.2) * 45 * _DEG;
+        // Turn the BODY onto the guess and let `_tickTorch` do the sweeping around it. The head
+        // used to sweep here too, which fought the beam for control of the same skull.
         const base = Math.atan2(a.lastNoisePos.x - a.position.x, -(a.lastNoisePos.z - a.position.z));
-        a.headYaw = approachAngle(a.headYaw, base + sweep, 3.2 * dt);
+        a.yaw = approachAngle(a.yaw, base, 1.8 * dt);
+        if (!a.hasTorch) a.headYaw = approachAngle(a.headYaw, base + Math.sin(a.searchDwell * 2.2) * 45 * _DEG, 3.2 * dt);
         if (a.searchDwell > 2.6) {
           a.searchCount = this._collectCover(a);
           a.searchIdx = 0;
@@ -1957,9 +1980,15 @@ export class Campers {
     this._idleScan(a, dt, now);
   }
 
-  /** Scans ±40° every 4 s. The head leads; the body follows. */
+  /**
+   * Scans ±40° every 4 s — but ONLY for campers with no torch. A torch-carrier's head is driven
+   * by `_faceTorch` instead; running both put two oscillators on one skull and the beam became
+   * unreadable (see `_tickTorch`). Teddy has no torch, so Teddy still does this, and that is a
+   * silhouette difference the player can use.
+   */
   _idleScan(a, dt, now) {
     const T = CAMPER_TUNING;
+    if (a.hasTorch) return;
     const phase = (now * (1 / T.idleScanPeriod) + a.torchPhase) % 1;
     const target = a.yaw + Math.sin(phase * Math.PI * 2) * T.idleScanDeg * _DEG;
     a.headYaw = approachAngle(a.headYaw, target, 1.5 * dt);
@@ -2071,6 +2100,7 @@ export class Campers {
     const T = CAMPER_TUNING;
     if (!a.hasGoal || a.speed <= 0 || a.proneT > 0) {
       a.velocity.set(0, 0, 0);
+      a.cadence = 0;
       a.animPhase += dt * 0.4;
       this._settle(a, dt);
       return;
@@ -2078,7 +2108,7 @@ export class Campers {
     const dx = a._moveTX - a.position.x;
     const dz = a._moveTZ - a.position.z;
     const d = Math.hypot(dx, dz);
-    if (d < 0.06) { a.velocity.set(0, 0, 0); this._settle(a, dt); return; }
+    if (d < 0.06) { a.velocity.set(0, 0, 0); a.cadence = 0; this._settle(a, dt); return; }
 
     const bearing = Math.atan2(dx, -dz);
     const running = a.state === 'Alerted' || a.state === 'Panic' || a.state === 'Reporting';
@@ -2104,9 +2134,19 @@ export class Campers {
       if (typeof s === 'string') a.groundType = s;
     }
 
+    // GAIT CADENCE. ART §8.3 gives each camper a signature rate in Hz and §8.7 says
+    // "stride length = speed / stepRate", so the cadence must equal `stepHz` at that camper's own
+    // walking speed and scale from there. Real gait splits a speed change between cadence and
+    // stride, so both take the square root — which also keeps `strideScale` in `_solveRig`
+    // (computed the same way) consistent with this, and that consistency is what stops the feet
+    // from skating. The old expression divided speed by `stepHz * 0.86` and multiplied by
+    // `stepHz` again, which cancelled the signature out and ran Robin at 1.45 Hz instead of 1.31.
+    const sp = Math.sqrt(clamp(a.speed / Math.max(0.4, a.walkSpeed), 0.16, 6.0));
+    a.cadence = a.stepHz * sp;
+    a.animPhase += a.cadence * dt;
+
     // Footsteps. Canonical kind and canonical numbers (§9.8), so a camper walking past a hiding
     // player is audible to the player through exactly the same channel the AI listens on.
-    a.animPhase += (a.speed / Math.max(0.6, a.stepHz * 0.86)) * a.stepHz * dt;
     const stepPhase = Math.floor(a.animPhase * 2);
     if (stepPhase !== a._lastStep) {
       a._lastStep = stepPhase;
@@ -2120,12 +2160,30 @@ export class Campers {
   }
 
   _settle(a, dt) {
-    // ART §8.7: nobody stands still. Weight shifts every 4–9 s, 22° of hip roll over 1.1 s.
+    // ART §8.7: nobody stands still. Weight shifts every 4–9 s, transferred over 1.1 s.
+    // The previous version read `smoothstep(0, 1.1, (9 - idleShiftT)/1.1)`, which saturates to 1
+    // the instant the timer is re-armed to anything below 7.9 — so the "transfer" was a step and
+    // the pose was constant. It is now an explicit from→to blend that actually takes 1.1 s, which
+    // is the difference between a person shifting their weight and a mannequin leaning.
     a.idleShiftT -= dt;
     if (a.idleShiftT <= 0) {
       a.idleShiftT = a.rand.range(4, 9);
-      a.idleShift = a.rand.range(-1, 1);
+      a.idleShiftFrom = a.idleShift;
+      a.idleShiftTo = a.rand.range(-1, 1);
+      a.idleShiftBlend = 0;
     }
+    if (a.idleShiftBlend < 1) {
+      a.idleShiftBlend = clamp01(a.idleShiftBlend + dt / 1.1);
+      const k = smoothstep(0, 1, a.idleShiftBlend);
+      a.idleShift = lerp(a.idleShiftFrom, a.idleShiftTo, k);
+    }
+
+    // Breath. ART §8.7 wants a 0.7 s plume every 3.1 ± 0.9 s; the froxel injection belongs to the
+    // fog agent, but the CHEST still has to move or the figure is a statue between weight shifts.
+    a.breathT -= dt;
+    if (a.breathT <= 0) a.breathT = 3.1 + a.rand.range(-0.9, 0.9);
+    a.breath = Math.max(0, Math.sin(clamp01((3.1 - a.breathT) / 0.7) * Math.PI));
+
     if (a.shrugT > 0) a.shrugT -= dt;
   }
 
@@ -2447,52 +2505,110 @@ export class Campers {
   // TORCHES — the sweeping cone. §9.7's readability lives here; ART §8.7 owns the numbers.
   // ===============================================================================================
 
+  /**
+   * THE BEAM. This is the stealth layer's entire user interface, so the rule it obeys is not
+   * "look plausible", it is: **one intent per state, and a slew ceiling the player can learn.**
+   *
+   * The version this replaces composited TWO independent oscillators — a ±34° sweep on top of a
+   * head that `_idleScan` was independently swinging ±40° at 0.25 Hz. The sum was a ±74° beam
+   * with a beat frequency: unlearnable, and it read as noise rather than as a person looking
+   * around. Now there is exactly one oscillator, anchored on the BODY, and the head follows the
+   * beam (`_faceTorch`) — which also means the vision cone finally points where the light points,
+   * so the visual tell stops lying about where the danger is.
+   *
+   *   Idle      ±34° @ 0.11 Hz, ceiling 0.90 rad/s   — lazy, wide, plannable
+   *   Curious   decelerate to a stop over 1.4 s, HOLD DEAD STILL 2.1 s, then 16°/s onto the thing
+   *   Searching ±46° @ 0.38 Hz triangle with end dwells, ceiling 3.60 rad/s — fast and methodical
+   *
+   * The Idle→Searching ratio is 4x in slew rate and 3.5x in frequency. That gap is the tell.
+   */
   _tickTorch(a, dt, now) {
     const T = CAMPER_TUNING;
-    if (!a.hasTorch) return;
+    if (!a.hasTorch) { a.torchRate = 0; return; }
+    const prevYaw = a.torchYaw;
 
+    // 1/f-ish jitter: two incommensurate sines, ±2°. Hand shake, not an oscillator.
     const jitter = Math.sin(now * 2.9 + a.torchPhase * 5.1) * Math.sin(now * 0.71 + a.torchPhase)
       * T.sweepJitterDeg * _DEG;
 
     if (a.state === 'Idle' || a.state === 'Scripted') {
-      // Calm: a lazy wide sweep. ±34° at 0.11 Hz, which is slow enough to plan around and that is
-      // the point — the pattern has to be learnable or the stealth layer is a lottery.
       a.torchHold = 0;
+      a.torchStopT = 0;
+      a.torchAnchorYaw = a.yaw;
       const sweep = Math.sin(now * T.sweepCalmHz * Math.PI * 2 + a.torchPhase) * T.sweepCalmDeg * _DEG;
-      a.torchTargetYaw = a.headYaw + sweep + jitter;
-      a.torchYaw = approachAngle(a.torchYaw, a.torchTargetYaw, 1.1 * dt);
+      a.torchTargetYaw = a.yaw + sweep + jitter;
+      a.torchYaw = approachAngle(a.torchYaw, a.torchTargetYaw, T.sweepCalmRate * dt);
       a.torchPitch = lerp(a.torchPitch, -0.20, clamp01(dt * 1.5));
+
     } else if (a.state === 'Curious' || a.state === 'Noticing') {
-      // The sweep STOPS within 1.4 s and HOLDS for 2.1 s. That stop is the entire detection
-      // language of the game — the player reads it from 180 m and knows exactly what it means.
       a.torchStopT += dt;
-      const p = a.noticingFeature?.position
-        ?? (a.hasNoise ? a.lastNoisePos : null);
-      if (p) {
+      const p = a.noticingFeature?.position ?? (a.hasNoise ? a.lastNoisePos : null);
+
+      if (a.torchStopT < T.torchStopTime) {
+        // DECELERATION. The sweep amplitude and the slew ceiling both fall to zero over 1.4 s,
+        // so the beam visibly runs out of momentum instead of snapping.
+        const k = 1 - smoothstep(0, T.torchStopTime, a.torchStopT);
+        const sweep = Math.sin(now * T.sweepCalmHz * Math.PI * 2 + a.torchPhase)
+          * T.sweepCalmDeg * _DEG * k;
+        a.torchTargetYaw = a.torchAnchorYaw + sweep + jitter * k;
+        a.torchYaw = approachAngle(a.torchYaw, a.torchTargetYaw, T.sweepCalmRate * k * dt);
+      } else if (a.torchStopT < T.torchStopTime + T.torchHoldTime) {
+        // THE HOLD. 2.1 seconds of a beam that does not move. Visible at 180 m; unmistakable.
+        // Only the hand shake survives, at a quarter amplitude, so it is still a held object.
+        a.torchYaw = approachAngle(a.torchYaw, a.torchYaw + jitter * 0.25, 0.10 * dt);
+      } else if (p) {
+        // ...then it comes round onto the thing, at a walking-pace 16°/s. Slow enough that you
+        // have time to move, fast enough that you know you have been given a deadline.
         const bearing = Math.atan2(p.x - a.position.x, -(p.z - a.position.z));
-        const rate = a.torchStopT < T.torchStopTime ? 2.6 : 0.35;
-        a.torchYaw = approachAngle(a.torchYaw, bearing, rate * dt);
+        a.torchYaw = approachAngle(a.torchYaw, bearing, T.torchTurnDeg * _DEG * dt);
+        a.torchAnchorYaw = a.torchYaw;
+      }
+      if (p) {
         const dy = (p.y + 1.2) - (a.position.y + a.eyeHeight);
         const flat = Math.hypot(p.x - a.position.x, p.z - a.position.z) || 1;
-        a.torchPitch = lerp(a.torchPitch, clamp(Math.atan2(dy, flat), -0.6, 0.3), clamp01(dt * 2.2));
+        a.torchPitch = lerp(a.torchPitch, clamp(Math.atan2(dy, flat), -0.6, 0.3), clamp01(dt * 1.4));
       }
+
     } else if (a.state === 'Searching') {
-      // Fast, deliberate, methodical: a 46° arc at 0.38 Hz with a dwell at each end. It reads as
-      // a person actually looking, not as an oscillator.
+      // The anchor is the BODY, never the head — anchoring on a head that follows the beam is a
+      // positive-feedback loop and the arc walks off into the trees within seconds.
+      a.torchStopT = 0;
+      a.torchAnchorYaw = a.yaw;
       const ph = (now * T.sweepSearchHz + a.torchPhase) % 1;
       const tri = ph < 0.5 ? smoothstep(0.05, 0.45, ph) : 1 - smoothstep(0.55, 0.95, ph);
       const sweep = (tri * 2 - 1) * T.sweepSearchDeg * _DEG;
-      const anchor = a.searchStage === 2 && a.searchCount > 0
-        ? Math.atan2(a.searchPoints[a.searchIdx % a.searchCount].x - a.position.x,
-          -(a.searchPoints[a.searchIdx % a.searchCount].z - a.position.z))
-        : a.headYaw;
-      a.torchYaw = approachAngle(a.torchYaw, anchor + sweep + jitter, 3.4 * dt);
+      a.torchTargetYaw = a.yaw + sweep + jitter;
+      a.torchYaw = approachAngle(a.torchYaw, a.torchTargetYaw, T.sweepSearchRate * dt);
       a.torchPitch = lerp(a.torchPitch, -0.24, clamp01(dt * 2));
+
     } else {
       // Alerted / Panic / Reporting: locked forward, shaking with the run.
+      a.torchStopT = 0;
+      a.torchAnchorYaw = a.yaw;
       a.torchYaw = approachAngle(a.torchYaw, a.yaw + jitter * 3, 6.0 * dt);
       a.torchPitch = lerp(a.torchPitch, -0.30, clamp01(dt * 3));
     }
+
+    // Published so the slew ceilings can be measured rather than asserted.
+    a.torchRate = dt > 1e-5 ? angDelta(prevYaw, a.torchYaw) / dt : 0;
+    a._torchPrevYaw = prevYaw;
+
+    this._faceTorch(a, dt);
+  }
+
+  /**
+   * ART §8.7's gaze stabilisation, pointed at the right target: for anyone holding a torch the
+   * eyes track the BEAM, with lag. This is what makes the cone honest — `_updateFovSens` reads
+   * `headYaw`, so from here on the lit arc and the dangerous arc are the same arc.
+   */
+  _faceTorch(a, dt) {
+    const T = CAMPER_TUNING;
+    if (a.state === 'Alerted' || a.state === 'Panic' || a.state === 'Reporting') {
+      a.headYaw = approachAngle(a.headYaw, a.torchYaw, T.turnRateRun * _DEG * dt);
+      return;
+    }
+    a.headYaw = approachAngle(a.headYaw, a.torchYaw, T.headFollowRate * dt);
+    a.headPitch = lerp(a.headPitch, a.torchPitch * 0.55, clamp01(dt * 2.2));
   }
 
   // ===============================================================================================
@@ -2542,12 +2658,41 @@ export class Campers {
     G.head.scale(1.0, 1.13, 1.04);
     G.head.translate(0, 0.108, 0);
 
-    G.torso = cap(0.152, 0.34, 1.30, 1.0, 0.74, 0.30);      // pelvis → shoulders, +Y
-    G.hips = cap(0.150, 0.06, 1.22, 1.0, 0.84, -0.06);      // the jacket hem — the flare
+    // TORSO: a TAPERED cylinder, not a capsule. A capsule is the same width at the waist as at
+    // the shoulders, and a silhouette with no taper is a bollard — that is precisely what the
+    // first silhouette sheet showed. 0.175 at the shoulder down to 0.132 at the waist is a 25%
+    // taper, and the top rim doubles as the shoulder line the head sits on.
+    const torso = new THREE.CylinderGeometry(0.175, 0.132, 0.60, seg, 1, false);
+    torso.scale(1.22, 1.0, 0.68);
+    torso.translate(0, 0.30, 0);                            // pelvis → shoulders, +Y
+    G.torso = torso;
+
+    // THE HEM. This piece used to hang to 0.68 m on a 1.77 m body — a mid-thigh overcoat — which
+    // buried the thighs and left only 38% of the figure as leg. Humans are ~48% leg and the eye
+    // is brutally sensitive to it: short legs is the single strongest 'that is a doll' cue in the
+    // whole rig. Shortened to a hip-length hem, which puts the leg break back at 44%.
+    G.hips = cap(0.150, 0.02, 1.24, 0.68, 0.86, -0.02);     // the jacket hem — the flare
     G.upperArm = cap(0.049, 0.19, 1.0, 1.0, 1.0, -0.144);
     G.foreArm = cap(0.043, 0.17, 1.0, 1.0, 1.0, -0.128);
     G.thigh = cap(0.073, 0.28, 1.0, 1.0, 1.0, -0.220);
-    G.shin = cap(0.058, 0.28, 1.0, 1.0, 1.0, -0.198);
+    // Reaches all the way to the ankle joint at -0.415. At -0.198 it stopped 19 mm short and the
+    // foot floated, which reads at any distance as a broken puppet.
+    G.shin = cap(0.058, 0.30, 1.0, 1.0, 1.0, -0.208);
+
+    // THE WINDBREAKER COLLAR. A period-correct nylon windbreaker's collar is a hard, slightly
+    // flared ring above a soft shoulder, and it is worth a whole draw call because it is the
+    // element that separates HEAD from TORSO at range. Without it the sphere sits straight on the
+    // capsule and the whole figure reads as a bowling pin — which is exactly what it read as.
+    const collar = new THREE.CylinderGeometry(0.128, 0.108, 0.11, seg, 1, false);
+    collar.translate(0, 0.055, 0);
+    G.collar = collar;
+
+    // SHORTS. Camp counsellors in 1986 wore shorts in the rain. One per leg (not a skirt) so the
+    // hem swings with the thigh, giving a moving horizontal value break at mid-thigh — which is
+    // the cheapest possible cue that a vertical blob has LEGS.
+    const shorts = new THREE.CylinderGeometry(0.098, 0.112, 0.235, seg, 1, false);
+    shorts.translate(0, -0.112, 0);
+    G.shorts = shorts;
 
     const foot = new THREE.BoxGeometry(0.088, 0.055, 0.205);
     foot.translate(0, -0.030, -0.052);
@@ -2588,11 +2733,13 @@ export class Campers {
       ['cap', G.cap, clothMat, 1],
       ['pony', G.pony, clothMat, 1],
       ['bun', G.bun, clothMat, 1],
+      ['collar', G.collar, clothMat, 1],
       ['torso', G.torso, clothMat, 1],
       ['hips', G.hips, clothMat, 1],
       ['upperArm', G.upperArm, clothMat, 2],
       ['foreArm', G.foreArm, skinMat, 2],
       ['thigh', G.thigh, clothMat, 2],
+      ['shorts', G.shorts, clothMat, 2],
       ['shin', G.shin, skinMat, 2],
       ['foot', G.foot, clothMat, 2],
       ['torch', G.torch, clothMat, 1],
@@ -2620,7 +2767,8 @@ export class Campers {
       for (let i = 0; i < m.count; i++) m.setMatrixAt(i, _mSeg);
       m.instanceMatrix.needsUpdate = true;
     }
-    this._applyPalette();
+    // NOTE: _applyPalette() is deliberately NOT called here. It needs `roster`, which does not
+    // exist yet at this point in init(). Calling it here is the bug that made the cast invisible.
   }
 
   /** Per-camper colour, written once. Skin, garment, trousers, hair — ART §8.4. */
@@ -2638,22 +2786,30 @@ export class Campers {
       m.instanceColor.setXYZ(slot, _col.r, _col.g, _col.b);
       m.instanceColor.needsUpdate = true;
     };
+    // The figure is banded on purpose: dark boots, bare/socked shin, dark shorts or trousers,
+    // DARK HEM, warm torso, dark collar, skin, hair. Five value changes stacked vertically is what
+    // makes a 9 px silhouette at 40 m (ART §7, the Locate row) read as a person rather than a post.
+    // The version this replaces painted torso AND hem the same warm colour, so the whole body from
+    // the hip to the neck was one uninterrupted orange block with no waist in it.
     let slot = 0;
     for (const a of this.roster.values()) {
       if (slot >= this._maxAgents) break;
       a.visualSlot = slot;
+      const shorts = a.legStyle === 'shorts';
       set('head', slot, a.skinColor);
-      set('cap', slot, a.hairColor);
+      set('cap', slot, a.capColor);            // a baseball cap is fabric, not hair
       set('pony', slot, a.hairColor);
-      set('bun', slot, a.hairColor);
-      set('torso', slot, a.garmentColor);     // THE warm garment — the palette's payoff
-      set('hips', slot, a.garmentColor);
+      set('bun', slot, a.headStyle === 'hood' ? a.coatColor : a.hairColor);
+      set('collar', slot, a.coatColor);        // the windbreaker's collar: dark, hard, above soft
+      set('torso', slot, a.garmentColor);      // THE warm garment — the palette's payoff (§8.4)
+      set('hips', slot, a.coatColor);          // the hem: the value break that gives him a waist
       set('torch', slot, 0x8a8f92);
       for (let s = 0; s < 2; s++) {
         set('upperArm', slot * 2 + s, a.garmentColor);
         set('foreArm', slot * 2 + s, a.skinColor);
-        set('thigh', slot * 2 + s, a.pantsColor);
-        set('shin', slot * 2 + s, a.skinColor);
+        set('thigh', slot * 2 + s, shorts ? a.skinColor : a.pantsColor);
+        set('shorts', slot * 2 + s, a.pantsColor);
+        set('shin', slot * 2 + s, shorts ? a.sockColor : a.pantsColor);
         set('foot', slot * 2 + s, 0x1c1a18);
       }
       slot++;
@@ -2677,7 +2833,11 @@ export class Campers {
     const colors = new Float32Array(pos.count * 4);
     for (let i = 0; i < pos.count; i++) {
       const t = clamp01(-pos.getZ(i) / len);
-      const alpha = (1 - t) * (1 - t) * 0.10;
+      // Two terms, not one. The quadratic alone put all the light in the first 3 m and the far
+      // end of the beam vanished, so a sweeping cone read as a bright smudge at the hip instead
+      // of as a bar of light travelling across the trees — and the SWEEP is the whole tell.
+      // The linear term keeps the far end alive out to 18 m.
+      const alpha = ((1 - t) * (1 - t) * 0.68 + (1 - t) * 0.32) * 0.155;
       colors[i * 4] = 1; colors[i * 4 + 1] = 1; colors[i * 4 + 2] = 1;
       colors[i * 4 + 3] = alpha;
     }
@@ -2730,8 +2890,10 @@ export class Campers {
     for (let i = 0; i < this.agents.length; i++) {
       const a = this.agents[i];
       if (!a.alive) continue;
+      // `visualSlot` starts at -1 and only becomes real in _applyPalette(). The lower bound is
+      // not decoration: setMatrixAt(-1, …) writes off the front of the instance buffer.
       const slot = a.visualSlot;
-      if (!isNum(slot) || slot >= this._maxAgents) continue;
+      if (!isNum(slot) || slot < 0 || slot >= this._maxAgents) continue;
       let d = Infinity;
       if (camPos) d = Math.hypot(a.position.x - camPos.x, a.position.z - camPos.z);
       if (d > CAMPER_TUNING.cullDistance) { a.visible = false; continue; }
@@ -2752,6 +2914,7 @@ export class Campers {
     M.cap.setMatrixAt(slot, _mSeg);
     M.pony.setMatrixAt(slot, _mSeg);
     M.bun.setMatrixAt(slot, _mSeg);
+    M.collar.setMatrixAt(slot, _mSeg);
     M.torso.setMatrixAt(slot, _mSeg);
     M.hips.setMatrixAt(slot, _mSeg);
     M.torch.setMatrixAt(slot, _mSeg);
@@ -2760,6 +2923,7 @@ export class Campers {
       M.upperArm.setMatrixAt(j, _mSeg);
       M.foreArm.setMatrixAt(j, _mSeg);
       M.thigh.setMatrixAt(j, _mSeg);
+      M.shorts.setMatrixAt(j, _mSeg);
       M.shin.setMatrixAt(j, _mSeg);
       M.foot.setMatrixAt(j, _mSeg);
     }
@@ -2780,11 +2944,20 @@ export class Campers {
     const running = a.state === 'Alerted' || a.state === 'Panic' || a.state === 'Reporting';
     const p = a.animPhase * Math.PI * 2;
 
-    const strideScale = moving ? clamp(a.speed / 1.4, 0.35, 2.1) : 0;
-    const legSwing = (running ? 0.62 : 0.42) * strideScale;
+    // STRIDE SOLVED FROM SPEED, NOT GUESSED. `_steer` advances the phase at `cadence` cycles per
+    // second, so in one cycle the body covers `speed / cadence` metres and each foot must travel
+    // exactly that far relative to the hips. With leg length L that fixes the hip amplitude:
+    //     2·L·sin(theta) = speed / cadence
+    // The old code used a flat 0.42 rad regardless, which at Robin's speed made every foot slide
+    // ~25 cm per step. Feet that skate are the single loudest 'this is a puppet' signal there is.
+    const legLen = 0.835 * s;                      // hip joint to sole, in world metres
+    const cad = a.cadence > 0.05 ? a.cadence : a.stepHz;
+    const stride = moving ? clamp(a.speed / cad, 0, 1.9) : 0;
+    const legSwing = moving ? Math.asin(clamp(stride / (2 * legLen), 0, 0.82)) : 0;
+    // Everything else that scales with gait scales off the SAME number, so nothing drifts.
+    const strideScale = moving ? clamp(legSwing / 0.55, 0.30, 1.90) : 0;
     const bob = moving ? a.bobAmp * Math.abs(Math.sin(p)) * strideScale : 0;
-    const roll = moving ? Math.sin(p) * 3.2 * _DEG : a.idleShift * 2.4 * _DEG
-      * smoothstep(0, 1.1, clamp01((9 - a.idleShiftT) / 1.1));
+    const roll = moving ? Math.sin(p) * 3.2 * _DEG : a.idleShift * 5.2 * _DEG;
     const lean = a.proneT > 0 ? 1.30 : (running ? 0.20 : (a.state === 'Searching' ? 0.07 : 0.02));
     const crouch = a.state === 'Curious' && a.stateT > 1.5 ? 0.12 : 0;
     a.crouchT = lerp(a.crouchT, crouch, clamp01(dt * 3));
@@ -2804,13 +2977,29 @@ export class Campers {
     M.hips.setMatrixAt(slot, _mSeg);
 
     // --- spine / torso ------------------------------------------------------------------------
+    // ART §8.7: shoulders counter-rotate against the hips, 11°, out of phase by pi.
     const shoulderCounter = moving ? -Math.sin(p) * 11 * _DEG : 0;
     _eul.set(lean, shoulderCounter, 0, 'YXZ');
     _mLocal.makeRotationFromEuler(_eul);
     _mLocal.setPosition(0, 0, 0);
     _mA.multiplyMatrices(_mRoot, _mLocal);        // _mA = chest frame, origin at the pelvis
-    _mSeg.copy(_mA).scale(_v1.set(b, 1, Math.max(0.8, b * 0.94)));
+    // The chest inflates 1.8% on the breath. Invisible as a measurement, decisive as a signal:
+    // it is the only thing moving on a camper who has stopped, and stillness is what kills these.
+    const breathe = moving ? 1 : 1 + a.breath * 0.018;
+    _mSeg.copy(_mA).scale(_v1.set(b * breathe, 1, Math.max(0.8, b * 0.94) * breathe));
     M.torso.setMatrixAt(slot, _mSeg);
+
+    // --- windbreaker collar: the hard ring that separates head from body at 40 m ---------------
+    if (a.headStyle === 'hood') {
+      _mSeg.makeScale(0, 0, 0);                    // Becca has no neck. That is the whole point.
+      M.collar.setMatrixAt(slot, _mSeg);
+    } else {
+      _mLocal.identity();
+      _mLocal.setPosition(0, 0.545, 0);
+      _mC.multiplyMatrices(_mA, _mLocal);
+      _mSeg.copy(_mC).scale(_v1.set(b * 0.96, 1, b * 0.92));
+      M.collar.setMatrixAt(slot, _mSeg);
+    }
 
     // --- head, gaze-stabilised ----------------------------------------------------------------
     a.gazeT += dt;
@@ -2868,40 +3057,53 @@ export class Campers {
     // --- arms ---------------------------------------------------------------------------------
     // Lag the opposite leg by 0.08 s (ART §8.7) — expressed as a phase offset, so it survives
     // every speed.
-    const armLag = moving ? 0.08 * a.stepHz * Math.PI * 2 : 0;
+    const armLag = moving ? 0.08 * cad * Math.PI * 2 : 0;
     const torchSide = 1;                            // right hand
     for (let side = 0; side < 2; side++) {
       const sgn = side === 0 ? -1 : 1;              // -1 left, +1 right
       const isTorchArm = a.hasTorch && sgn === torchSide;
 
-      let swing = moving ? -Math.sin(p + armLag) * sgn * a.armSwing * strideScale : 0;
+      const armPhase = Math.sin(p + armLag) * sgn;
+      let swing = moving ? -armPhase * a.armSwing * strideScale : 0;
       let outward = 0.09;
       let elbow = -0.28;
+      // A human arm swings mostly at the ELBOW: it straightens on the backswing and folds on the
+      // way forward, and that fold is what actually reads at range — the upper arm barely moves
+      // through 16-22°, but the hand travels twice as far. Without this the arms looked like
+      // pendulums bolted to a torso. Positive `armPhase` is this arm forward.
+      const elbowPump = moving ? -(0.34 + 0.30 * armPhase) * strideScale : 0;
 
       if (isTorchArm && (a.torchAimed || a.state !== 'Idle')) {
-        // THE TELL. A stabilised torch arm is a person who is looking.
-        swing = a.limbStyle === 'torchhigh' ? -1.05 : -0.42;
-        elbow = a.limbStyle === 'torchhigh' ? -0.55 : -0.72;
+        // THE TELL (ART §8.7). A stabilised torch arm is a person who is LOOKING; a swinging one
+        // is a person who is walking. No `elbowPump` here — that is the entire point.
+        // The upper arm stays close to vertical and the ELBOW does the carrying: -0.42/-0.72
+        // summed to 65° off vertical at the shoulder, which held the whole arm out horizontally
+        // like a sleepwalker. A torch at the hip is a folded elbow, not a raised shoulder.
+        swing = a.limbStyle === 'torchhigh' ? -0.62 : -0.10;
+        elbow = a.limbStyle === 'torchhigh' ? -0.85 : -1.05;
         outward = 0.13;
       } else if (isTorchArm) {
         swing = -0.24 + swing * 0.18;
-        elbow = -0.55;
+        elbow = -0.55 + elbowPump * 0.12;
       } else if (a.limbStyle === 'pockets') {
+        // Hands in pockets: the arm is pinned, so the COAT HEM is the moving edge (§8.3).
         swing = -0.10 + swing * 0.35; elbow = -0.95; outward = 0.02;
       } else if (a.limbStyle === 'across') {
         swing = -0.30 + swing * 0.25; elbow = -1.35; outward = -0.02;
       } else if (a.limbStyle === 'balance') {
-        outward = 0.34; elbow = -0.20;
+        outward = 0.34; elbow = -0.20 + elbowPump * 0.45;
       } else if (a.limbStyle === 'down') {
-        swing *= 0.55; elbow = -0.18;
+        swing *= 0.70; elbow = -0.18 + elbowPump * 0.55;
       } else if (a.limbStyle === 'wide') {
-        outward = 0.16;
+        outward = 0.16; elbow = -0.28 + elbowPump;
+      } else {
+        elbow = -0.28 + elbowPump;
       }
       if (a.proneT > 0) { swing = -1.5; elbow = -0.2; }
 
       _eul.set(swing, 0, sgn * outward, 'YXZ');
       _mLocal.makeRotationFromEuler(_eul);
-      _mLocal.setPosition(sgn * 0.185 * b, 0.575, 0);
+      _mLocal.setPosition(sgn * 0.200 * b, 0.560, 0);
       _mC.multiplyMatrices(_mA, _mLocal);
       const j = slot * 2 + side;
       _mSeg.copy(_mC).scale(_v1.set(b * 0.94, 1, b * 0.94));
@@ -2935,11 +3137,20 @@ export class Campers {
 
       _eul.set(hip, 0, sgn * 0.035, 'YXZ');
       _mLocal.makeRotationFromEuler(_eul);
-      _mLocal.setPosition(sgn * 0.088 * b, -0.02, 0);
+      _mLocal.setPosition(sgn * 0.092 * b, -0.02, 0);
       _mC.multiplyMatrices(_mRoot, _mLocal);
       const j = slot * 2 + side;
       _mSeg.copy(_mC).scale(_v1.set(b * 0.95, 1, b * 0.95));
       M.thigh.setMatrixAt(j, _mSeg);
+
+      // Shorts hem, hung off the thigh so it swings with the leg. Hidden on trouser-wearers.
+      if (a.legStyle === 'shorts' && a.proneT <= 0) {
+        _mSeg.copy(_mC).scale(_v1.set(b * 1.02, 1, b * 1.02));
+        M.shorts.setMatrixAt(j, _mSeg);
+      } else {
+        _mSeg.makeScale(0, 0, 0);
+        M.shorts.setMatrixAt(j, _mSeg);
+      }
 
       _eul.set(-knee, 0, 0, 'YXZ');
       _mLocal.makeRotationFromEuler(_eul);
@@ -2966,29 +3177,33 @@ export class Campers {
     for (let i = 0; i < this.agents.length; i++) this.agents[i].lightSlot = -1;
 
     // Rank. Small n; an insertion pass is cheaper than a sort with a comparator closure.
-    const pick = this._pickBuf ?? (this._pickBuf = []);
-    pick.length = 0;
+    // PARALLEL ARRAYS, not `{a, score}` objects: this runs every frame for every camper and the
+    // object literal was a per-frame allocation, which ARCHITECTURE §12 forbids outright.
+    const pickA = this._pickA ?? (this._pickA = []);
+    const pickS = this._pickS ?? (this._pickS = []);
+    let picked = 0;
     for (let i = 0; i < this.agents.length; i++) {
       const a = this.agents[i];
       if (!a.alive || !a.hasTorch || !a.visible) continue;
       const d = camPos ? Math.hypot(a.position.x - camPos.x, a.position.z - camPos.z) : 999;
       const score = (a.alert * 400) - d;
-      let k = pick.length;
-      while (k > 0 && pick[k - 1].score < score) { pick[k] = pick[k - 1]; k--; }
-      pick[k] = { a, score };
-      if (pick.length > slots.length) pick.length = slots.length;
+      // Full and not good enough to displace the weakest holder — drop it on the floor.
+      if (picked >= slots.length && score <= pickS[picked - 1]) continue;
+      let k = picked < slots.length ? picked : slots.length - 1;
+      while (k > 0 && pickS[k - 1] < score) { pickS[k] = pickS[k - 1]; pickA[k] = pickA[k - 1]; k--; }
+      pickS[k] = score; pickA[k] = a;
+      if (picked < slots.length) picked++;
     }
 
     for (let i = 0; i < slots.length; i++) {
       const s = slots[i];
-      const entry = pick[i];
-      if (!entry) {
+      const a = i < picked ? pickA[i] : null;
+      if (!a) {
         s.light.visible = false;
         s.mesh.visible = false;
         s.agent = null;
         continue;
       }
-      const a = entry.a;
       a.lightSlot = i;
       s.agent = a;
       a.handPosition(_v0);
@@ -3009,7 +3224,15 @@ export class Campers {
       s.mesh.position.copy(_v0);
       s.mesh.lookAt(_v1);
       s.mesh.material.color.set(a.torchTint);
-      s.mesh.material.opacity = a.wideTorch ? 0.8 : 1.0;
+      // The cone's WIDTH never changes with state — the player has to be able to learn one cone
+      // and trust it. Only the brightness does, and it tracks attention: a searching beam is a
+      // brighter beam because the hand is steadier and it is pointed at things, not at the ground.
+      const st = a.state;
+      const attn = st === 'Searching' ? 1.00
+        : (st === 'Alerted' || st === 'Panic' || st === 'Reporting') ? 1.00
+          : (st === 'Curious' || st === 'Noticing') ? 0.86
+            : 0.62;
+      s.mesh.material.opacity = attn * (a.wideTorch ? 0.85 : 1.0);
       s.mesh.scale.set(a.wideTorch ? 1.35 : 1, a.wideTorch ? 1.35 : 1, 1);
       s.mesh.updateMatrixWorld();
     }

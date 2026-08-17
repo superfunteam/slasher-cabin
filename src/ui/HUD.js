@@ -28,6 +28,9 @@
  *                      mechanic." The window is telegraphed by contract.
  *   SUBTITLES        — camper chatter only. There is nothing else to subtitle.
  *   TOASTS           — `text` is always the empty string. A toast is a glyph on a piece of paper.
+ *   WAYFINDING       — the plot is at (-140, 128) and the player is not. §13.8 forbids an
+ *                      objective marker; it does not forbid the manual's own ghost trail, aimed
+ *                      at the only place the manual is about. See the WAYFINDING section.
  *
  * ---------------------------------------------------------------------------------------------
  * FOUR RULES THIS FILE DOES NOT BREAK
@@ -55,6 +58,7 @@
  *   Player        eyePosition position stamina carryClass isCrouching fear
  *   NoiseSystem   maskWindowRemaining maskWindowIncoming maskLevel audibleRadius()
  *   Campers       campers|agents|getAll() → { id, position, detection }   (TODO(api), see below)
+ *   CabinSite     center|origin|plotCenter → Vector3  (wayfinding; falls back to slot centroid)
  *   Input         wasPressed('blueprint')
  *
  * TODO(api): `Campers.js` is a stub at time of writing. The detection meter therefore has two
@@ -508,6 +512,10 @@ const CSS = `
    1971 offset print; the screen-edge layer is not print, and a butt-capped arc has two hard
    chisel ends that read as a sci-fi gauge. The brief asks for a SOFT arc. */
 #sc-hud .edge ellipse,#sc-hud .edge line{fill:none;stroke-linecap:round;vector-effect:none}
+/* The wayfinder is the one thing on the edge layer that IS print — it is the manual's ghost
+   trail, lifted off the page — so it keeps §13.2's butt caps and mitred joins. */
+#sc-hud .edge .way path{fill:none;stroke-linecap:butt;stroke-linejoin:miter;stroke-miterlimit:4}
+#sc-hud .edge .way{transition:none}
 
 /* --- reticle --- */
 #sc-hud .ret{position:absolute;left:50%;top:50%;width:${G.reticleBox}px;height:${G.reticleBox}px;
@@ -687,6 +695,7 @@ export class HUD {
 
     // --- manual hint (the one teaching prompt in the game, Night One only)
     this._manualHint = 0;
+    this._manualRearm = 0;
     this._manualEverOpened = false;
 
     this._t = 0;
@@ -724,7 +733,12 @@ export class HUD {
       return dflt;
     };
     this._subtitlesOn = get('subtitles', true) !== false;
-    this._reducedMotion = get('reducedMotion', false) === true;
+    // The OS preference counts too. `settings.reducedMotion` defaults false, so a player who has
+    // set the system flag and never opened our options menu would otherwise get the full motion.
+    let osRM = false;
+    try { osRM = !!globalThis.matchMedia?.('(prefers-reduced-motion: reduce)')?.matches; }
+    catch { osRM = false; }
+    this._reducedMotion = get('reducedMotion', false) === true || osRM;
     this._colorblind = get('colorblind', 'none') || 'none';
     this._accent = this._colorblind === 'none' ? C.accent : C.accentCvd;
     this._dirAudioIndicator = get('directionalAudioIndicator', false) === true;
@@ -794,19 +808,19 @@ export class HUD {
     // opacities ever change, so a standing player writes nothing.
     this._wayG = svg('g', { class: 'way' });
     this._wayChev = svg('path', {
-      d: 'M-5.6 7.4 L0 0 L5.6 7.4', fill: 'none',
-      stroke: `rgba(${C.warm},1)`, 'stroke-width': W.thin,
+      d: 'M-6.4 8.4 L0 0 L6.4 8.4', fill: 'none',
+      stroke: `rgba(${C.warm},1)`, 'stroke-width': W.med,
       'stroke-linecap': 'butt', 'stroke-linejoin': 'miter', 'stroke-miterlimit': '4',
     });
     this._wayChevShade = svg('path', {
-      d: 'M-5.6 7.4 L0 0 L5.6 7.4', fill: 'none',
-      stroke: 'rgba(8,11,14,.55)', 'stroke-width': W.thin + 1.5,
+      d: 'M-6.4 8.4 L0 0 L6.4 8.4', fill: 'none',
+      stroke: 'rgba(8,11,14,.6)', 'stroke-width': W.med + 1.8,
       'stroke-linecap': 'butt', 'stroke-linejoin': 'miter', 'stroke-miterlimit': '4',
     });
     // The ghost trail (§13.4's dashed "where it came from"). Drawn at unit length and stretched
     // by the group's Y scale, so distance is a LENGTH, never a number and never a colour.
     this._wayTrail = svg('path', {
-      d: 'M0 10 V 40', fill: 'none', stroke: `rgba(${C.warm},1)`, 'stroke-width': W.hair,
+      d: 'M0 0 V 30', fill: 'none', stroke: `rgba(${C.warm},1)`, 'stroke-width': W.thin,
       'stroke-dasharray': '2.6 3.4', 'stroke-linecap': 'butt',
     });
     this._wayTrailG = svg('g');
@@ -889,7 +903,10 @@ export class HUD {
     // --- 3. the interaction prompt --------------------------------------------------------------
     const prompt = el('div', 'prompt');
     this._promptCard = prompt;
-    this._promptSvg = svg('svg', { viewBox: '0 0 40 40', width: 24, height: 24 });
+    // 30, not 24: the spiral-torque arrow is 1.75 turns between r=2.2 and r=10.5 in a 40-unit box.
+    // At 24 px its inner turns collapse into a blob and 'tighten' stops being distinguishable from
+    // 'rotate' — which is the one distinction the seating check depends on.
+    this._promptSvg = svg('svg', { viewBox: '0 0 40 40', width: 30, height: 30 });
     this._promptPaths = [];
     for (let i = 0; i < 8; i++) {
       const p = svg('path', { d: '', fill: 'none', stroke: C.ink, 'stroke-width': W.thin,
@@ -1059,8 +1076,12 @@ export class HUD {
     // creak feedback, no detection smear. `settings.subtitles` still works; nothing speaks."
     this.setStripped(n >= 7);
     this._manualEverOpened = false;
-    // The one teaching prompt in the game: the manual, Night One, for twenty seconds, once.
+    // The one teaching prompt in the game: the manual, Night One, until they use it.
     this._manualHint = n === 1 ? 20 : 0;
+    this._manualRearm = 0;
+    this._wayA = 0;
+    this._wayBearing = NaN;
+    this._siteProbe = 0;
   }
 
   _clearTransient() {
@@ -1226,8 +1247,14 @@ export class HUD {
   }
 
   resize(w, h) {
-    this._w = Math.max(1, w | 0 || this._w);
-    this._h = Math.max(1, h | 0 || this._h);
+    // Engine hands us the renderer's buffer size; once the root exists our own client box is
+    // authoritative (see `_viewW`). Measuring here as well stops the two from fighting each other
+    // one frame at a time.
+    if (this._root) { this._w = this._viewW(); this._h = this._viewH(); }
+    else {
+      this._w = Math.max(1, w | 0 || this._w);
+      this._h = Math.max(1, h | 0 || this._h);
+    }
     if (!this._edge) return;
     const cx = this._w / 2, cy = this._h / 2;
     const rx = Math.max(24, cx - G.edgeInset);
@@ -1333,7 +1360,12 @@ export class HUD {
     try { this._style?.remove(); } catch { /* detached */ }
     this._root = null; this._style = null; this._edge = null; this._ret = null;
     this._arcs = null; this._rings.length = 0; this._subSlots.length = 0; this._toasts.length = 0;
+    this._wayG = null; this._wayChev = null; this._wayChevShade = null;
+    this._wayTrail = null; this._wayTrailG = null; this._maskRing = null;
+    this._retVerbs = null; this._retBlocked = null; this._promptPaths = null;
+    this._carryGlyphs = null;
     this._camperList = null;
+    this._siteKnown = false;
     this._built = false;
   }
 
@@ -1369,8 +1401,20 @@ export class HUD {
         if (theirs !== want) this.bus?.emit(want ? 'ui:blueprint-open' : 'ui:blueprint-close', {});
       }
     }
-    if (this._manualHint > 0 && (this._manualEverOpened || this._phase !== 'build')) this._manualHint = 0;
-    else if (this._manualHint > 0) this._manualHint -= dt;
+    // The manual hint. Once the manual has been opened even once it is gone for the rest of the
+    // run and never returns. Until then it re-arms: the playtest found players who never opened it
+    // at all, and a single 20 s prompt on a night that lasts twelve minutes is a prompt they were
+    // looking at the floor for. 20 s on, 40 s off, and it stops the instant they press the key.
+    if (this._manualEverOpened || this._phase !== 'build') {
+      this._manualHint = 0;
+      this._manualRearm = 0;
+    } else if (this._manualHint > 0) {
+      this._manualHint -= dt;
+      if (this._manualHint <= 0) this._manualRearm = 40;
+    } else if (this._manualRearm > 0) {
+      this._manualRearm -= dt;
+      if (this._manualRearm <= 0) this._manualHint = 20;
+    }
 
     // --- the mask window (NoiseSystem is the authority; BuildSystem mirrors it).
     const ns = this._sys('NoiseSystem');
@@ -2065,7 +2109,16 @@ export class HUD {
     let want = 0, dist = 0, bearingDeg = NaN;
 
     const phaseOk = this._phase === 'build' || this._phase === 'chase' || this._phase === 'briefing';
-    const gateOk = !this._stripped && !this._paused && !this._hidden && !this._blueprintOpen && phaseOk;
+    const hardOff = this._stripped || this._paused || this._hidden || this._blueprintOpen;
+    const gateOk = !hardOff && phaseOk;
+
+    // A hard gate is not a fade. §12.8 takes the HUD AWAY on Night Seven; a mark that lingers for
+    // a second after the manual opens is a mark that is still there while you are reading.
+    if (hardOff) {
+      this._wayA = 0;
+      styleNum(g, 'opacity', 0);
+      return;
+    }
 
     if (eye && gateOk) {
       const dx = this._siteP.x - eye.x, dz = this._siteP.z - eye.z;
@@ -2074,8 +2127,10 @@ export class HUD {
         const worldYaw = Math.atan2(dx, -dz);
         bearingDeg = this._wrapDeg((worldYaw - this._cameraYaw()) * 180 / Math.PI);
       }
-      // Distance ramp. Nothing at all inside 26 m; full weight past 45 m.
-      want = clamp01((dist - G.wayNear) / 19) * 0.17;
+      // Distance ramp. Nothing at all inside 26 m; full weight past 45 m. 0.30 measured, not
+      // guessed: at 0.17 the mark was present in the pixels and could not be found on the screen,
+      // which is the exact failure the playtest reported.
+      want = clamp01((dist - G.wayNear) / 19) * 0.30;
       // Yield to the detection meter. `critical` and above owns the frame.
       let peak = 0;
       for (let i = 0; i < this._sources.length; i++) {
@@ -2125,8 +2180,10 @@ export class HUD {
     const qs = Math.round(this._wayLen / 3) * 3;
     if (tm.len !== qs) {
       tm.len = qs;
-      // The trail path is authored from y=10 to y=40 (30 px); scale Y to hit the wanted length.
-      this._wayTrailG.setAttribute('transform', `scale(1 ${(qs / 30).toFixed(3)})`);
+      // The trail is authored 0..30 and hung 11 px behind the apex, so the gap after the chevron
+      // is constant and only the TAIL grows. Scaling the whole path instead pushed the trail away
+      // from its own arrowhead as the player walked off.
+      this._wayTrailG.setAttribute('transform', `translate(0 11) scale(1 ${(qs / 30).toFixed(3)})`);
     }
   }
 
@@ -2327,7 +2384,9 @@ export class HUD {
     const hide = this._stripped || this._paused || this._blueprintOpen || this._hidden
       || this._carryCount === 0;
     if (this._carryFade > 0) this._carryFade -= dt * 0.9;
-    const base = 0.30 + 0.20 * clamp01(this._carryFade);
+    // 0.30 measured as a ghost over the game's own dark ground — the drawing was there and could
+    // not be read. 0.44, briefly 0.62 on a change, is still the quietest thing on the screen.
+    const base = 0.44 + 0.18 * clamp01(this._carryFade);
     styleNum(this._carryEl, 'opacity', hide ? 0 : base, 100);
     if (hide) return;
 
@@ -2346,8 +2405,9 @@ export class HUD {
       this._carryG.setAttribute('transform', `translate(0 ${qs}) rotate(${qt} 22 78)`);
     }
 
-    // The load rule: a dimension line that bows under the weight it is measuring.
-    const w = 8 + this._carryCount * 7;
+    // The load rule: a dimension line that bows under the weight it is measuring. Capped at 17 so
+    // the end ticks stay inside the 44-wide viewBox — at four parts they were being cut in half.
+    const w = Math.min(17, 8 + this._carryCount * 7);
     const bow = 1 + 9 * load;
     const dm = this._carryLoad.__hud || (this._carryLoad.__hud = {});
     const qw = Math.round(w), qb = Math.round(bow * 2) / 2;
@@ -2498,16 +2558,32 @@ export class HUD {
     return Number.isFinite(y) ? y : 0;
   }
 
+  /**
+   * The size of the box this overlay actually draws into, in CSS px.
+   *
+   * NOT `ctx.width/height`. Those are the RENDERER's drawing-buffer size, and they are allowed to
+   * lag or differ — a measured case: the window went to 1600x900 while `ctx.width` stayed 1280,
+   * so the edge layer kept a 1280x720 viewBox, `preserveAspectRatio="none"` stretched it by 1.25x
+   * horizontally and 1.25x vertically, and every bearing the detection meter reported landed in
+   * the wrong place. The root is `position:fixed; inset:0`, so its own client box is the viewport
+   * by construction and is the only number that can be wrong for zero frames.
+   */
   _viewW() {
-    const w = this.ctx.width | 0;
-    if (w > 1) return w;
-    return Math.max(1, (globalThis.innerWidth | 0) || 1280);
+    const r = this._root;
+    const c = r ? (r.clientWidth | 0) : 0;
+    if (c > 1) return c;
+    const iw = (globalThis.innerWidth | 0);
+    if (iw > 1) return iw;
+    return Math.max(1, (this.ctx.width | 0) || 1280);
   }
 
   _viewH() {
-    const h = this.ctx.height | 0;
-    if (h > 1) return h;
-    return Math.max(1, (globalThis.innerHeight | 0) || 720);
+    const r = this._root;
+    const c = r ? (r.clientHeight | 0) : 0;
+    if (c > 1) return c;
+    const ih = (globalThis.innerHeight | 0);
+    if (ih > 1) return ih;
+    return Math.max(1, (this.ctx.height | 0) || 720);
   }
 
   _wrapDeg(d) {

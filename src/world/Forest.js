@@ -33,11 +33,37 @@
  *   LOD1  34 – 78 m   2 groups      4 species x 2 x (2 or 1)
  *   LOD2  78 – 165 m  1 group       4 species x 1 x (2 or 1)
  *   IMP   165 m +     1 per species 4
- *   undergrowth                     16
+ *   undergrowth                     22   (9 kinds; deadfall and stump carry a moss sub-mesh,
+ *                                         saplings a stem and a needle sub-mesh)
  *
- * V = settings.tier(3, 4, 5, 6). Ultra worst case is 42 + 14 + 7 + 4 + 16 = 83, and in
- * practice most LOD0 buckets are empty (a 34 m disc holds ~90 trees across 24 buckets), so a
+ * V = settings.tier(3, 4, 5, 6). Ultra worst case is 42 + 14 + 7 + 4 + 22 = 89, and in
+ * practice most LOD0 buckets are empty (a 34 m disc holds ~110 trees across 24 buckets), so a
  * bucket with count 0 is `visible = false` and costs nothing.
+ *
+ * ---------------------------------------------------------------------------------------
+ * MEASURED, quality=ultra, 1600x900, seed 0x51a5cab (shots/fx-diag-final.png is the raw dump)
+ * ---------------------------------------------------------------------------------------
+ *   trees 5846   undergrowth instances 43621   trunk+prop colliders 9671
+ *   buckets 57   sub-meshes 89 (the ceiling)   unique bucket geometry 43 105 tris
+ *
+ *   shot          Forest.stats.drawCalls   renderer.info.calls   scene tris
+ *   ridge                  70                     265              836 k
+ *   moon                   73                     264            1 008 k
+ *   site-close             78                     283            1 685 k
+ *   forest-deep            78                     316            1 529 k
+ *
+ * `drawCalls` counts the COLOUR pass, which is the budget the brief names: peak 78, ceiling 89,
+ * both under 120. The renderer's own counter is higher because every shadow-casting light
+ * re-draws the LOD0 buckets: with the forest toggled off at the same camera, site-close falls
+ * 283 -> 173 and forest-deep 316 -> 186, so the forest's TOTAL cost including shadow passes is
+ * 110 and 130 calls respectively. Triangles attributable to the forest: 1 167 k (site-close),
+ * 1 118 k (forest-deep), again including shadow passes.
+ *
+ * Frame time was measured as a median of 30 `render + glFinish` pairs with the forest enabled
+ * and disabled. DO NOT TRUST THE ABSOLUTE NUMBERS in this harness: the review browser keeps the
+ * tab hidden, several agents' contexts share the GPU, and the same measurement swung between
+ * 22 and 120 ms across runs — one pass even timed the forest as NEGATIVE cost. The draw-call
+ * and triangle counts above are deterministic and are the numbers to regress against.
  *
  * The visible set is rebuilt only when the camera moves > 1 m or turns > ~3.5 deg (or every
  * 12 frames), by copying pre-baked 16-float matrices — no Matrix4.compose() per frame, no
@@ -95,11 +121,19 @@ const SPECIES_NAME = ['fir', 'pine', 'birch', 'snag'];
  * for all four meshes and a LOD swap cannot resize a tree.
  */
 const CANON_H = 20;
-/** Per-LOD tessellation. Index is the LOD band; the impostor is generated separately. */
-const LOD_SIDES = [9, 6, 4];
-const LOD_SEGS = [13, 7, 4];
-const LOD_WHORLS = [10, 5, 3];
-const LOD_BRANCH = [6, 4, 3];
+/**
+ * Per-LOD tessellation. Index is the LOD band; the impostor is generated separately.
+ *
+ * LOD0 was 9 sides / 13 segments / 10 whorls / 6 branches. That is a fine tree at 20 m and a
+ * bad one at 3 m, which is where the camera now stands: `padClear` is 2.6 m, so the treeline
+ * is close enough that a 9-gon trunk shows facets down its silhouette and a 10-whorl crown
+ * shows sky between the whorls. 12 sides puts the facet angle at 30 deg, under the point where
+ * the specular terminator on a wet trunk reads as a crease, and 14 whorls closes the gaps.
+ */
+const LOD_SIDES = [12, 7, 4];
+const LOD_SEGS = [16, 8, 4];
+const LOD_WHORLS = [14, 8, 4];
+const LOD_BRANCH = [7, 5, 4];
 
 /**
  * Material keys per species: [bark, foliage|null].
@@ -115,7 +149,13 @@ const SPECIES_MATS = [
   ['bark-pine', 'foliage-pine'],
   ['bark-pine', 'foliage-pine'],
   ['bark-birch', 'foliage-pine'],
-  ['weathered-wood', null],
+  // Snags used to take 'weathered-wood'. Its albedo is PAL.weathered #6b6155 — luminance 0.135,
+  // FOUR TIMES bark.dry (#38312a, 0.032), and it is authored for sawn boards that have sat in
+  // the sun on a porch, not for a dead fir standing in seven days of rain. A 20 m column of it
+  // is the single brightest thing in the treeline, and snags are 5-10% of the forest: those are
+  // the "sparse pale sticks" of shots/ridge-fixed.png. A soaked standing dead conifer keeps its
+  // bark for years and reads black at night, so it takes the same bark as its living neighbours.
+  ['bark-pine', null],
 ];
 
 /**
@@ -139,15 +179,38 @@ const SPECIES_MATS = [
  * a readPixels histogram, not guessed.
  */
 const FOLIAGE_ALPHA_TEST = {
-  'foliage-pine': 0.11,
-  'foliage-fern': 0.55,
+  // 0.11 sat just ABOVE the measured 0.106 mean, which is the wrong side of the rule this
+  // comment block states: at 0.11 the coarsest mips fall under threshold and a needle card
+  // vanishes entirely. That was survivable when a LOD0 card carried one un-tiled sprig; now
+  // that the LOD0 spray tiles the sprig up to 4x (see NEEDLE_TILE_M) the card reaches those
+  // mips several metres nearer, so the threshold has to drop below the mean to keep it. The
+  // side effect is the one we want anyway: more fragments pass, so the mass is more opaque.
+  'foliage-pine': 0.085,
+  // 0.55 kept only the strongest pinnae of the frond card, which turned an already regular comb
+  // into a stark row of palings under a lantern. 0.46 fills the frond back in while staying well
+  // clear of the card's 0.337 mean, so a distant fern still fades out instead of inflating.
+  'foliage-fern': 0.46,
 };
 
 /** Every tunable in one object. */
 export const FOREST_TUNING = {
   chunkSize: 32,
-  rMin: 3.1,               // densest spacing, metres
-  rMax: 11.5,              // thinnest spacing before it reads as a clearing
+  /**
+   * SPACING. Was 3.1 / 11.5, which put the mean trunk-to-trunk distance around 6.5 m. A managed
+   * second-growth Douglas fir stand runs 2.4-4 m; 6.5 m is a park. From the ridge you could see
+   * the sky between every pair of trees, which is why the treeline read as a picket fence
+   * instead of the solid black wall of keyart-lake.png. Dropping to 2.55 / 9.4 takes the tree
+   * count from 3924 to ~5000 and closes the gaps without touching the LOD budget: LOD0 caps at
+   * 384 instances PER species PER variant and a 34 m disc at this spacing holds ~110 firs.
+   *
+   * 2.55 / 9.4 was tried first and is too far. MEASURED at that spacing, the forest-deep camera
+   * had four trunks inside 5.2 m and the nearest at 2.55 m; a 20 m fir whose lowest whorl starts
+   * at 2.6 m puts its skirt through the camera, and the frame became an unreadable lattice of
+   * lantern-lit branches (shots/fx-a-forestdeep.png). 2.90 is the low end of a real managed
+   * Douglas fir stand and leaves a body's width between trunks, which the stealth game needs.
+   */
+  rMin: 2.90,              // densest spacing, metres
+  rMax: 10.2,              // thinnest spacing before it reads as a clearing
   lod0: 34, lod1: 78, lod2: 165,
   /**
    * SHADOW BAND. Only LOD0 casts, and LOD0 already ends at `lod0` metres, so this number is
@@ -156,14 +219,21 @@ export const FOREST_TUNING = {
    * carries the key art (Flashlight `lantern-core`) has shadow.camera.far = 26, so anything
    * past that contributes to the moon pass only, and the moon runs at intensity 0.03.
    */
-  shadowRange: 28,
+  /**
+   * MEASURED: at 28 m, site-close cost 310 renderer draw calls with the forest on and 172 with
+   * it off — 138 calls for 76 visible sub-meshes, i.e. 62 of them were shadow-pass repeats. The
+   * lantern's shadow camera has far = 26 and its intensity is 1/r^2, so a trunk at 24 m casts a
+   * shadow whose contrast is under a fiftieth of the one at 3 m. 20 m keeps every caster that
+   * can throw the key art's "enormous shadows into the pines" and drops the rest.
+   */
+  shadowRange: 20,
   /**
    * Undergrowth casts on a much tighter leash than trees. A stump throws a readable shadow at
    * 8 m in a lantern beam and nothing at all at 25 m, but it costs a full extra draw either
    * way, x every shadow-casting light. Ferns and salal never cast (see the `cast` flags in
    * `_buildUndergrowthBuckets`) — only the solid deadfall logs and stumps do.
    */
-  ugShadowRange: 15,
+  ugShadowRange: 11,
   /**
    * BUILD-PAD CLEARING — the single number that decides whether the key art exists.
    *
@@ -186,7 +256,16 @@ export const FOREST_TUNING = {
    * footprint, and a trunk inside it fouls carry paths and the piers.
    */
   padClear: 2.6,
-  padFeather: 11.0,
+  /**
+   * MEASURED with padFeather 11.0: the nearest trunk to the site-close camera was 11.77 m, and
+   * at 1/r^2 from a lantern 2 m away that trunk receives about 3% of the light the frame does —
+   * so the treeline behind the frame went to black instead of showing the half-dozen
+   * individually modelled trunks of keyart-site.png. The pad half-extent (Terrain's, 12 m) sets
+   * the floor and is not mine to move, so the lever left is the feather: shortening it to 7 m
+   * brings full stand density to 21.6 m from pad centre instead of 25.6, which thickens the
+   * wall right behind the frame without putting a trunk anywhere near the working area.
+   */
+  padFeather: 7.0,
   lodJitter: 0.14,         // per-tree +/- on the LOD rings so the transition is not an arc
   undergrowthChunksPerFrame: 3,
   rebuildMoveEps: 1.0,     // metres
@@ -318,8 +397,14 @@ function emitTube(buf, pts, radii, sides, opts = {}) {
         }
       }
       if (barkAmp > 0) {
-        rr *= 1 + barkAmp * (Math.sin(a * 5.0 + arc[i] * 2.7) * 0.55
-          + Math.sin(a * 11.0 - arc[i] * 4.3) * 0.3);
+        // Three octaves, not two. Two sines at 5 and 11 lobes produce a beat with a visible
+        // period — at 3 m you read the same ridge marching round the trunk. The third term at
+        // 19 lobes with a steep vertical rate breaks it into plates the size of real fir bark
+        // (~60 mm), which is what the lantern's grazing light needs in order to have anything
+        // to model. Sum of weights is 1.0 so `barkAmp` stays the true peak radial deviation.
+        rr *= 1 + barkAmp * (Math.sin(a * 5.0 + arc[i] * 2.7) * 0.46
+          + Math.sin(a * 11.0 - arc[i] * 4.3) * 0.30
+          + Math.sin(a * 19.0 + arc[i] * 9.1) * 0.24);
       }
       rr += offset;
       const rx = N.x * ca + B.x * sa, ry = N.y * ca + B.y * sa, rz = N.z * ca + B.z * sa;
@@ -355,29 +440,63 @@ function emitTube(buf, pts, radii, sides, opts = {}) {
 }
 
 /**
- * One alpha card. Anchored at its BASE so the foliage art (which is drawn base-at-v0)
- * grows the right way up. `taper` narrows the tip.
+ * TEXEL DENSITY ON A FOLIAGE CARD — the defect that made the near canopy a pile of sticks.
+ *
+ * Materials.js maps a foliage card's texture EXACTLY ONCE across its quad (§64: "Foliage cards
+ * are the exception — those map once across their quad"), and the baked 'needle' card contains
+ * seven sprigs whose needles are 0.16 of the card's height. That is correct art at a 0.5 m card
+ * and nonsense at a 3.9 m one: the needles become 620 mm spikes. shots/fx-c-forestdeep.png is
+ * the proof — the crown over the lantern is a fan of lantern-lit RODS with no needle mass on it
+ * at all, because each "needle" is the size of a forearm.
+ *
+ * Both the baked 'pine-needles' set (Textures.js `_rtOpts`) and the Canvas2D fallback card
+ * (Materials.js `_makeTexture`) are created with RepeatWrapping, so the fix is free: emit UVs
+ * beyond 0..1 and let the sprig tile. NEEDLE_TILE_M is the world size of one tile.
  */
-function emitCard(buf, bx, by, bz, ux, uy, uz, sx, sy, sz, w, h, nx, ny, nz, taper = 0.55) {
+const NEEDLE_TILE_M = 0.55;
+/**
+ * Tiling costs distance: a tiled card reaches the top of its mip chain nearer to the camera,
+ * and once the mip average falls under `alphaTest` the whole card is discarded. Cap the repeat
+ * so a LOD0 card at the 34 m ring still resolves ~21 px per tile.
+ */
+const NEEDLE_TILE_MAX = 4;
+
+function tileFor(size) {
+  const t = size / NEEDLE_TILE_M;
+  return t < 1 ? 1 : (t > NEEDLE_TILE_MAX ? NEEDLE_TILE_MAX : t);
+}
+
+/**
+ * One alpha card. Anchored at its BASE so the foliage art (which is drawn base-at-v0)
+ * grows the right way up. `taper` narrows the tip. `tu`/`tv` repeat the texture across the
+ * quad; leave them at 1 for art that is authored one-per-card (a fern frond IS one frond).
+ */
+function emitCard(buf, bx, by, bz, ux, uy, uz, sx, sy, sz, w, h, nx, ny, nz,
+  taper = 0.55, tu = 1, tv = 1) {
   const hw = w * 0.5, tw = hw * taper;
   const tx = bx + ux * h, ty = by + uy * h, tz = bz + uz * h;
+  // The tip is narrower, so its u range shrinks with it — otherwise the tiling shears and the
+  // needles fan out toward the point of the card.
+  const u0 = tu * 0.5 * (1 - taper), u1 = tu - u0;
   const i0 = buf.push(bx - sx * hw, by - sy * hw, bz - sz * hw, nx, ny, nz, 0, 0);
-  const i1 = buf.push(bx + sx * hw, by + sy * hw, bz + sz * hw, nx, ny, nz, 1, 0);
-  const i2 = buf.push(tx + sx * tw, ty + sy * tw, tz + sz * tw, nx, ny, nz, 1, 1);
-  const i3 = buf.push(tx - sx * tw, ty - sy * tw, tz - sz * tw, nx, ny, nz, 0, 1);
+  const i1 = buf.push(bx + sx * hw, by + sy * hw, bz + sz * hw, nx, ny, nz, tu, 0);
+  const i2 = buf.push(tx + sx * tw, ty + sy * tw, tz + sz * tw, nx, ny, nz, u1, tv);
+  const i3 = buf.push(tx - sx * tw, ty - sy * tw, tz - sz * tw, nx, ny, nz, u0, tv);
   buf.quad(i0, i1, i2, i3);
 }
 
 /** Two cards crossed about the growth axis — the cheapest thing that reads as volume. */
-function emitCross(buf, p, up, side, w, h, nrm, taper = 0.55) {
+function emitCross(buf, p, up, side, w, h, nrm, taper = 0.55, tiled = false) {
+  const tu = tiled ? tileFor(w) : 1;
+  const tv = tiled ? tileFor(h) : 1;
   emitCard(buf, p.x, p.y, p.z, up.x, up.y, up.z, side.x, side.y, side.z,
-    w, h, nrm.x, nrm.y, nrm.z, taper);
+    w, h, nrm.x, nrm.y, nrm.z, taper, tu, tv);
   const s2x = up.y * side.z - up.z * side.y;
   const s2y = up.z * side.x - up.x * side.z;
   const s2z = up.x * side.y - up.y * side.x;
   const l = 1 / Math.max(1e-6, Math.hypot(s2x, s2y, s2z));
   emitCard(buf, p.x, p.y, p.z, up.x, up.y, up.z, s2x * l, s2y * l, s2z * l,
-    w, h, nrm.x, nrm.y, nrm.z, taper);
+    w, h, nrm.x, nrm.y, nrm.z, taper, tu, tv);
 }
 
 export class Forest {
@@ -487,7 +606,10 @@ export class Forest {
       this._registerColliders();
       this._bindEvents();
 
-      this._ugRadius = this.ctx?.settings?.tier?.(22, 30, 38, 46) ?? 38;
+      // Streaming radius for undergrowth. At 38 m the mat of litter stopped inside the lantern's
+      // own reach on open ground and the eye read the boundary as a clearing. 54 m puts it past
+      // the fog's half-visibility distance in every canonical shot.
+      this._ugRadius = this.ctx?.settings?.tier?.(26, 34, 44, 54) ?? 44;
       this._pregenUndergrowth();
 
       this.ready = true;
@@ -709,7 +831,11 @@ export class Forest {
 
     // Clumps and gaps. A uniform field is the thing that reads as a video game.
     let d = dens;
-    d *= clamp(0.34 + 1.05 * fbm2(x * 0.021 + 11.3, z * 0.021 - 7.9, 4, 2.0, 0.5), 0.05, 1.5);
+    // The clump term used to average 0.34, which pulled the WHOLE map's density down by two
+    // thirds and left the mean trunk spacing at 6.2 m no matter what `rMin` said. Now that the
+    // crowns are the right size (7.6 m spread, not 12) the stand has to actually be a stand:
+    // averaging 0.52 puts the measured mean spacing near 5 m, which is canopy closure.
+    d *= clamp(0.52 + 1.05 * fbm2(x * 0.021 + 11.3, z * 0.021 - 7.9, 4, 2.0, 0.5), 0.08, 1.6);
     // thinner along the shore, thicker as the ground rises to the ridge
     d *= 0.46 + 0.54 * smooth01(wl + 0.4, wl + 4.0, y);
     d *= 0.84 + 0.52 * smooth01(6, 24, y);
@@ -723,15 +849,25 @@ export class Forest {
     return FT.rMin + (FT.rMax - FT.rMin) * Math.pow(1 - d, 1.35);
   }
 
-  /** Species weights vary with the ground: birch by water, pine and snags on the exposed rise. */
+  /**
+   * Species weights vary with the ground: birch by water, pine and snags on the exposed rise.
+   *
+   * BIRCH IS AN ACCENT, NOT A POPULATION. 'bark-birch' is PAL.barkBirch #b9b6a6 — luminance
+   * 0.72, twenty-two times bark.dry. That is correct for paper birch and catastrophic in bulk:
+   * at 6-21% of 4000 trees it put several hundred near-white 12 m columns through the treeline,
+   * and aerial perspective then lifted them further. keyart-lake.png has no birch in it at all;
+   * it is a spruce-fir wall. So birch drops to 2-9%, only where the ground is genuinely wet and
+   * low, where a real stand of them would be — and its height factor drops from 0.62 to 0.52 so
+   * it sits UNDER the conifer canopy and never skylines against the moon.
+   */
   _pickSpecies(rand, y, exposure, wet) {
     const wl = this.terrain?.waterLevel ?? 0;
     const low = 1 - smooth01(wl + 0.5, wl + 7.0, y);
     const high = smooth01(8, 26, y);
-    let wFir = 0.50 + 0.16 * low - 0.14 * high;
-    let wPine = 0.34 - 0.14 * low + 0.20 * high;
-    let wBirch = 0.06 + 0.10 * low + 0.05 * wet;
-    let wSnag = 0.09 + 0.07 * high * exposure;
+    let wFir = 0.57 + 0.14 * low - 0.12 * high;
+    let wPine = 0.36 - 0.12 * low + 0.22 * high;
+    let wBirch = 0.015 + 0.055 * low + 0.020 * wet * low;
+    let wSnag = 0.050 + 0.045 * high * exposure;
     const s = wFir + wPine + wBirch + wSnag;
     let r = rand.next() * s;
     if ((r -= wFir) < 0) return SP_FIR;
@@ -829,7 +965,7 @@ export class Forest {
       // ART §10 A2: per-instance height gauss(19, 5.5) clamped [7, 34], radius correlated.
       let hTarget = clamp(rand.gauss(19, 5.5), 7, 34);
       if (spec === SP_PINE) hTarget *= 1.06;
-      else if (spec === SP_BIRCH) hTarget *= 0.62;
+      else if (spec === SP_BIRCH) hTarget *= 0.52;
       else if (spec === SP_SNAG) hTarget *= 0.66;
       // spacing correlates with size: a tree with room grows bigger
       hTarget *= 0.82 + 0.34 * smooth01(FT.rMin, FT.rMax, pr[i]);
@@ -837,7 +973,12 @@ export class Forest {
       this._tx[i] = x; this._ty[i] = y; this._tz[i] = z;
       this._tspec[i] = spec; this._tvar[i] = variant;
       this._thgt[i] = hTarget;
-      this._tphase[i] = rand.next();
+      // Materials.js reads aWind.y as a phase ONLY when it is > 0.0001; below that it falls
+      // back to a hash of the instance origin. Both are per-instance, so nothing ever swayed in
+      // unison, but the two paths give different distributions and a tree whose rand landed near
+      // zero silently changed phase family. Bias the draw off the floor so every tree in the
+      // forest is on the same explicit, uniformly distributed phase.
+      this._tphase[i] = 0.02 + 0.97 * rand.next();
       this._texpo[i] = clamp01(expo);
       this._tjit[i] = 1 + (rand.next() * 2 - 1) * FT.lodJitter;
 
@@ -940,7 +1081,7 @@ export class Forest {
     for (let i = 0; i < this._n; i++) {
       if (this._tspec[i] === SP_SNAG) continue;
       const h = this._thgt[i] || 20;
-      const rc = h * (this._tspec[i] === SP_BIRCH ? 0.34 : 0.27);
+      const rc = h * (this._tspec[i] === SP_BIRCH ? 0.20 : 0.19);
       const gx = (this._tx[i] - this._cgX0) / cell;
       const gz = (this._tz[i] - this._cgZ0) / cell;
       const rr = rc / cell;
@@ -954,7 +1095,17 @@ export class Forest {
         }
       }
     }
-    for (let i = 0; i < g.length; i++) g[i] = clamp01(g[i] / 2.4);
+    /**
+     * The splat kernel is (1 - d^2) over a disc of radius `rc`, which integrates to HALF the
+     * disc's area, so the raw sum under-reads closure by about 2x. Closure in the dense stand is
+     * N.pi.rc^2/A = pi(3.0)^2/(5.0)^2 = 1.13, i.e. genuinely closed, and the divisor has to be
+     * chosen so that reads as ~1. MEASURED at /2.6: mean 0.135, max 0.947, 68% of cells under
+     * 0.2 — a forest that tells Weather there is no shelter anywhere and NoiseSystem that every
+     * cell is a clearing. /1.8 puts the closed stands at the top of the range and leaves the
+     * lake, the camp, the pad and the granite benches at zero, which is the gradient the
+     * consumers actually want.
+     */
+    for (let i = 0; i < g.length; i++) g[i] = clamp01(g[i] / 1.8);
   }
 
   /** Chunk bounding spheres, recomputed once per-instance scales are known. */
@@ -1017,18 +1168,62 @@ export class Forest {
       // Root flare: the bottom 1.6 m swells and lobes, so the tree sits IN the ground instead
       // of being pushed into it like a pin. ART_DIRECTION §10 failure mode A2.
       flare: { h: 1.6, amp: 0.85, lobes: rand.int(4, 6), phase: rand.next() * TAU },
-      bark: lod === 0 ? 0.055 : (lod === 1 ? 0.028 : 0),
+      // 0.055 was tuned when the nearest trunk stood 23 m away. `padClear` is 2.6 m now, so a
+      // 0.28 m fir shows 15 mm of relief at arm's length — below the normal map's own detail and
+      // invisible. 0.090 gives 25 mm plates, which is what actual Douglas fir bark measures, and
+      // it is a RADIAL displacement so the trunk's silhouette breaks up too, not just its shading.
+      bark: lod === 0 ? 0.090 : (lod === 1 ? 0.038 : 0),
       cap: true, uvCirc: TAU * r0,
     });
 
     const whorls = LOD_WHORLS[lod];
     const nb = LOD_BRANCH[lod] + (isFir ? 0 : -1);
-    const t0 = isFir ? 0.13 : 0.46;
+    /**
+     * CROWN PROPORTION — the bug that made the forest unwalkable.
+     *
+     * `crown0` is the length of the longest branch, i.e. the crown RADIUS. It was 0.30 H. On a
+     * 20 m canonical tree that is a 6 m branch and a TWELVE METRE wide crown, and the per-
+     * instance scale runs to 1.7, so the biggest firs carried a 20 m spread. Measure a real
+     * 20 m Douglas fir in a closed stand and you get 5-7 m of spread. Two consequences, both
+     * visible in shots/fx-a-forestdeep.png and fx-b-forestdeep.png: every camera at eye height
+     * inside the forest is INSIDE a crown, and the silhouette is a blob where keyart-lake.png
+     * has spires. 0.19 H gives a 7.6 m spread — still generous, still closes the canopy at the
+     * spacing above, and it costs a third of the foliage overdraw.
+     *
+     * `t0` is where the lowest live whorl sits. 0.13 put a fir's skirt at 2.6 m, which on a
+     * short instance is below head height. A fir in a closed stand self-prunes to roughly a
+     * quarter of its height, and keyart-site.png is built on bare trunks with the canopy far
+     * overhead — that is the frame the whole game is about, so 0.24 it is.
+     */
+    const t0 = isFir ? 0.24 : 0.46;
     const droop = isFir ? -0.30 : 0.12;
-    const crown0 = (isFir ? 0.30 : 0.27) * H;
+    const crown0 = (isFir ? 0.190 : 0.170) * H;
     const up = new THREE.Vector3(), side = new THREE.Vector3();
     const nrm = new THREE.Vector3(), base = new THREE.Vector3();
+    const core = new THREE.Vector3();
 
+    /**
+     * A CANOPY WITH AN INSIDE.
+     *
+     * The old crown was a shell: one cross of cards at the branch base and, at LOD0 only, one
+     * smaller cross halfway out. Seen from the ground that is a ring of leaves with a hole in
+     * the middle, and the moon shot showed exactly that — you could see sky through the axis of
+     * every tree. Real conifer foliage occupies a VOLUME, and volume is what makes the canopy
+     * read near-black: light entering the crown has to miss four or five layers of needles to
+     * get out again, and it doesn't.
+     *
+     * So every branch now carries up to four crosses spaced along its own axis:
+     *
+     *   inner  0.14 L   wide, short, steeply drooped  — the dark core against the trunk
+     *   main   0.00 L   the long primary spray
+     *   mid    0.50 L   narrower, carries the branch silhouette outward
+     *   tip    0.80 L   a small sprig that breaks the card's straight edge
+     *
+     * LOD1 keeps main + mid (the mid-ground wants mass, not parallax), LOD2 keeps main only.
+     * The cards deliberately OVERLAP: an alpha-tested card at 0.11 threshold passes roughly a
+     * third of its area, so three overlapping layers are needed before a needle mass stops
+     * being see-through, and that is the whole reason the treeline used to glow with fog.
+     */
     for (let w = 0; w < whorls; w++) {
       const tw = t0 + (0.955 - t0) * (whorls === 1 ? 0.55 : w / (whorls - 1));
       const y = tw * H;
@@ -1050,17 +1245,43 @@ export class Forest {
           emitTube(bark, [b0, b1, b2], [tr * 0.55, tr * 0.30, tr * 0.11], 4,
             { uvCirc: TAU * tr * 0.5 });
         }
-        emitCross(fol, base, up, side, L * (isFir ? 0.60 : 0.72), L * 1.08, nrm,
-          isFir ? 0.32 : 0.44);
         if (lod === 0) {
-          base.addScaledVector(up, L * 0.44);
-          emitCross(fol, base, up, side, L * 0.38, L * 0.52, nrm, 0.28);
+          // A SPRAY OF SEGMENTS, NOT ONE BRANCH-LENGTH CARD. Four crosses spaced along the
+          // branch's own axis, each about a third of its length, overlapping by half. The card
+          // that used to run the whole 3.5 m of branch is gone: no single quad is now longer
+          // than ~1.3 m, which is what keeps the tiled needle texture at a sane texel density
+          // (see NEEDLE_TILE_M) and what stops the crown reading as four flat planes.
+          for (let k = 0; k < 4; k++) {
+            const t = 0.10 + k * 0.235;
+            const wob = (1 - t) * 0.92 + 0.12;      // spray narrows toward the tip
+            core.set(base.x + up.x * L * t, base.y + up.y * L * t - L * 0.04 * (1 - t),
+              base.z + up.z * L * t);
+            emitCross(fol, core, up, side, L * 0.56 * wob, L * 0.36 * wob, nrm,
+              0.44 + 0.30 * t, true);
+          }
+        } else if (lod === 1) {
+          // Mid-ground wants mass, not parallax: two long cards, untiled so the mip chain keeps
+          // them alive out to the 78 m ring.
+          emitCross(fol, base, up, side, L * (isFir ? 0.80 : 0.92), L * 1.06, nrm,
+            isFir ? 0.34 : 0.46);
+          core.set(base.x + up.x * L * 0.50, base.y + up.y * L * 0.50,
+            base.z + up.z * L * 0.50);
+          emitCross(fol, core, up, side, L * 0.52, L * 0.62, nrm, 0.30);
+        } else {
+          emitCross(fol, base, up, side, L * (isFir ? 0.86 : 0.96), L * 1.10, nrm,
+            isFir ? 0.34 : 0.46);
         }
       }
     }
+    // The leader: a spire, plus a skirt just under it so the tip is not a bare stick against
+    // the moon — the top 8% of a fir is the part that is always silhouetted.
     up.set(0, 1, 0); side.set(1, 0, 0); nrm.set(0, 1, 0);
-    base.set(0, H * 0.92, 0);
-    emitCross(fol, base, up, side, crown0 * 0.22, H * 0.10, nrm, 0.10);
+    base.set(0, H * 0.90, 0);
+    emitCross(fol, base, up, side, crown0 * 0.52, H * 0.13, nrm, 0.10, lod === 0);
+    if (lod <= 1) {
+      base.set(0, H * 0.82, 0);
+      emitCross(fol, base, up, side, crown0 * 0.78, H * 0.11, nrm, 0.34, lod === 0);
+    }
     return r0;
   }
 
@@ -1083,7 +1304,7 @@ export class Forest {
     }
     emitTube(bark, pts, radii, sides, {
       flare: { h: 0.95, amp: 0.55, lobes: rand.int(3, 5), phase: rand.next() * TAU },
-      bark: lod === 0 ? 0.020 : 0, uvCirc: TAU * r0,
+      bark: lod === 0 ? 0.034 : 0, uvCirc: TAU * r0,
     });
 
     const top = pts[pts.length - 1];
@@ -1103,8 +1324,8 @@ export class Forest {
       emitTube(bark, lpts, lrad, Math.max(3, sides - 2), { uvCirc: TAU * r0 * 0.7, cap: true });
     }
 
-    const clusters = [16, 8, 4][lod];
-    const cy = H * 0.74, rx = H * 0.30, ry = H * 0.24;
+    const clusters = [22, 11, 5][lod];
+    const cy = H * 0.74, rx = H * 0.20, ry = H * 0.18;
     const up = new THREE.Vector3(), side = new THREE.Vector3();
     const nrm = new THREE.Vector3(), base = new THREE.Vector3();
     for (let c = 0; c < clusters; c++) {
@@ -1136,7 +1357,7 @@ export class Forest {
     }
     emitTube(bark, pts, radii, sides, {
       flare: { h: 2.0, amp: 1.0, lobes: rand.int(4, 7), phase: rand.next() * TAU },
-      bark: lod === 0 ? 0.085 : 0.035, uvCirc: TAU * r0,
+      bark: lod === 0 ? 0.115 : 0.040, uvCirc: TAU * r0,
     });
 
     const tp = pts[pts.length - 1], tipR = radii[radii.length - 1];
@@ -1183,9 +1404,13 @@ export class Forest {
       return { bark, fol: null, radius: 0.32 };
     }
     const fol = new Buf();
-    const w = (spec === SP_BIRCH ? 0.36 : 0.30) * H;
-    const y0 = (spec === SP_PINE ? 0.40 : (spec === SP_BIRCH ? 0.42 : 0.10)) * H;
-    const taper = spec === SP_BIRCH ? 0.78 : 0.10;
+    // Wider and blunter than before (0.30 H / taper 0.10). A 165 m fir subtends ~7 px of width
+    // at 72 deg on a 1600 px frame; a card tapered to 10% is a needle three pixels wide at half
+    // height, and the alpha cutout then eats most of what is left. The far treeline of
+    // keyart-lake.png is a CONTINUOUS soft silhouette, so the impostor has to be a solid wedge.
+    const w = (spec === SP_BIRCH ? 0.22 : 0.185) * H;
+    const y0 = (spec === SP_PINE ? 0.40 : (spec === SP_BIRCH ? 0.44 : 0.20)) * H;
+    const taper = spec === SP_BIRCH ? 0.80 : 0.17;
     for (let k = 0; k < 3; k++) {
       const a = (k / 3) * Math.PI + rand.range(-0.1, 0.1);
       const ca = Math.cos(a), sa = Math.sin(a);
@@ -1386,7 +1611,10 @@ export class Forest {
   /** A fallen log. The moss buffer keeps ONLY the up-facing quads — moss does not grow under. */
   _genLog(rand, v) {
     const wood = new Buf(), moss = new Buf();
-    const L = rand.range(2.6, 6.2), r = rand.range(0.16, 0.34);
+    // 2.6-6.2 m at a scale of up to 1.35 gave 8.4 m logs. Three of those crossing near the
+    // camera is a log jam, not a forest floor, and the deadfall kind is placed by a Poisson-free
+    // random scatter that has no idea two of them overlap. 2.2-4.6 m, scaled to at most 1.15.
+    const L = rand.range(2.2, 4.6), r = rand.range(0.15, 0.29);
     const segs = 5, sag = rand.range(0.0, 0.11);
     const pts = [], radii = [];
     for (let i = 0; i <= segs; i++) {
@@ -1397,8 +1625,10 @@ export class Forest {
         Math.sin(t * 3.1 + v) * L * 0.035));
       radii.push(r * (1 - 0.34 * t));
     }
-    emitTube(wood, pts, radii, 7, { cap: true, bark: 0.055, uvCirc: TAU * r });
-    emitTube(moss, pts, radii, 7, { upOnly: { min: 0.26, offset: 0.014 }, uvCirc: TAU * r });
+    // 7 sides at 0.055 of radial ripple made a corrugated slab, not a log. 9 sides at 0.032
+    // rounds the section and keeps the ripple as bark rather than as flutes.
+    emitTube(wood, pts, radii, 9, { cap: true, bark: 0.032, uvCirc: TAU * r });
+    emitTube(moss, pts, radii, 9, { upOnly: { min: 0.26, offset: 0.014 }, uvCirc: TAU * r });
     // A torn root plate at the butt end, half in the ground.
     const nr = rand.int(2, 4);
     for (let i = 0; i < nr; i++) {
@@ -1411,8 +1641,14 @@ export class Forest {
     return { wood, moss };
   }
 
+  /**
+   * A cut stump. Returns wood AND a moss cap built from the up-facing quads only, on the same
+   * `upOnly` path the deadfall logs use — moss grows on the top of a stump and on its north
+   * shoulder, never on its underside, and getting that wrong is the tell that a forest was
+   * assembled rather than grown.
+   */
   _genStump(rand, v) {
-    const buf = new Buf();
+    const wood = new Buf(), moss = new Buf();
     const h = rand.range(0.32, 0.95) + v * 0.1, r = rand.range(0.22, 0.42);
     const pts = [], radii = [];
     for (let i = 0; i <= 3; i++) {
@@ -1420,17 +1656,95 @@ export class Forest {
       pts.push(new THREE.Vector3(0, y, 0));
       radii.push(r * (1 - 0.14 * t));
     }
-    emitTube(buf, pts, radii, 7, {
-      flare: { h: 0.72, amp: 1.15, lobes: rand.int(4, 7), phase: rand.next() * TAU },
-      bark: 0.07, cap: true, uvCirc: TAU * r,
-    });
+    // The flare used to be 0.72 m tall at 1.15 amplitude on a stump only 0.32-0.95 m high, so
+    // the ENTIRE stump lived inside the buttress curve and came out as a smooth cone. Half the
+    // height and two thirds the amplitude leaves a stump with a straight barrel and a flared
+    // foot, which is what a chainsaw leaves behind.
+    const flare = { h: 0.45, amp: 0.75, lobes: rand.int(4, 7), phase: rand.next() * TAU };
+    emitTube(wood, pts, radii, 9, { flare, bark: 0.05, cap: true, uvCirc: TAU * r });
+    // The sawn face, a disc of moss just proud of the top, and a lip that laps a few centimetres
+    // down the rim. Deliberately NOT the `upOnly` tube path the logs use: a stump's flanks are
+    // vertical, their normals have ny ~ 0.05, and `upOnly` would correctly emit nothing at all.
+    // Moss on a stump is a cap, not a skin, so it is authored as a cap.
+    const nseg = 9, top = h + 0.010, rm = r * (1 - 0.14) + 0.010;
+    const cIdx = moss.push(0, top, 0, 0, 1, 0, 0, 0);
+    const ring = [], lip = [];
+    const drop = rand.range(0.04, 0.13);
+    for (let s = 0; s <= nseg; s++) {
+      const a = (s % nseg) / nseg * TAU;
+      const cx = Math.cos(a), cz = Math.sin(a);
+      ring.push(moss.push(cx * rm, top, cz * rm, 0, 1, 0, cx * rm, cz * rm));
+      const nl = 1 / Math.hypot(cx, 0.55, cz);
+      lip.push(moss.push(cx * rm, top - drop * (0.55 + 0.45 * Math.sin(a * 3 + flare.phase)),
+        cz * rm, cx * nl, 0.55 * nl, cz * nl, cx * rm, cz * rm - drop));
+    }
+    for (let s = 0; s < nseg; s++) {
+      moss.tri(cIdx, ring[s], ring[s + 1]);
+      moss.quad(ring[s + 1], ring[s], lip[s], lip[s + 1]);
+    }
     const nsp = rand.int(3, 5);
     for (let s = 0; s < nsp; s++) {
       const a = (s / nsp) * TAU + rand.range(-0.3, 0.3);
-      emitTube(buf, [
+      emitTube(wood, [
         new THREE.Vector3(Math.cos(a) * r * 0.5, h - 0.05, Math.sin(a) * r * 0.5),
         new THREE.Vector3(Math.cos(a) * r * 0.75, h + rand.range(0.06, 0.34), Math.sin(a) * r * 0.75),
       ], [r * 0.26, 0.012], 4, { cap: true, uvCirc: TAU * r * 0.26 });
+    }
+    return { wood, moss };
+  }
+
+  /**
+   * NEEDLE DUFF — the low mat of fallen needles, twigs and moss that covers a conifer floor.
+   *
+   * This is the cheapest thing in the file and it does the most work. Bare ground between trees
+   * is the loudest "video game" tell there is (§10 A2), and the fix is not more ferns: a real
+   * forest floor is 90% litter and 10% standing plants. The cards lie almost flat with their
+   * normals up, in a shallow dome 5-18 cm tall, so from a 1.7 m eye they are seen at a 15-25 deg
+   * grazing angle and read as texture on the ground rather than as objects standing on it — and
+   * at that angle each one covers a lot of screen for two triangles.
+   */
+  _genDuff(rand, v) {
+    const buf = new Buf();
+    // SIZE IS THE WHOLE DESIGN. The first version used 0.45-1.1 m blades and the lantern turned
+    // the forest floor into a bonfire of straw (shots/fx-a-forestdeep.png): at 4 m a 0.9 m card
+    // carrying the pine-needle texture reads as half a dozen separate 300 mm STICKS, and a
+    // hundred of those is not ground cover, it is debris. Duff is 90-240 mm and WIDER than it is
+    // long, so the card is a patch rather than a blade and the needle texture tiles inside it.
+    const R = rand.range(0.30, 0.62) + v * 0.08;
+    const n = 8 + v * 3 + rand.int(0, 4);
+    for (let i = 0; i < n; i++) {
+      const a = i * PHYLLO + rand.range(-0.3, 0.3);
+      const rr = Math.sqrt((i + 0.4) / n);
+      const ca = Math.cos(a), sa = Math.sin(a);
+      const L = rand.range(0.09, 0.24);
+      // outward and barely upward: the patch lies on the ground and lifts at its far edge
+      const lift = rand.range(0.06, 0.26);
+      const ul = 1 / Math.hypot(ca, lift, sa);
+      const y = 0.010 + (1 - rr) * rand.range(0.01, 0.07);
+      emitCard(buf, ca * R * rr * 0.6, y, sa * R * rr * 0.6,
+        ca * ul, lift * ul, sa * ul, -sa, 0, ca,
+        L * 2.1, L, 0, 1, 0, 0.92);
+    }
+    return buf;
+  }
+
+  /**
+   * Waist-high bracken. `_genFern` tops out at 0.88 m of frond; a western sword-fern colony in
+   * a wet draw is 1.5 m and it is what actually hides a body. Weighted toward shade and wet.
+   */
+  _genBracken(rand, v) {
+    const buf = new Buf();
+    const n = 7 + v * 2 + rand.int(0, 3);
+    for (let i = 0; i < n; i++) {
+      const a = i * PHYLLO + rand.range(-0.22, 0.22);
+      const L = rand.range(0.85, 1.55);
+      const ca = Math.cos(a), sa = Math.sin(a);
+      const lift = rand.range(0.75, 1.9);
+      const ul = 1 / Math.hypot(ca, lift, sa);
+      const nl = 1 / Math.hypot(ca * 0.3, 1, sa * 0.3);
+      emitCard(buf, ca * 0.05, 0.02 + rand.next() * 0.10, sa * 0.05,
+        ca * ul, lift * ul, sa * ul, -sa, 0, ca,
+        L * 0.34, L, ca * 0.3 * nl, nl, sa * 0.3 * nl, 0.20);
     }
     return buf;
   }
@@ -1441,8 +1755,8 @@ export class Forest {
     for (let i = 0; i < n; i++) {
       const a = i * PHYLLO + rand.range(-0.3, 0.3);
       const ca = Math.cos(a), sa = Math.sin(a);
-      const L = rand.range(0.7, 1.9);
-      const rise = rand.range(0.06, 0.20);
+      const L = rand.range(0.45, 1.15);
+      const rise = rand.range(0.05, 0.16);
       const pts = [], radii = [];
       for (let k = 0; k <= 4; k++) {
         const t = k / 4;
@@ -1488,7 +1802,10 @@ export class Forest {
     if (!this.group) return;
 
     const tierIdx = this.ctx?.settings?.tier?.(0, 1, 2, 3) ?? 2;
-    const cap = this.ctx?.settings?.tier?.(240, 420, 640, 900) ?? 640;
+    // Per-bucket instance ceiling. Raised with the streaming radius below — a bucket that hits
+    // its cap silently drops instances in `_push`, and the symptom is a ring of bare ground at
+    // exactly the streaming radius, which looks like a bug in the terrain rather than in here.
+    const cap = this.ctx?.settings?.tier?.(320, 560, 900, 1300) ?? 900;
 
     const fernMat = this._material('foliage-fern', {
       color: 0x1d2f22, roughness: 0.4, side: THREE.DoubleSide, alphaTest: 0.3,
@@ -1496,7 +1813,17 @@ export class Forest {
     const needleMat = this._material('foliage-pine', {
       color: 0x16241c, roughness: 0.45, side: THREE.DoubleSide, alphaTest: 0.3,
     });
-    const woodMat = this._material('weathered-wood', { color: 0x3a352c, roughness: 0.9 });
+    /**
+     * Deadfall and stumps take BARK, not 'weathered-wood'.
+     *
+     * Same measurement that moved the snags: PAL.weathered is #6b6155, luminance 0.135, and it
+     * is authored for sun-bleached sawn boards. On a 0.9 m stump 3 m from a lantern it is the
+     * brightest thing in the frame — shots/fx-d-forestdeep.png has three of them standing in the
+     * lantern pool reading as tan traffic cones. A stump in this forest is a wet, rotting,
+     * half-mossed lump; #38312a with the bark normal is what it looks like. The moss cap
+     * (PAL.moss #1d2b1c) is what breaks up the top, and it can only do that against a dark base.
+     */
+    const woodMat = this._material('bark-pine', { color: 0x2f2a22, roughness: 0.92 });
     const mossMat = this._material('ground-moss', { color: 0x2b3a28, roughness: 0.8 });
     const barkMat = this._material('bark-pine', { color: 0x342d26, roughness: 0.9 });
     const fernDepth = this._depthMaterial('foliage-fern');
@@ -1528,11 +1855,22 @@ export class Forest {
       cast: false, receive: true, depth: depth ?? null,
     }];
 
-    add('fern', 0.26, 2, (r, v) => cardPart('fern', this._genFern(r, v), fernMat, tierIdx >= 2 ? fernDepth : null),
+    // Litter first, and heaviest. A conifer floor is mostly duff; standing plants are the
+    // exception, not the rule, and weighting it the other way is what leaves bare ground.
+    add('duff', 0.30, 2, (r, v) => cardPart('duff', this._genDuff(r, v), needleMat, null),
+      { scale: [0.8, 1.5], tilt: 1.0, sink: 0.01, shade: 0.35 });
+    add('fern', 0.24, 2, (r, v) => cardPart('fern', this._genFern(r, v), fernMat, tierIdx >= 2 ? fernDepth : null),
       { scale: [0.8, 1.5], tilt: 0.75, wet: 0.6, shade: 0.5 });
-    add('huckleberry', 0.19, 2, (r, v) => cardPart('huck', this._genShrub(r, v), fernMat, null),
+    add('bracken', 0.13, 2, (r, v) => cardPart('bracken', this._genBracken(r, v), fernMat, tierIdx >= 2 ? fernDepth : null),
+      { scale: [0.75, 1.25], tilt: 0.7, wet: 0.7, shade: 0.6 });
+    // Huckleberry and salal take the NEEDLE card, not the fern card. The baked 'fern' card is a
+    // rachis with 22 evenly spaced straight pinnae — correct for a sword fern and, on a broad-
+    // leaved shrub, a picket fence. Two of them side by side in a lantern beam is unmistakable:
+    // see the crop of shots/fx-e-forestdeep.png, which is a row of white palings on the ground.
+    // Neither card is botanically a salal leaf; the needle sprig at least reads as a mass.
+    add('huckleberry', 0.21, 2, (r, v) => cardPart('huck', this._genShrub(r, v), needleMat, null),
       { scale: [0.75, 1.4], tilt: 0.6, shade: 0.2, open: 0.3 });
-    add('salal', 0.21, 2, (r, v) => cardPart('salal', this._genSalal(r, v), fernMat, null),
+    add('salal', 0.25, 2, (r, v) => cardPart('salal', this._genSalal(r, v), needleMat, null),
       { scale: [0.9, 1.6], tilt: 0.95, wet: 0.3, shade: 0.4 });
     add('deadfall', 0.06, 2, (r, v) => {
       const g = this._genLog(r, v);
@@ -1540,15 +1878,18 @@ export class Forest {
         { name: 'wood', geo: g.wood.toGeometry('ug-log'), mat: woodMat, flex: 0, cast: tierIdx >= 2, receive: true },
         { name: 'moss', geo: g.moss.toGeometry('ug-logmoss'), mat: mossMat, flex: 0, cast: false, receive: true },
       ];
-    }, { scale: [0.8, 1.35], tilt: 0.9, sink: 0.10, shade: 0.3 });
-    add('stump', 0.06, 2, (r, v) => [{
-      name: 'stump', geo: this._genStump(r, v).toGeometry('ug-stump'), mat: woodMat,
-      flex: 0, cast: tierIdx >= 2, receive: true,
-    }], { scale: [0.85, 1.5], tilt: 0.5, sink: 0.08 });
-    add('roots', 0.11, 2, (r, v) => [{
+    }, { scale: [0.8, 1.15], tilt: 0.9, sink: 0.12, shade: 0.3 });
+    add('stump', 0.07, 2, (r, v) => {
+      const g = this._genStump(r, v);
+      return [
+        { name: 'stump', geo: g.wood.toGeometry('ug-stump'), mat: woodMat, flex: 0, cast: tierIdx >= 2, receive: true },
+        { name: 'moss', geo: g.moss.toGeometry('ug-stumpmoss'), mat: mossMat, flex: 0, cast: false, receive: true },
+      ];
+    }, { scale: [0.85, 1.5], tilt: 0.5, sink: 0.08 });
+    add('roots', 0.08, 2, (r, v) => [{
       name: 'roots', geo: this._genRoots(r, v).toGeometry('ug-roots'), mat: barkMat,
       flex: 0, cast: false, receive: true,
-    }], { scale: [0.8, 1.6], tilt: 1.0, sink: 0.02, shade: 0.5 });
+    }], { scale: [0.7, 1.2], tilt: 1.0, sink: 0.03, shade: 0.5 });
     add('sapling', 0.11, 1, (r) => {
       const g = this._genSapling(r);
       return [
@@ -1570,7 +1911,9 @@ export class Forest {
     const rand = new Rand(hashInt(seed ^ 0x0dec0de) | 0);
     const T = this.terrain;
     const cs = FT.chunkSize;
-    const per = this.ctx?.settings?.tier?.(52, 90, 140, 180) ?? 140;
+    // Candidate samples per 32 m chunk (1024 m²). 180 with an acceptance around 0.5 gave one
+    // plant per 11 m² — one fern per two-and-a-half parking spaces, which is a lawn.
+    const per = this.ctx?.settings?.tier?.(80, 140, 220, 300) ?? 220;
     const kinds = this._ugKinds;
     if (!kinds.length) return;
 
@@ -1603,7 +1946,10 @@ export class Forest {
         if (y < wl + 0.12 || slope > 0.62 || path > 0.55 || surf === 'gravel') continue;
 
         const canopy = this.canopyAt(x, z);
-        let accept = 0.22 + 0.78 * clamp01(0.35 + 0.85 * dens + 0.45 * canopy);
+        // Floor raised from 0.22 to 0.46: even the thinnest, most exposed granite bench in a
+        // coastal conifer forest has needle drift and moss on it. Nothing but a worn path, open
+        // water or the camp clearing should ever be genuinely bare.
+        let accept = 0.46 + 0.54 * clamp01(0.40 + 0.85 * dens + 0.45 * canopy);
         accept *= 1 - 0.85 * clamp01(path * 1.8);
         if (surf === 'granite') accept *= 0.20;
         else if (surf === 'moss') accept *= 1.12;
@@ -1638,7 +1984,7 @@ export class Forest {
         m.toArray(sM, k * 16);
         sB[k] = flat;
         sE[k] = clamp01(expo * (1 - 0.55 * canopy));
-        sP[k] = rand.next();
+        sP[k] = 0.02 + 0.97 * rand.next();   // see _placeTrees: keep aWind.y off the 0.0001 floor
         k++;
 
         if (this.physics && (kd.name === 'deadfall' || kd.name === 'stump')) {

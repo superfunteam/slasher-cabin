@@ -32,8 +32,14 @@
  *    They carry `userData.fogProxy === true` and `userData.inScene === false`. If you add one to
  *    the scene you will trigger a full shader recompile and break the §3.6 budget.
  * 3. Materials are SHARED — never dispose one you got from `Materials.get()`. Props owns exactly
- *    six materials of its own (flame, ember, coal, glow-canvas, glow-window, contact-decal) plus
- *    one cloth material opted in through `Materials.patchMaterial()`.
+ *    eight materials of its own (flame, ember, smoke, coal, glow-canvas, glow-window, glow-fire,
+ *    contact-decal) plus a stain overlay and four fabric materials opted in through
+ *    `Materials.patchMaterial()` (cloth, cloth-warm, tarp-sheet, canvas-lit). `_auditMaterials()`
+ *    runs in init() and names, at WARN level, every key that resolved to an untextured fallback —
+ *    the silent-grey-boxes failure is now impossible to have without a log line saying so.
+ * 3b. The overlay decals in `public/img/decal-*.png` are the ONLY fetched art in this file. They
+ *    are loaded fire-and-forget after init(); the stain mesh stays hidden until one lands, so the
+ *    game still satisfies "zero binary art assets required" (ARCHITECTURE §1).
  * 4. Geometry UVs are authored IN METRES (Materials.js requires this) — computed from the
  *    world-space position and dominant normal axis after transform, so every box in the camp
  *    gets correct texel density at 10 cm and at 10 m with no per-object UV authoring.
@@ -395,19 +401,35 @@ void main(){
  * contrast window, and emit black with that as straight alpha. Identical safety property to
  * DECAL_FRAG — if any pass ignores blending the worst case is a black smudge, never a white card.
  */
+const STAIN_VERT = /* glsl */`
+attribute vec4 aStainUv;   // xy uv scale, zw uv offset — one sub-rect of the atlas per instance
+varying vec2 vUv;
+varying vec2 vQuad;
+varying float vDepth;
+void main(){
+  vQuad = uv;
+  vUv = uv * aStainUv.xy + aStainUv.zw;
+  vec4 wp = instanceMatrix * vec4(position, 1.0);
+  vec4 mv = modelViewMatrix * wp;
+  vDepth = -mv.z;
+  gl_Position = projectionMatrix * mv;
+}
+`;
+
 const STAIN_FRAG = /* glsl */`
 uniform sampler2D uTex;
 uniform float uStrength;
 uniform vec2 uContrast;     // x low, y high — the luminance window that becomes 0..1 stain
 uniform vec2 uFade;
 varying vec2 vUv;
+varying vec2 vQuad;
 varying float vDepth;
 void main(){
   vec3 t = texture2D(uTex, vUv).rgb;
   float lum = dot(t, vec3(0.2126, 0.7152, 0.0722));
   float m = 1.0 - smoothstep(uContrast.x, uContrast.y, lum);
   // feather the quad edges so a stain never shows its own rectangle
-  vec2 e = min(vUv, 1.0 - vUv) * 2.0;
+  vec2 e = min(vQuad, 1.0 - vQuad) * 2.0;
   float edge = smoothstep(0.0, 0.34, min(e.x, e.y));
   float a = m * edge * uStrength * (1.0 - smoothstep(uFade.x, uFade.y, vDepth));
   if (a < 0.004) discard;
@@ -791,9 +813,13 @@ export class Props {
     this.emberPoints = null;
     this.coalMesh = null;
 
+    this.smokeMesh = null;
     this.uFlame = null;
     this.uEmber = null;
     this.uCoal = null;
+    this.uSmoke = null;
+    this.uGlowFire = null;
+    this.uStain = null;
     this.uGlowCanvas = null;
     this.uGlowWindow = null;
 
@@ -825,6 +851,7 @@ export class Props {
 
       this._resolveLandmarks();
       this._makeOwnMaterials();
+      this._auditMaterials();
 
       const kit = new Kit();
       this._buildCamp(kit);
@@ -838,14 +865,17 @@ export class Props {
       this._buildScatter();
       this._buildFire();
       this._buildDecals();
+      this._buildStains();
       this._publishAnchors();
       this._assertNoPointLights();
 
       if (this.ctx.scene) this.ctx.scene.add(this.group);
       this.ready = true;
+      this._loadStains();
       const ms = ((typeof performance !== 'undefined') ? performance.now() : 0) - t0;
       Log.debug(`Props: ${this._meshes.length} merged + ${this._instanced.length} instanced, `
-        + `${this.lights.length} lights, ${this.interactables.length} interactables, ${ms.toFixed(1)}ms`);
+        + `${this.lights.length} lights, ${this.interactables.length} interactables, `
+        + `${this._stainCount} stains, ${ms.toFixed(1)}ms`);
     } catch (e) {
       Log.error('Props.init failed — camp will be absent but the game still runs.', e);
     }
@@ -890,6 +920,14 @@ export class Props {
       }
     }
     if (this.uCoal) { this.uCoal.uTime.value = t; this.uCoal.uFlicker.value = fl; }
+    // The ground pool is the fire's own light landing on dirt, so it tracks the fire's flicker
+    // exactly — half amplitude, because a pool on a rough surface integrates the flame.
+    if (this.uGlowFire) this.uGlowFire.uFlicker.value = 1 + (fl - 1) * 0.55;
+    if (this.uSmoke) {
+      this.uSmoke.uTime.value = t;
+      const gs = this._globalUniforms();
+      if (gs && gs.uWind) this.uSmoke.uWind.value.copy(gs.uWind.value);
+    }
 
     // ---- tents and windows breathe on their own slow noise, never in sync with the fire
     if (this.uGlowCanvas) this.uGlowCanvas.uFlicker.value = 0.94 + 0.09 * vnoise1(t * 1.15 + 21.0);
@@ -928,8 +966,17 @@ export class Props {
     this.group.traverse((o) => { if (o.isMesh || o.isPoints) o.geometry = o.geometry; });
     for (const g of this._ownGeo) { try { g.dispose(); } catch { /* ignore */ } }
     for (const m of this._ownMat) { try { m.dispose(); } catch { /* ignore */ } }
+    for (const t of this._ownTex) {
+      try { t.image && t.image.close && t.image.close(); } catch { /* ignore */ }
+      try { t.dispose(); } catch { /* ignore */ }
+    }
     this._ownGeo.length = 0;
     this._ownMat.length = 0;
+    this._ownTex.length = 0;
+    this._stains.length = 0;
+    this.smokeMesh = null;
+    this._stainMesh = null;
+    this._decalMesh = null;
     this._ownNamed.clear();
     this._meshes.length = 0;
     this._instanced.length = 0;
@@ -1032,15 +1079,23 @@ export class Props {
       let m = null;
       try { m = this._mat(k); } catch (e) { Log.error(`Props: _mat('${k}') threw`, e); }
       const mapped = !!(m && (m.map || m.normalMap || m.roughnessMap));
-      if (!known || !mapped) flat.push(`${k}${own ? '(own)' : ''}${known ? '' : ':UNKNOWN'}${mapped ? '' : ':NO-MAP'}`);
-      else ok.push(k);
+      // Triplanar surfaces (granite, concrete, every ground material) deliberately bind NO map
+      // slots — they sample uTriAlbedo/uTriNormal inside the patched shader instead, and
+      // Materials injects its defines into the source rather than onto material.defines. So the
+      // honest test for "this is a real material" is mapped OR patched, and the fallback is
+      // exactly the thing that is neither: a bare MeshStandardMaterial straight from the ctor.
+      const patched = !!(m && typeof m.onBeforeCompile === 'function'
+        && m.onBeforeCompile !== THREE.Material.prototype.onBeforeCompile);
+      if (!known || !(mapped || patched)) {
+        flat.push(`${k}${own ? '(own)' : ''}${known ? '' : ':UNKNOWN'}${mapped ? '' : ':NO-MAP'}${patched ? '' : ':UNPATCHED'}`);
+      } else ok.push(`${k}${mapped ? '' : ':triplanar'}`);
     }
     this.materialAudit = { total: keys.length, textured: ok.length, flat };
     if (flat.length) {
       Log.warn(`Props: ${flat.length}/${keys.length} material keys are untextured or unknown — `
         + `these render as flat colour: ${flat.join(', ')}`);
     } else {
-      Log.debug(`Props: material audit clean — ${ok.length}/${keys.length} keys textured.`);
+      Log.debug(`Props: material audit clean — ${ok.length}/${keys.length} keys textured: ${ok.join(' ')}`);
     }
     return this.materialAudit;
   }
@@ -1070,6 +1125,41 @@ export class Props {
     const y = this._h(x, z);
     this._n(x, z, _v3c);
     this._decals.push({ x, y, z, r, s: s === undefined ? 0.62 : s, nx: _v3c.x, ny: _v3c.y, nz: _v3c.z });
+  }
+
+  /**
+   * Queue an overlay-stain quad. Unit plane lies in XY with normal +Z, so a wall stain is
+   * (ry) only and a roof stain adds rx. Nothing is created until _buildStains().
+   */
+  _stain(x, y, z, w, h, ry, rx, rz) {
+    this._stains.push(TRS(x, y, z, ry || 0, w, h, 1, rx || 0, rz || 0));
+  }
+
+  /** A deterministic sub-rect of the 1024² overlay, so no two stains are the same smear. */
+  _stainUv(i) {
+    const s = 0.34 + ihash1(i * 7919 + 13) * 0.42;
+    const ou = ihash1(i * 104729 + 5) * (1 - s);
+    const ov = ihash1(i * 15485863 + 11) * (1 - s);
+    const flip = ihash1(i * 611953 + 3) > 0.5 ? -1 : 1;
+    return [s * flip, s, flip < 0 ? ou + s : ou, ov];
+  }
+
+  /**
+   * One InstancedMesh for every stain in the camp. Starts invisible (matStain.visible === false)
+   * and is switched on by _loadStains() if and only if the overlay texture arrives.
+   */
+  _buildStains() {
+    this._stainCount = this._stains.length;
+    if (!this._stainCount) return;
+    const g = new THREE.PlaneGeometry(1, 1);
+    const uvs = new Float32Array(this._stainCount * 4);
+    for (let i = 0; i < this._stainCount; i++) uvs.set(this._stainUv(i), i * 4);
+    g.setAttribute('aStainUv', new THREE.InstancedBufferAttribute(uvs, 4));
+    const mesh = this._instance('stain', g, this._stains, {
+      material: this.matStain, cast: false, receive: false, renderOrder: 5,
+    });
+    if (mesh) { mesh.name = 'sc-props-stain'; mesh.visible = false; this._stainMesh = mesh; }
+    this._stains.length = 0;
   }
 
   _emit(kit) {
@@ -1220,7 +1310,7 @@ export class Props {
     });
 
     this.uSmoke = {
-      uTime: new THREE.Uniform(0), uIntensity: new THREE.Uniform(0.115),
+      uTime: new THREE.Uniform(0), uIntensity: new THREE.Uniform(0.30),
       uFogK: new THREE.Uniform(fogK),
       uWind: new THREE.Uniform(new THREE.Vector3(0.2, 0, 0.1)),
       // Woodsmoke lit from below by an amber fire: a desaturated warm grey, never blue.
@@ -1242,10 +1332,17 @@ export class Props {
       uColor: new THREE.Uniform(new THREE.Color(PAL.lantern).convertSRGBToLinear()),
       // 1.35 used to be the ENTIRE lit tent, because the canvas under it was black. The fabric
       // now carries the lamp itself; this is only the near-field gradient laid over it.
-      uIntensity: new THREE.Uniform(0.90), uFlicker: new THREE.Uniform(1),
-      uFogK: new THREE.Uniform(fogK), uSeam: new THREE.Uniform(new THREE.Vector2(0.95, 0.45)),
+      //
+      // 0.90 was measured, at ultra, as a flat saturated orange slab: every texel on a 3.5 x 4.4 m
+      // tent sat above the bloom knee, so the lamp gradient, the weave, the seams and the baked
+      // cot shadow were all clipped into one colour and the tent read as a cardboard box. It also
+      // made a tent lamp brighter in frame than the campfire, which breaks ART §3.2's rule that
+      // exactly one local source is dominant. 0.40 keeps the tent glowing and puts everything
+      // that was being clipped back inside the display range.
+      uIntensity: new THREE.Uniform(0.40), uFlicker: new THREE.Uniform(1),
+      uFogK: new THREE.Uniform(fogK), uSeam: new THREE.Uniform(new THREE.Vector2(0.95, 0.55)),
       uTex: new THREE.Uniform(canvasMap),
-      uTexAmt: new THREE.Uniform(0.7),
+      uTexAmt: new THREE.Uniform(0.95),
       // Approximate linear mean of the canvas albedo (#5c5b46 class). Only a normaliser: the
       // shader clamps around it, so being a little off shifts brightness, never breaks it.
       uTexRef: new THREE.Uniform(0.085),
@@ -1295,7 +1392,7 @@ export class Props {
       uFade: new THREE.Uniform(new THREE.Vector2(46, 96)),
     };
     this.matStain = new THREE.ShaderMaterial({
-      name: 'sc-stain', uniforms: this.uStain, vertexShader: DECAL_VERT, fragmentShader: STAIN_FRAG,
+      name: 'sc-stain', uniforms: this.uStain, vertexShader: STAIN_VERT, fragmentShader: STAIN_FRAG,
       blending: THREE.NormalBlending, depthWrite: false, transparent: true, toneMapped: false,
       polygonOffset: true, polygonOffsetFactor: -3, polygonOffsetUnits: -3,
       side: THREE.DoubleSide, visible: false,
@@ -1357,7 +1454,10 @@ export class Props {
     this.matCanvasLit.emissiveMap = this.matCanvasLit.map || null;
     // Low. The fabric only has to stop being BLACK; the additive shell above supplies the hot
     // gradient around the lamp. Pushed higher the tent becomes an amber cardboard box.
-    this.matCanvasLit.emissiveIntensity = this.matCanvasLit.emissiveMap ? 0.22 : 0.03;
+    // Measured: at 0.22 the fabric alone was already at the top of the display range before the
+    // additive shell was composited on top of it, so the two together clipped. 0.085 leaves the
+    // canvas a dim warm grey on its own and lets the shell supply every bit of the modelling.
+    this.matCanvasLit.emissiveIntensity = this.matCanvasLit.emissiveMap ? 0.085 : 0.02;
     this.matCanvasLit.side = THREE.DoubleSide;
 
     /** Names `_mat()` resolves locally instead of asking the shared library. */
@@ -1398,6 +1498,7 @@ export class Props {
         this.uStain.uTex.value = tex;
         this.matStain.visible = true;
         this.matStain.needsUpdate = true;
+        if (this._stainMesh) this._stainMesh.visible = true;
         this.stainsReady = true;
         Log.debug(`Props: stain overlay ready (${bmp.width}x${bmp.height}), `
           + `${this._stainCount} quads enabled.`);
@@ -1509,6 +1610,47 @@ export class Props {
     this.emberPoints = pts;
     this._ownGeo.push(eg);
 
+    // ---- smoke: a slow column shearing off downwind. Additive and very low intensity — over a
+    // near-black sky smoke is only visible because the fire lights it from underneath, and
+    // additive blending means the worst possible failure is that it disappears rather than that
+    // a grey rectangle appears. Disabled below 'high'; it is the first thing worth cutting.
+    const sq = this._tier(0, 0, 10, 16);
+    if (sq > 0) {
+      const spos = new Float32Array(sq * 4 * 3);
+      const scor = new Float32Array(sq * 4 * 2);
+      const sinf = new Float32Array(sq * 4 * 3);
+      const sidx = new Uint16Array(sq * 6);
+      const SC = [[-0.5, -0.5], [0.5, -0.5], [0.5, 0.5], [-0.5, 0.5]];
+      for (let i = 0; i < sq; i++) {
+        const a = r.next() * Math.PI * 2, rad = Math.sqrt(r.next()) * 0.34;
+        const cx = Math.cos(a) * rad, cz = Math.sin(a) * rad;
+        const seed = r.next() * 53;
+        const inv = 1 / r.range(4.2, 8.0);
+        const hwq = 0.30 + r.range(0, 0.26);
+        for (let v = 0; v < 4; v++) {
+          const o = i * 4 + v;
+          spos[o * 3] = cx; spos[o * 3 + 1] = 0.72; spos[o * 3 + 2] = cz;
+          scor[o * 2] = SC[v][0]; scor[o * 2 + 1] = SC[v][1];
+          sinf[o * 3] = seed; sinf[o * 3 + 1] = inv; sinf[o * 3 + 2] = hwq;
+        }
+        const b = i * 4;
+        sidx.set([b, b + 1, b + 2, b, b + 2, b + 3], i * 6);
+      }
+      const sg = new THREE.BufferGeometry();
+      sg.setAttribute('position', new THREE.BufferAttribute(spos, 3));
+      sg.setAttribute('aCorner', new THREE.BufferAttribute(scor, 2));
+      sg.setAttribute('aInfo', new THREE.BufferAttribute(sinf, 3));
+      sg.setIndex(new THREE.BufferAttribute(sidx, 1));
+      sg.boundingSphere = new THREE.Sphere(new THREE.Vector3(0, 3.2, 0), 9);
+      const smoke = new THREE.Mesh(sg, this.matSmoke);
+      smoke.position.copy(p);
+      smoke.renderOrder = 11;
+      smoke.name = 'sc-fire-smoke';
+      this.group.add(smoke);
+      this.smokeMesh = smoke;
+      this._ownGeo.push(sg);
+    }
+
     // ---- coals: an emissive gradient bedded into the ash, not a glowing disc
     const cg = new THREE.CircleGeometry(0.92, 22);
     cg.rotateX(-Math.PI / 2);
@@ -1528,7 +1670,12 @@ export class Props {
 
     // ---- lights. ART §3.2: ALL locals are SpotLights. The key throws light UP and out of the
     // pit (faces, tree trunks, the underside of the canopy); the fill washes the ground ring.
-    const key = new THREE.SpotLight(new THREE.Color(PAL.fireMid), 26, 12, 1.35, 1.0, 2);
+    // ART §3.2 authors these at distance 12 / 7. Measured on 'camp-fire': a SpotLight's
+    // `distance` is a hard window (clamp(1 - (d/cut)^4)) and at 7 m the fill was still
+    // contributing enough to leave a crisp 6.6 m ellipse of firelight stamped on the grass —
+    // the single most artificial thing in the shot. Intensities are unchanged; the cutoffs are
+    // pushed out to where the inverse-square term has already taken the light to nothing.
+    const key = new THREE.SpotLight(new THREE.Color(PAL.fireMid), 26, 15.5, 1.35, 1.0, 2);
     key.position.set(p.x, p.y + 0.34, p.z);
     key.target.position.set(p.x + 0.9, p.y + 5.5, p.z + 0.4);
     key.castShadow = this._tierIndex >= 2;
@@ -1544,7 +1691,7 @@ export class Props {
     this.group.add(key, key.target);
     this.fireLight = key;
 
-    const fill = new THREE.SpotLight(new THREE.Color(PAL.fireMid), 11, 7, 1.35, 1.0, 2);
+    const fill = new THREE.SpotLight(new THREE.Color(PAL.fireMid), 11, 11.0, 1.35, 1.0, 2);
     fill.position.set(p.x, p.y + 2.4, p.z);
     fill.target.position.set(p.x, p.y - 1, p.z);
     fill.castShadow = false;
@@ -1787,6 +1934,11 @@ export class Props {
     kit.setBase(TRS(x, y, z, ry));
 
     const hw = w / 2, hd = d / 2;
+    // cabin-local <-> world. TRS composes a pure Y rotation, so the pair is just R and R^T.
+    const cR = Math.cos(ry), sR = Math.sin(ry);
+    const toW = (lx, ly, lz) => ({ x: x + lx * cR + lz * sR, y: y + ly, z: z - lx * sR + lz * cR });
+    const toLX = (px, pz) => (px - x) * cR - (pz - z) * sR;
+    const toLZ = (px, pz) => (px - x) * sR + (pz - z) * cR;
 
     // piers — the cabin is bedded on stone, never floating
     for (let i = 0; i < 6; i++) {
@@ -1799,56 +1951,160 @@ export class Props {
 
     // clapboard walls — nine lapped boards a side, each proud of the last. Real relief, real
     // silhouette, and the moon grazes across it.
+    //
+    // Six cabins merged into one mesh share one material, so nothing in the standard pipeline
+    // gives them per-building variation — instancing's free +/-9% albedo jitter does not apply to
+    // merged geometry, which is exactly why the row read as six identical grey boxes from the
+    // ridge. `aExposure` is the one per-vertex lever Materials honours: it drives how much
+    // weather a surface has taken, and a wetter wall is a darker wall. Spreading it 0.52..0.97
+    // across the row gives the six cabins genuinely different values, and the same seed makes the
+    // WINDWARD side of each cabin wetter than its lee side, which is how a real row weathers.
+    const wet = 0.52 + ihash1(seed * 9173 + 31) * 0.45;
     const boards = 9;
     const bh = wallH / boards;
     for (let b = 0; b < boards; b++) {
       const by = floor + 0.08 + bh * (b + 0.5);
-      const prou = 0.035 + (b % 2) * 0.008;
+      const prou = 0.045 + (b % 2) * 0.012;
       const sag = Math.sin(b * 1.7 + seed) * 0.006;
-      kit.box(M.wood, w, bh * 1.06, 0.09 + prou, 0, by + sag, -hd, 0, { exposure: 0.95, uvOffset: b * 0.31 });
-      kit.box(M.wood, w, bh * 1.06, 0.09 + prou, 0, by - sag, hd, 0, { exposure: 0.95, uvOffset: b * 0.17 });
-      kit.box(M.wood, 0.09 + prou, bh * 1.06, d, -hw, by, 0, 0, { exposure: 0.95, uvOffset: b * 0.43 });
-      kit.box(M.wood, 0.09 + prou, bh * 1.06, d, hw, by, 0, 0, { exposure: 0.95, uvOffset: b * 0.23 });
+      const drip = 1 - (b / boards) * 0.22;                 // the sill courses stay wettest
+      kit.box(M.wood, w, bh * 1.06, 0.09 + prou, 0, by + sag, -hd, 0,
+        { exposure: wet * drip, uvOffset: b * 0.31 });
+      kit.box(M.wood, w, bh * 1.06, 0.09 + prou, 0, by - sag, hd, 0,
+        { exposure: Math.min(1, wet * 1.25) * drip, uvOffset: b * 0.17 });
+      kit.box(M.wood, 0.09 + prou, bh * 1.06, d, -hw, by, 0, 0,
+        { exposure: wet * 0.82 * drip, uvOffset: b * 0.43 });
+      kit.box(M.wood, 0.09 + prou, bh * 1.06, d, hw, by, 0, 0,
+        { exposure: Math.min(1, wet * 1.15) * drip, uvOffset: b * 0.23 });
     }
     // corner boards
     for (let i = 0; i < 4; i++) {
       kit.box(M.wood, 0.16, wallH, 0.16, (i & 1) ? hw : -hw, floor + wallH * 0.5 + 0.08, (i & 2) ? hd : -hd, 0);
     }
 
-    // gable ends + roof
+    // ---- ROOF. The ridge runs along X; the eaves are at ±Z; the GABLE TRIANGLES therefore
+    // belong at ±X, under the ends of the ridge. They used to be a five-box staircase standing
+    // at ±Z — i.e. at the low edge of the roof, poking a lump of wall above the eave line — so
+    // no cabin in the camp had a gable at all and every one of them read as a shoebox with a
+    // lid. Real wedges, at the right end, plus an overhang big enough to throw an eave shadow.
     const ridgeH = wallH + 1.05 + r.range(-0.1, 0.14);
-    const slope = Math.atan2(ridgeH - wallH, hd);
-    const slopeLen = Math.hypot(hd + 0.32, ridgeH - wallH);
+    const gabH = ridgeH - wallH;
+    const eaveOver = 0.44;                      // past the wall at ±Z
+    const rakeOver = 0.34;                      // past the wall at ±X
+    const eaveY = floor + 0.08 + wallH;
+    const slope = Math.atan2(gabH, hd);
+    const tanS = gabH / hd;
+    const plateD = (hd + eaveOver) / Math.cos(slope);
+    const plateW = w + rakeOver * 2;
     for (const s of [-1, 1]) {
-      kit.box(M.tin, w + 0.7, 0.07, slopeLen * 2 * 0.5 + 0.2,
-        0, floor + 0.08 + (wallH + ridgeH) * 0.5, s * (hd * 0.5 + 0.08), 0,
-        { rx: -s * slope, exposure: 1, uvScale: 1 });
+      const pz = s * (hd + eaveOver) * 0.5;
+      const py = floor + 0.08 + ridgeH - (hd + eaveOver) * tanS * 0.5;
+      // The roof is the most exposed surface on the building and the one the ridge shot sees
+      // most of; the two slopes weather differently because only one of them faces the weather.
+      const roofWet = s < 0 ? 1.0 : 0.62 + wet * 0.3;
+      kit.box(M.tin, plateW, 0.07, plateD, 0, py, pz, 0, { rx: s * slope, exposure: roofWet, uvScale: 1 });
+      // corrugation. Ribs run down-slope every 26 cm; each one is a shadow line at midday and a
+      // grazing specular streak under the moon. This is what makes a tin roof read as tin.
+      const ribs = Math.max(6, Math.round(plateW / 0.26));
+      for (let k = 0; k < ribs; k++) {
+        const rx0 = -plateW * 0.5 + (k + 0.5) * (plateW / ribs);
+        kit.box(M.tin, 0.052, 0.155, plateD * 0.995, rx0, py, pz, 0,
+          { rx: s * slope, exposure: roofWet, uvScale: 2 });
+      }
+      // fascia along the eave, rafter tails poking out beneath it
+      const ez = s * (hd + eaveOver);
+      const ey = eaveY - eaveOver * tanS;
+      kit.box(M.wood, plateW, 0.20, 0.05, 0, ey - 0.10, ez, 0, { exposure: 0.85 });
+      for (let k = 0; k < 7; k++) {
+        const tx = -w * 0.5 + (k + 0.5) * (w / 7);
+        kit.box(M.wood, 0.07, 0.11, eaveOver + 0.10, tx, ey - 0.05, s * (hd + eaveOver * 0.5), 0,
+          { rx: s * slope, exposure: 0.7 });
+      }
+      // barge boards up the rake, one each side
+      for (const q of [-1, 1]) {
+        kit.box(M.wood, 0.06, 0.19, plateD, q * (plateW * 0.5 - 0.03), py - 0.09, pz, 0,
+          { rx: s * slope, exposure: 0.8 });
+      }
+      // moss / weather streak down the slope, sitting just proud of the deck
+      const sp = toW(r.range(-1.3, 1.3), py + 0.075, pz);
+      this._stain(sp.x, sp.y, sp.z, plateW * 0.5, plateD * 0.72, ry, s * slope - Math.PI / 2, 0);
     }
-    kit.box(M.tin, w + 0.75, 0.12, 0.30, 0, floor + 0.10 + ridgeH, 0, 0);
+    kit.box(M.tin, plateW + 0.06, 0.13, 0.34, 0, floor + 0.10 + ridgeH, 0, 0, { uvScale: 2 });
     for (const s of [-1, 1]) {
-      for (let i = 0; i < 5; i++) {
-        const t = (i + 0.5) / 5;
-        const gy = floor + 0.08 + wallH + (ridgeH - wallH) * (1 - Math.abs(t * 2 - 1));
-        kit.box(M.wood, w * (1 - Math.abs(t * 2 - 1)) * 0.99, gy - (floor + 0.08 + wallH), 0.10,
-          0, (floor + 0.08 + wallH + gy) * 0.5, s * hd, 0, { exposure: 0.8 });
+      kit.add(M.wood, Kit.UNIT_WEDGE, TRS(s * hw, eaveY + gabH * 0.5, 0, Math.PI / 2, d, gabH, 0.11),
+        { exposure: 0.8 });
+      // a vent louvre in the gable peak — three slats, black behind
+      for (let k = 0; k < 3; k++) {
+        kit.box(M.wood, 0.06, 0.05, 0.52, s * (hw + 0.02), eaveY + gabH * 0.55 + k * 0.09, 0, 0,
+          { rz: 0.22, exposure: 0.6 });
       }
     }
 
-    // windows — two, one of them lit from within. This is the warm rectangle in keyart-lake.
+    // ---- STOVEPIPE. Every one of these cabins is heated by a wood stove, and the flue is the
+    // one thing that breaks a cabin's rectangle against a treeline at 70 m.
+    const fx = -hw * 0.42, fz = hd * 0.30;
+    const fRoofY = floor + 0.10 + ridgeH - Math.abs(fz) * (gabH / hd);
+    kit.add(M.rust, Kit.UNIT_CYL, TRS(fx, fRoofY + 0.62, fz, 0, 0.15, 1.34, 0.15, 0, 0.035), { exposure: 1 });
+    kit.add(M.rust, Kit.UNIT_CONE, TRS(fx + 0.05, fRoofY + 1.36, fz, 0, 0.30, 0.16, 0.30, 0, Math.PI));
+    kit.box(M.tin, 0.44, 0.03, 0.44, fx, fRoofY + 0.02, fz, 0.3, { exposure: 1 });   // flashing
+
+    // ---- WINDOWS. Frame, sill that projects and sheds water, head casing, a real mullion cross,
+    // and a recessed reveal so the lit pane is INSIDE the wall instead of stuck to the front of it.
     const winY = floor + 1.32;
     const winW = 0.86, winH = 1.02;
-    for (const [wx, wz, wry] of [[-1.55, -hd, 0], [1.55, -hd, 0], [hw, 1.0, Math.PI / 2]]) {
-      const inw = wz === -hd ? 0 : 0;
-      kit.box(M.wood, winW + 0.20, winH + 0.20, 0.13, wx, winY, wz + inw, wry === 0 ? 0 : 0,
-        wry === 0 ? undefined : { });
-      kit.box(M.glass, winW, winH, 0.04, wx, winY, wz - 0.03, 0, { exposure: 0.3 });
-      kit.box(M.wood, 0.05, winH, 0.05, wx, winY, wz - 0.05, 0);
-      kit.box(M.wood, winW, 0.05, 0.05, wx, winY, wz - 0.05, 0);
+    const winsN = [-1.55, 1.55];
+    for (const wx of winsN) {
+      kit.box(M.wood, winW + 0.22, winH + 0.22, 0.09, wx, winY, -hd - 0.045, 0, { exposure: 0.9 });
+      kit.box(M.wood, winW + 0.16, winH + 0.16, 0.16, wx, winY, -hd + 0.06, 0, { exposure: 0.35 });
+      kit.box(M.glass, winW, winH, 0.03, wx, winY, -hd + 0.02, 0, { exposure: 0.3 });
+      kit.box(M.wood, 0.05, winH + 0.02, 0.07, wx, winY, -hd - 0.06, 0, { exposure: 1 });
+      kit.box(M.wood, winW + 0.02, 0.05, 0.07, wx, winY, -hd - 0.06, 0, { exposure: 1 });
+      kit.box(M.wood, winW + 0.34, 0.07, 0.17, wx, winY - winH * 0.5 - 0.13, -hd - 0.07, 0,
+        { rx: 0.13, exposure: 1 });                                     // sill
+      kit.box(M.wood, winW + 0.36, 0.09, 0.20, wx, winY + winH * 0.5 + 0.15, -hd - 0.08, 0,
+        { rx: -0.10, exposure: 1 });                                    // head drip cap
+      const ws = toW(wx, winY - winH * 0.5 - 0.60, -hd - 0.075);
+      this._stain(ws.x, ws.y, ws.z, winW + 0.55, 1.15, ry + Math.PI, 0, 0);
     }
+    // gable-end window, and a shutter hanging off one hinge on the far one
+    kit.box(M.wood, winW + 0.20, winH + 0.20, 0.10, hw + 0.045, winY, 1.0, Math.PI / 2, { exposure: 0.9 });
+    kit.box(M.glass, winW, winH, 0.03, hw - 0.02, winY, 1.0, Math.PI / 2, { exposure: 0.3 });
+    kit.box(M.wood, 0.05, winH, 0.06, hw + 0.06, winY, 1.0, Math.PI / 2, { exposure: 1 });
+    kit.box(M.wood, 0.44, winH + 0.10, 0.045, hw + 0.10, winY - 0.06, 1.0 - winW * 0.5 - 0.24,
+      Math.PI / 2, { rx: 0.26, exposure: 0.75 });
+
+    // ---- FIREWOOD RICK against the east wall. Bedded, stacked, half-collapsed at one end.
+    for (let row = 0; row < 4; row++) {
+      const n = row === 3 ? 4 : 6;
+      for (let k = 0; k < n; k++) {
+        const lz = -1.2 + k * 0.30 + r.range(-0.02, 0.02);
+        const lyy = 0.16 + row * 0.28 + (row === 3 ? r.range(-0.03, 0.03) : 0);
+        kit.add(M.bark, Kit.UNIT_CYL,
+          TRS(hw + 0.34 + r.range(-0.03, 0.03), lyy, lz, 0,
+            r.range(0.24, 0.30), r.range(0.42, 0.56), r.range(0.24, 0.30), 0, Math.PI / 2 + r.range(-0.05, 0.05)),
+          { exposure: 0.55 });
+      }
+    }
+    kit.box(M.tin, 0.90, 0.02, 2.30, hw + 0.34, 1.28, -0.15, 0, { rx: 0.06, exposure: 1 });
+
     if (lit) {
+      // The pane itself, and a HALO on the clapboard around it. A lit window with a hard edge and
+      // nothing spilling onto the boards beside it is a decal; the halo is what makes it a light.
       const gw = winW * 0.98, gh = winH * 0.98;
-      kit.add('glow-window', Kit.UNIT_PLANE, TRS(-1.55, winY, -hd - 0.05, 0, gw, gh, 1), { glow: 1 });
-      kit.add('glow-window', Kit.UNIT_PLANE, TRS(1.55, winY, -hd - 0.05, 0, gw * 0.9, gh, 1), { glow: 0.7 });
+      kit.add('glow-window', Kit.UNIT_PLANE, TRS(-1.55, winY, -hd - 0.09, 0, gw, gh, 1), { glow: 1 });
+      kit.add('glow-window', Kit.UNIT_PLANE, TRS(1.55, winY, -hd - 0.09, 0, gw * 0.9, gh, 1), { glow: 0.7 });
+      // The halo is authored in CABIN-LOCAL space — the vertices Kit hands the glowFn are already
+      // in world space, so they are folded back through R^T first. Measuring a local offset with
+      // world coordinates is how the old ground-spill ended up as a hard-edged warm rectangle.
+      const halo = new THREE.PlaneGeometry(1, 1, 10, 10);
+      for (const wx of winsN) {
+        kit.add('glow-window', halo, TRS(wx, winY, -hd - 0.115, 0, 3.0, 2.6, 1), {
+          glowFn: (gx, gy2, gz) => {
+            const t = 1 - Math.hypot((toLX(gx, gz) - wx) / 1.42, (gy2 - y - winY) / 1.20);
+            return t > 0 ? 0.10 * t * t * t : 0;
+          },
+        });
+      }
+      halo.dispose();
       // Warm spill on the ground under the window. The falloff MUST reach zero inside the quad.
       // The old term (0.22 - 0.03*d, measured from the cabin centre) was still ~0.10 at the
       // quad's corners, so every lit cabin laid a hard-edged 5.0 x 3.4 m warm rectangle on the
@@ -1874,12 +2130,41 @@ export class Props {
       const px = (i - 1) * (w * 0.35);
       const lean = i === 2 ? 0.055 : 0.006;
       kit.box(M.wood, 0.13, 2.15, 0.13, px, floor + 1.1, -hd - pd + 0.16, 0, { rz: lean, exposure: 0.7 });
+      // stone pad under each post, and a knee brace back to the header — the two details that
+      // stop a porch post reading as a floating stick
+      kit.box(M.stone, 0.30, 0.16, 0.30, px, floor - 0.06, -hd - pd + 0.16, r.range(-0.3, 0.3));
+      for (const q of [-1, 1]) {
+        kit.add(M.wood, Kit.UNIT_BOX,
+          TRS(px + q * 0.20, floor + 1.92, -hd - pd + 0.16, 0, 0.07, 0.56, 0.07, 0, q * 0.72),
+          { exposure: 0.6 });
+      }
     }
     kit.box(M.wood, w - 0.4, 0.09, 0.09, 0, floor + 0.92, -hd - pd + 0.16, 0, { rz: -0.012, exposure: 0.7 });
+    kit.box(M.wood, w - 0.3, 0.14, 0.12, 0, floor + 2.14, -hd - pd + 0.16, 0, { exposure: 0.7 });
+    // porch roof: its own little corrugated shed, with ribs and a drip edge
     kit.box(M.tin, w + 0.35, 0.06, pd + 0.55, 0, floor + 2.28, -hd - pd * 0.55, 0, { rx: 0.20 });
+    for (let k = 0; k < Math.round((w + 0.35) / 0.26); k++) {
+      const px2 = -(w + 0.35) * 0.5 + (k + 0.5) * 0.26;
+      kit.box(M.tin, 0.05, 0.13, pd + 0.52, px2, floor + 2.28, -hd - pd * 0.55, 0,
+        { rx: 0.20, uvScale: 2 });
+    }
+    kit.box(M.wood, w + 0.35, 0.13, 0.04, 0, floor + 2.10, -hd - pd - 0.29, 0, { exposure: 0.85 });
     for (let i = 0; i < 3; i++) {
       kit.box(M.wood, 1.35, 0.09, 0.30, 0, floor - 0.14 * (i + 1), -hd - pd - 0.16 - i * 0.28, 0, { exposure: 0.6 });
+      kit.box(M.wood, 0.09, 0.16, 0.30, -0.68, floor - 0.14 * (i + 1) - 0.09, -hd - pd - 0.16 - i * 0.28, 0, { exposure: 0.5 });
+      kit.box(M.wood, 0.09, 0.16, 0.30, 0.68, floor - 0.14 * (i + 1) - 0.09, -hd - pd - 0.16 - i * 0.28, 0, { exposure: 0.5 });
     }
+    // a bench, a pair of boots and an enamel basin on the porch. Somebody lives here.
+    kit.box(M.wood, 1.30, 0.06, 0.34, -w * 0.28, floor + 0.50, -hd - 0.52, 0.03, { exposure: 0.9 });
+    for (const q of [-1, 1]) {
+      kit.box(M.wood, 0.08, 0.38, 0.30, -w * 0.28 + q * 0.55, floor + 0.29, -hd - 0.52, 0, { exposure: 0.7 });
+    }
+    for (const q of [-1, 1]) {
+      kit.box(M.tarp, 0.11, 0.17, 0.28, w * 0.24 + q * 0.08, floor + 0.20, -hd - 0.46,
+        r.range(-0.3, 0.3) + q * 0.15, { exposure: 0.7 });
+    }
+    kit.add(M.steel, new THREE.CylinderGeometry(0.19, 0.14, 0.11, 14, 1),
+      TRS(w * 0.30, floor + 0.62, -hd - pd + 0.42, 0.4, 1, 1, 1, 0.05), { exposure: 0.8 });
     const ajar = seed === 2 ? 0.55 : 0.02;
     kit.setBase(TRS(x, y, z, ry));
     const doorM = TRS(0, floor + 1.12, -hd - 0.06, 0, 1, 1, 1);
@@ -1888,8 +2173,14 @@ export class Props {
     kit.add(M.rope, Kit.UNIT_BOX, new THREE.Matrix4().multiplyMatrices(doorPivot, TRS(-0.45, 0.16, -0.03, 0, 0.72, 1.42, 0.012)), { exposure: 0.5 });
 
     kit.clearBase();
+    // Contact darkening, in WORLD space. These two used to be written as (x, z - hd - pd/2),
+    // which is only the porch for a cabin at ry = 0; every cabin in the row is rotated 90 deg,
+    // so the porch shadow was landing on the gable end of the cabin next door.
+    const pc = toW(0, 0, -hd - pd * 0.5);
+    const fw = toW(hw + 0.34, 0, -0.15);
     this._decal(x, z, Math.max(w, d) * 0.62, 0.72);
-    this._decal(x, z - hd - pd * 0.5, w * 0.4, 0.5);
+    this._decal(pc.x, pc.z, w * 0.4, 0.5);
+    this._decal(fw.x, fw.z, 1.4, 0.66);
     this._inter(`cabin:${seed}`, 'building', x, y + floor, z);
   }
 
@@ -1900,6 +2191,8 @@ export class Props {
     const y = this._lowest(x, z, w * 0.6, d * 0.6, ry);
     kit.setBase(TRS(x, y, z, ry));
     const hw = w / 2, hd = d / 2;
+    const cR = Math.cos(ry), sR = Math.sin(ry);
+    const toW = (lx, ly, lz) => ({ x: x + lx * cR + lz * sR, y: y + ly, z: z - lx * sR + lz * cR });
 
     for (let i = 0; i < 8; i++) {
       kit.box(M.stone, 0.55, floor + 0.4, 0.55, -hw + (i % 4) * (w / 3), floor * 0.5 - 0.2, (i < 4 ? -hd : hd) * 0.88, 0);
@@ -1916,19 +2209,47 @@ export class Props {
       kit.box(M.wood, 0.10 + pr, bh * 1.05, d, hw, by, 0, 0, { exposure: 0.95, uvOffset: b * 0.51 });
     }
 
+    // ---- ROOF. Same correction as the cabins: the gable wedges belong at ±X under the ends of
+    // the ridge, not at ±Z where the roof is at its lowest. Corrugation ribs, a deep eave with
+    // rafter tails, and a ridge vent, because 14.5 m of unbroken tin is a mirror.
     const ridgeH = wallH + 1.9;
-    const slope = Math.atan2(ridgeH - wallH, hd);
+    const gabH = ridgeH - wallH;
+    const eaveOver = 0.62;
+    const eaveY = floor + 0.09 + wallH;
+    const slope = Math.atan2(gabH, hd);
+    const tanS = gabH / hd;
+    const plateD = (hd + eaveOver) / Math.cos(slope);
+    const plateW = w + 0.9;
     for (const s of [-1, 1]) {
-      kit.box(M.tin, w + 0.9, 0.08, Math.hypot(hd + 0.4, ridgeH - wallH) + 0.3,
-        0, floor + 0.09 + (wallH + ridgeH) * 0.5, s * (hd * 0.5 + 0.1), 0, { rx: -s * slope });
+      const pz = s * (hd + eaveOver) * 0.5;
+      const py = floor + 0.09 + ridgeH - (hd + eaveOver) * tanS * 0.5;
+      kit.box(M.tin, plateW, 0.08, plateD, 0, py, pz, 0, { rx: s * slope, uvScale: 1 });
+      const ribs = Math.round(plateW / 0.28);
+      for (let k = 0; k < ribs; k++) {
+        kit.box(M.tin, 0.055, 0.17, plateD * 0.995,
+          -plateW * 0.5 + (k + 0.5) * (plateW / ribs), py, pz, 0, { rx: s * slope, uvScale: 2 });
+      }
+      const ey = eaveY - eaveOver * tanS;
+      kit.box(M.wood, plateW, 0.24, 0.06, 0, ey - 0.12, s * (hd + eaveOver), 0, { exposure: 0.85 });
+      for (let k = 0; k < 11; k++) {
+        kit.box(M.wood, 0.08, 0.13, eaveOver + 0.12, -w * 0.5 + (k + 0.5) * (w / 11), ey - 0.06,
+          s * (hd + eaveOver * 0.5), 0, { rx: s * slope, exposure: 0.7 });
+      }
+      const sp = toW(r.range(-4, 4), py + 0.09, pz);
+      this._stain(sp.x, sp.y, sp.z, 4.2, plateD * 0.8, ry, s * slope - Math.PI / 2, 0);
     }
-    kit.box(M.tin, w + 0.95, 0.14, 0.34, 0, floor + 0.12 + ridgeH, 0, 0);
+    kit.box(M.tin, plateW + 0.05, 0.14, 0.34, 0, floor + 0.12 + ridgeH, 0, 0, { uvScale: 2 });
+    // ridge vent — a raised louvred cap running two thirds of the ridge
+    kit.box(M.tin, w * 0.62, 0.20, 0.62, 0, floor + 0.30 + ridgeH, 0, 0, { uvScale: 2 });
+    for (let k = 0; k < 9; k++) {
+      kit.box(M.rust, w * 0.60, 0.03, 0.05, 0, floor + 0.22 + ridgeH + k * 0.018, -0.30 + k * 0.07, 0);
+    }
     for (const s of [-1, 1]) {
-      for (let i = 0; i < 6; i++) {
-        const t = (i + 0.5) / 6;
-        const gy = floor + 0.09 + wallH + (ridgeH - wallH) * (1 - Math.abs(t * 2 - 1));
-        kit.box(M.wood, w * (1 - Math.abs(t * 2 - 1)) * 0.99, gy - (floor + 0.09 + wallH), 0.11,
-          0, (floor + 0.09 + wallH + gy) * 0.5, s * hd, 0, { exposure: 0.8 });
+      kit.add(M.wood, Kit.UNIT_WEDGE, TRS(s * hw, eaveY + gabH * 0.5, 0, Math.PI / 2, d, gabH, 0.12),
+        { exposure: 0.8 });
+      for (let k = 0; k < 4; k++) {
+        kit.box(M.wood, 0.07, 0.06, 1.0, s * (hw + 0.02), eaveY + gabH * 0.45 + k * 0.11, 0, 0,
+          { rz: 0.24, exposure: 0.6 });
       }
     }
 
@@ -1985,6 +2306,26 @@ export class Props {
 
     // the photo board is inside, on the west wall (Script.props photo_board)
     kit.box(M.wood, 2.2, 1.3, 0.06, -hw + 0.2, floor + 1.9, 1.2, Math.PI / 2, { exposure: 0.05 });
+
+    // ---- THE KITCHEN SIDE. A propane tank on a slab, a grease drum, milk crates, a bin with the
+    // lid tipped off. This is the wall the sodium lamp actually lights, and it was bare.
+    kit.box(M.concrete, 1.5, 0.14, 1.0, hw - 3.6, floor - 0.28, hd + 0.9, 0, { exposure: 1 });
+    kit.add(M.steel, Kit.UNIT_CYL, TRS(hw - 3.6, floor + 0.30, hd + 0.9, 0, 0.86, 1.10, 0.86), { exposure: 1 });
+    kit.add(M.steel, Kit.UNIT_SPHERE, TRS(hw - 3.6, floor + 0.85, hd + 0.9, 0, 0.86, 0.42, 0.86), { exposure: 1 });
+    kit.add(M.rust, Kit.UNIT_CYL, TRS(hw - 3.6, floor + 1.02, hd + 0.9, 0, 0.13, 0.22, 0.13));
+    kit.add(M.rust, Kit.UNIT_CYL, TRS(hw - 1.9, floor + 0.16, hd + 1.05, 0.4, 0.58, 0.88, 0.58), { exposure: 1 });
+    kit.add(M.rust, Kit.UNIT_CYL, TRS(hw - 1.9, floor + 0.62, hd + 1.05, 0.4, 0.60, 0.05, 0.60));
+    for (let i = 0; i < 5; i++) {
+      const cx2 = hw - 5.6 - (i % 2) * 0.46, cy2 = floor - 0.18 + ((i / 2) | 0) * 0.31;
+      kit.box(M.tarp, 0.42, 0.30, 0.42, cx2, cy2, hd + 0.7, r.range(-0.2, 0.2), { exposure: 0.9 });
+    }
+    kit.add(M.tarp, Kit.UNIT_CYL, TRS(hw - 0.4, floor + 0.12, hd + 0.8, 0.2, 0.62, 0.86, 0.62), { exposure: 0.9 });
+    kit.add(M.tarp, Kit.UNIT_CYL, TRS(hw - 0.1, floor - 0.24, hd + 1.6, 0.9, 0.64, 0.06, 0.64), { exposure: 0.9 });
+    const kw = toW(hw - 2.8, 0, hd + 1.0);
+    this._decal(kw.x, kw.z, 3.4, 0.72);
+    // long weather streak down the north wall under the eave
+    const mw = toW(-1.2, floor + wallH * 0.55, -hd - 0.06);
+    this._stain(mw.x, mw.y, mw.z, 7.0, wallH * 0.9, ry + Math.PI, 0, 0);
 
     kit.clearBase();
     const world = new THREE.Vector3(2.6, floor + 2.36, -hd - 0.62).applyMatrix4(TRS(x, y, z, ry));
@@ -2084,6 +2425,8 @@ export class Props {
     const y = this._lowest(x, z, W * 0.75, D * 0.75, ry);
     kit.setBase(TRS(x, y, z, ry));
     const hw = W / 2, hd = D / 2;
+    const cR = Math.cos(ry), sR = Math.sin(ry);
+    const toW = (lx, ly2, lz) => ({ x: x + lx * cR + lz * sR, y: y + ly2, z: z - lx * sR + lz * cR });
 
     // wooden platform
     for (let i = 0; i < 6; i++) {
@@ -2100,16 +2443,38 @@ export class Props {
     // A LIT tent's canvas is the emissive 'canvas-lit' variant — the fabric itself carries the
     // lamp, so the tent reads as a paper lantern made of cloth instead of a floating orange
     // card. An unlit tent gets the ordinary shared canvas and stays a silhouette.
+    //
+    // TWO CORRECTIONS LIVE HERE.
+    //
+    // 1. The slope panels used to carry `rz: s * slopeAng`, which tilts the OUTER edge UP: every
+    //    tent in the camp was a V-shaped valley whose canvas cut straight through its own ridge
+    //    pole and gable wedge. Verified numerically before changing it — a plate centred at
+    //    +hw/2 with rz = +ang puts its +x end at y+L/2*sin(ang), i.e. above the ridge. The sign
+    //    is now negated and the ridge is the high edge, which is what a ridge is.
+    // 2. Rigid boxes gave every tent a dead-straight ridge and a dead-straight eave. Canvas
+    //    strung between a pole and six guy lines does neither. The panels are now subdivided
+    //    cloth that droops between its supports and carries a fine crease field, so the
+    //    silhouette against the sky is a curve.
     const CANVAS = lit ? 'canvas-lit' : M.canvas;
     const sag = 0.055;
     const slopeLen = Math.hypot(hw, ridgeH - wallH);
     const slopeAng = Math.atan2(ridgeH - wallH, hw);
+    const roofCloth = clothPanel(10, 16, -0.085, 0.020, seed * 3.7 + 1);
+    const wallCloth = clothPanel(7, 16, 0.052, 0.016, seed * 5.3 + 2);
     for (const s of [-1, 1]) {
-      kit.box(CANVAS, 0.03, wallH, D, s * hw, deck + 0.05 + wallH * 0.5, 0, 0, { exposure: 1, uvOffset: seed * 0.7 });
-      kit.add(CANVAS, Kit.UNIT_BOX,
-        TRS(s * hw * 0.5, deck + 0.05 + (wallH + ridgeH) * 0.5 - sag * 0.5, 0, 0, slopeLen + 0.06, 0.03, D, 0, s * slopeAng),
+      kit.add(CANVAS, wallCloth,
+        TRS(s * hw, deck + 0.05 + wallH * 0.5, 0, 0, wallH, 1, D, 0, -s * Math.PI / 2),
+        { exposure: 1, uvOffset: seed * 0.7 });
+      kit.add(CANVAS, roofCloth,
+        TRS(s * hw * 0.5, deck + 0.05 + (wallH + ridgeH) * 0.5 - sag * 0.5, 0,
+          0, slopeLen + 0.06, 1, D, 0, -s * slopeAng),
         { exposure: 1, uvOffset: seed * 0.3 });
+      // the seam batten that covers the join, sagging with the panel it is sewn to
+      kit.add(M.rope, Kit.UNIT_CYL,
+        TRS(s * (hw + 0.02), deck + 0.05 + wallH - 0.01, 0, 0, 0.022, D + 0.05, 0.022, Math.PI / 2));
     }
+    roofCloth.dispose();
+    wallCloth.dispose();
     // Gable ends. These used to be a row of boxes of increasing height standing in for a
     // triangle; on a LIT tent that row is the silhouette of the brightest object in the frame
     // and it read unmistakably as a bar chart. A real wedge, plus a wall band under it, and on
@@ -2141,46 +2506,124 @@ export class Props {
       kit.box(M.wood, 0.05, 0.42, 0.05, gx, -y + this._h(x, z) + 0.12, tz, 0, { rz: s * 0.28 });
     }
 
+    // ---- WHAT IS INSIDE. A folding cot, a duffel, a footlocker with the lamp standing on it.
+    // On an unlit tent with the flap tied open these are just dark shapes in a dark hole. On a
+    // LIT tent they are the whole picture: they are fed to the glow shell as occluders and their
+    // shadows are baked into the canvas, so the fabric carries a cot-shaped black bar and a
+    // hunched duffel. A glowing tent with nothing in it is a lampshade.
+    const cotY = deck + 0.05;
+    const OCC = [
+      { cx: -hw * 0.52, cy: cotY + 0.26, cz: 0.15, hx: 0.30, hy: 0.20, hz: hd * 0.62 },   // cot
+      { cx: hw * 0.46, cy: cotY + 0.17, cz: -hd * 0.55, hx: 0.24, hy: 0.17, hz: 0.44 },   // duffel
+      { cx: hw * 0.40, cy: cotY + 0.20, cz: hd * 0.42, hx: 0.26, hy: 0.20, hz: 0.30 },    // locker
+    ];
+    kit.box(M.wood, 0.62, 0.06, hd * 1.24, OCC[0].cx, cotY + 0.42, OCC[0].cz, 0.02, { exposure: 0.3 });
+    for (const q of [-1, 1]) {
+      for (const p2 of [-1, 1]) {
+        kit.add(M.steel, Kit.UNIT_CYL,
+          TRS(OCC[0].cx + q * 0.26, cotY + 0.20, OCC[0].cz + p2 * hd * 0.54, 0, 0.03, 0.42, 0.03),
+          { exposure: 0.2 });
+      }
+    }
+    kit.add('cloth', Kit.UNIT_BOX,
+      TRS(OCC[0].cx, cotY + 0.50, OCC[0].cz + 0.25, 0.04, 0.60, 0.10, hd * 0.9), { exposure: 0.25 });
+    kit.add('cloth', Kit.UNIT_SPHERE,
+      TRS(OCC[1].cx, OCC[1].cy, OCC[1].cz, 0.5, 0.46, 0.34, 0.88), { exposure: 0.25 });
+    kit.box(M.lumber, 0.50, 0.40, 0.58, OCC[2].cx, cotY + 0.20, OCC[2].cz, 0.12, { exposure: 0.25 });
+    kit.box(M.rust, 0.52, 0.04, 0.06, OCC[2].cx, cotY + 0.30, OCC[2].cz - 0.30, 0.12, { exposure: 0.2 });
+
     if (lit) {
-      // the interior lamp card (ART §6.3 item 2) and the additive canvas glow shell
-      const ly = deck + 0.05 + 0.62;
-      kit.add('glow-canvas', Kit.UNIT_SPHERE, TRS(0, ly, 0.35, 0, 0.16, 0.22, 0.16), { glow: 2.2 });
-      const lampL = new THREE.Vector3(0, ly, 0.35);
+      // The lamp stands on the footlocker, off-centre and low, so the cot throws a long shadow
+      // across the far wall instead of a symmetric halo.
+      const ly = cotY + 0.52;
+      const lampL = { x: OCC[2].cx, y: ly, z: OCC[2].cz };
+      kit.add('glow-canvas', Kit.UNIT_SPHERE, TRS(lampL.x, ly, lampL.z, 0, 0.15, 0.21, 0.15), { glow: 2.2 });
+      kit.add(M.rust, Kit.UNIT_CYL, TRS(lampL.x, ly - 0.16, lampL.z, 0, 0.13, 0.10, 0.13), { exposure: 0.3 });
+
+      // A 4-tap area source. One shadow ray gives a hard stencil of a cot; four taps 6 cm apart
+      // give it a penumbra, which is what a 12 cm kerosene flame actually casts at 1.5 m.
+      const TAPS = [[0, 0, 0], [0.06, 0.01, 0.02], [-0.05, 0.02, -0.03], [0.01, -0.04, 0.06]];
       const falloff = (px, py, pz) => {
-        const dx = px - (x + Math.cos(-ry) * lampL.x - Math.sin(-ry) * lampL.z);
-        const dz = pz - (z + Math.sin(-ry) * lampL.x + Math.cos(-ry) * lampL.z);
-        const dy = py - (y + ly);
-        const d2 = dx * dx + dy * dy + dz * dz;
+        // Kit hands glowFn WORLD positions; fold them back into tent-local so the lamp maths is
+        // readable and the tent's yaw cannot silently offset the hot spot.
+        const dx = px - x, dz = pz - z;
+        const lx = dx * cR - dz * sR, lyy = py - y, lz = dx * sR + dz * cR;
+        const ddx = lx - lampL.x, ddy = lyy - lampL.y, ddz = lz - lampL.z;
+        const d2 = ddx * ddx + ddy * ddy + ddz * ddz;
         // Sharp enough that the far end of a 4.4 m tent is genuinely dimmer than the panel the
         // lamp is leaning against. A flat shell over a 4 m object is a lit box, not a lamp.
-        return Math.min(1.0, 0.90 / (0.30 + d2 * 1.30));
+        let g = Math.min(1.0, 0.88 / (0.20 + d2 * 2.45));
+        let open = 0;
+        for (const t of TAPS) {
+          let hit = false;
+          for (const b of OCC) {
+            if (segHitsBox(lampL.x + t[0], lampL.y + t[1], lampL.z + t[2], lx, lyy, lz, b)) { hit = true; break; }
+          }
+          if (!hit) open++;
+        }
+        // Never fully black: canvas bounces, and a hole in a glowing wall reads as a tear.
+        return g * (0.11 + 0.89 * (open / TAPS.length));
       };
+
       // The shell sits just OUTSIDE the canvas, never inside it. Inside, it fails the depth test
       // against its own tent and only shows through a polygonOffset hack — which produced a
       // dashed z-fighting stipple along every panel edge that read as neon piping. Outside, it
       // composites cleanly. It is also kept fractionally SMALLER than the canvas on every axis so
       // its silhouette can never exceed the tent's.
-      const OUT = 0.04;
+      //
+      // It is now SUBDIVIDED. A 24-vertex box interpolates the lamp falloff across a 4.4 m panel
+      // from its corners, which is a flat wash; at 16 x 18 the gradient is real and the baked cot
+      // shadow has somewhere to live.
+      const OUT = 0.045;
+      // Built from the SAME crease field as the canvas it covers (identical seed), at a finer
+      // subdivision, so the shell hugs the fabric instead of hovering flat over a sagging panel.
+      const shellWall = clothPanel(10, 18, 0.052, 0.016, seed * 5.3 + 2);
+      const shellRoof = clothPanel(12, 18, -0.085, 0.020, seed * 3.7 + 1);
+      const shellGable = new THREE.PlaneGeometry(1, 1, 12, 8);
       for (const s of [-1, 1]) {
-        kit.add('glow-canvas', Kit.UNIT_BOX,
-          TRS(s * (hw + OUT), deck + 0.05 + wallH * 0.5, 0, 0, 0.01, wallH * 0.99, D * 0.99),
+        kit.add('glow-canvas', shellWall,
+          TRS(s * (hw + OUT), deck + 0.05 + wallH * 0.5, 0, 0, wallH * 0.99, 1, D * 0.99, 0, -s * Math.PI / 2),
           { glowFn: falloff });
-        kit.add('glow-canvas', Kit.UNIT_BOX,
+        kit.add('glow-canvas', shellRoof,
           TRS(s * hw * 0.5, deck + 0.05 + (wallH + ridgeH) * 0.5 - sag * 0.5 + 0.055, 0,
-            0, slopeLen * 0.99, 0.01, D * 0.99, 0, s * slopeAng),
+            0, slopeLen * 0.99, 1, D * 0.99, 0, -s * slopeAng),
           { glowFn: falloff });
         // The gable glow used to be ONE card, W x wallH*1.5, centred at 0.55*wallH: it hung
         // below the tent platform and stopped short of the ridge, so the tent's brightest
         // element had a silhouette that was not the tent's. Now it IS the gable.
-        kit.add('glow-canvas', Kit.UNIT_BOX,
-          TRS(0, wallY, s * (hd + OUT), 0, W * 0.99, wallH * 0.99, 0.01), { glowFn: falloff });
+        kit.add('glow-canvas', shellGable,
+          TRS(0, wallY, s * (hd + OUT), 0, W * 0.99, wallH * 0.99, 1), { glowFn: falloff });
         kit.add('glow-canvas', Kit.UNIT_WEDGE,
           TRS(0, deck + 0.05 + wallH + gabH * 0.5, s * (hd + OUT), 0, W * 0.99, gabH * 0.99, 0.01),
           { glowFn: falloff });
       }
-      const wp = new THREE.Vector3(lampL.x, ly, lampL.z).applyMatrix4(TRS(x, y, z, ry));
+      shellWall.dispose();
+      shellRoof.dispose();
+      shellGable.dispose();
+      const wp = toW(lampL.x, ly, lampL.z);
       this._proxy(wp.x, wp.y, wp.z, PAL.lantern, 3.6, 10, true);
+      // Warm spill on the platform boards immediately outside the tied-open flap.
+      const spill = new THREE.PlaneGeometry(1, 1, 8, 8);
+      kit.add('glow-canvas', spill, TRS(0, deck + 0.10, -hd - 1.05, 0, W * 1.15, 1, 2.3, -Math.PI / 2), {
+        glowFn: (px, py, pz) => {
+          const dx = px - x, dz = pz - z;
+          const lx = dx * cR - dz * sR, lz = dx * sR + dz * cR;
+          const t = 1 - Math.hypot(lx / 1.5, (lz + hd + 0.55) / 1.25);
+          return t > 0 ? 1.15 * t * t : 0;
+        },
+      });
+      spill.dispose();
     }
+
+    // ---- OUTSIDE. Boots off at the flap, a towel over a guy line, a washbasin on the step.
+    for (const q of [-1, 1]) {
+      kit.box(M.tarp, 0.11, 0.16, 0.27, q * 0.16 - 0.30, deck + 0.14, -hd - 0.38,
+        r.range(-0.25, 0.25) + q * 0.12, { exposure: 0.8 });
+    }
+    kit.add('cloth', Kit.UNIT_BOX,
+      TRS(hw + 0.62, deck + 0.05 + wallH * 0.58, -hd + 1.1, 0.08, 0.42, 0.66, 0.02), { exposure: 1 });
+    kit.add(M.steel, new THREE.CylinderGeometry(0.17, 0.13, 0.10, 12, 1),
+      TRS(-hw - 0.28, this._h(x, z) - y + 0.06, hd - 0.5, 0.5, 1, 1, 1, 0.06), { exposure: 0.8 });
 
     kit.clearBase();
     this._decal(x, z, Math.max(W, D) * 0.75, 0.68);
@@ -2216,9 +2659,60 @@ export class Props {
           r.range(0.10, 0.17), r.range(0.7, 1.35), r.range(0.10, 0.17), 0, Math.PI / 2 + r.range(-0.14, 0.14)),
         { exposure: 1 });
     }
-    // a cooking grate on two stones
+    // a cooking grate on two stones, a blackened pot standing on it, a poker in the ashes
     kit.box(M.steel, 0.92, 0.02, 0.62, x, y + 0.52, z, 0.3);
     for (let i = 0; i < 7; i++) kit.box(M.steel, 0.9, 0.025, 0.02, x, y + 0.54, z - 0.28 + i * 0.095, 0.3);
+    kit.add(M.rust, new THREE.CylinderGeometry(0.16, 0.13, 0.22, 14, 1),
+      TRS(x + 0.24, y + 0.66, z - 0.10, 0.4, 1, 1, 1), { exposure: 1 });
+    kit.add(M.rust, Kit.UNIT_CYL, TRS(x + 0.24, y + 0.78, z - 0.10, 0, 0.34, 0.02, 0.34));
+    kit.add(M.rust, Kit.UNIT_CYL,
+      TRS(x + 0.55, y + 0.90, z - 0.10, 0.4, 0.028, 0.30, 0.028, 0, Math.PI / 2 + 0.3));
+    kit.add(M.rust, Kit.UNIT_CYL,
+      TRS(x - 1.1, y + 0.42, z + 1.0, 1.9, 0.020, 1.35, 0.020, 0.55, 0.30), { exposure: 1 });
+
+    // ---- THE GROUND POOL. The fire's own light landing on wet dirt, terrain-following, radial,
+    // and flickering on the same 3-octave noise as the flame above it. Without this the pit is a
+    // bright object sitting in a dark field; with it the fire is the reason the clearing is lit.
+    const poolR = 6.8;
+    const pg = new THREE.PlaneGeometry(poolR * 2, poolR * 2, 26, 26);
+    pg.rotateX(-Math.PI / 2);
+    const pp = pg.attributes.position;
+    for (let i = 0; i < pp.count; i++) {
+      const px = x + pp.getX(i), pz = z + pp.getZ(i);
+      pp.setXYZ(i, px, this._h(px, pz) + 0.045, pz);
+    }
+    pp.needsUpdate = true;
+    pg.computeVertexNormals();
+    kit.add('glow-fire', pg, TRS(0, 0, 0), {
+      glowFn: (px, py, pz) => {
+        const dr = Math.hypot(px - x, pz - z) / poolR;
+        if (dr >= 1) return 0;
+        const t = 1 - dr;
+        // squared falloff to zero well inside the quad, plus a hard bright ring of scorched
+        // ground right at the stones
+        return 0.085 * t * t * t + 0.15 * Math.max(0, 1 - dr * 5.4) ** 2;
+      },
+    });
+    pg.dispose();
+
+    // ---- THE WOODPILE beside the ring, and a splitting round with the axe left in it.
+    for (let row = 0; row < 3; row++) {
+      const n = 5 - row;
+      for (let i = 0; i < n; i++) {
+        const lx = x - 3.9 + i * 0.32, lz = z - 3.4;
+        kit.add(M.bark, Kit.UNIT_CYL,
+          TRS(lx, this._h(lx, lz) + 0.17 + row * 0.30, lz + r.range(-0.04, 0.04), 0,
+            r.range(0.26, 0.32), r.range(0.55, 0.78), r.range(0.26, 0.32), 0,
+            Math.PI / 2 + r.range(-0.06, 0.06)), { exposure: 0.8 });
+      }
+    }
+    this._decal(x - 3.2, z - 3.4, 1.6, 0.7);
+    const rx2 = x + 3.6, rz2 = z - 2.9;
+    const ry2 = this._h(rx2, rz2);
+    kit.add(M.bark, Kit.UNIT_CYL_HI, TRS(rx2, ry2 + 0.24, rz2, 0.3, 0.62, 0.48, 0.62), { exposure: 1 });
+    kit.add(M.wood, Kit.UNIT_CYL, TRS(rx2 + 0.06, ry2 + 0.86, rz2 + 0.10, 0.9, 0.035, 0.80, 0.035, 0.18, 0.12));
+    kit.box(M.rust, 0.05, 0.17, 0.22, rx2 + 0.02, ry2 + 0.50, rz2 + 0.03, 0.9, { rz: 0.12, exposure: 1 });
+    this._decal(rx2, rz2, 0.9, 0.72);
 
     // split-log benches, one rolled off its feet
     for (let i = 0; i < 5; i++) {

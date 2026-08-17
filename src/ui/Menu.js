@@ -351,8 +351,9 @@ function svgCabin() {
     + out.join('\n') + `\n</svg>`;
 }
 
-/** Six hardware roundels — the contents inset, catalogue-style. */
-function svgHardware() {
+/** Six hardware roundels — the contents inset, catalogue-style. Inner markup only, on a 400x68
+ * grid, so it can be placed inside a larger plate as well as stand alone. */
+function hardwareCells() {
   const glyphs = [
     // carriage bolt
     `  <path d="M-9 -13 a9 9 0 0 1 18 0 l0 3 -18 0 z" fill="none" stroke="currentColor" stroke-width="1.5"/>
@@ -381,11 +382,16 @@ function svgHardware() {
   <path d="M-5.6 -7 l0 20" fill="none" stroke="currentColor" stroke-width="2.5"/>
   <path d="M-5.6 5 l0 8" fill="none" stroke="var(--sc-red)" stroke-width="2.5"/>`,
   ];
-  const cells = glyphs.map((g, i) => `  <g transform="translate(${34 + i * 62} 34)">
+  return glyphs.map((g, i) => `  <g transform="translate(${34 + i * 62} 34)">
   <circle cx="0" cy="0" r="27" fill="none" stroke="currentColor" stroke-width="1.5"/>
 ${g}
   </g>`).join('\n');
-  return `<svg viewBox="0 0 400 68" role="img" aria-label="Hardware supplied">\n${cells}\n</svg>`;
+}
+
+/** The roundel row as a standalone plate, 400 x 68. */
+function svgHardware() {
+  return `<svg viewBox="0 0 400 68" role="img" aria-label="Hardware supplied">\n`
+    + hardwareCells() + `\n</svg>`;
 }
 
 /**
@@ -455,6 +461,42 @@ function svgBjorn(pose) {
   return `<svg viewBox="0 0 120 152" role="img" aria-label="Assembly figure">\n${out.join('\n')}\n</svg>`;
 }
 
+/**
+ * The boot plate's drawn fallback, used only when `public/img/loading-plate.png` is absent.
+ *
+ * NOT a hammer. The supplied plate is a claw hammer lying on two boards, and two attempts at
+ * drawing that in code — once through the dimetric lattice, once in explicit screen coordinates
+ * — produced a shape that read as a floating rectangle beside a hook, then as a red smear on a
+ * board edge: at this size a plan-view hammer runs parallel to the boards it lies on and its
+ * outline disappears into theirs. A drawing that is nearly right is worse than a different
+ * drawing that is right, so the fallback prints the CONTENTS instead — six hardware roundels
+ * over a ruled parts line, which is what 'CHECK CONTENTS BEFORE BEGINNING.' actually asks you
+ * to do, and which is drawn from marks already proven on the title sheet.
+ */
+function svgContentsPlate() {
+  const T = WEIGHTS.thin, H = WEIGHTS.hairline;
+  const out = [];
+
+  // Six roundels, the same inset the title sheet carries, on the same 400 x 68 grid.
+  out.push(`  <g transform="translate(0 10)">\n${hardwareCells()}\n  </g>`);
+
+  // Under them, a ruled parts line per roundel: the manual counting its own bag of fixings.
+  const counts = [24, 12, 40, 40, 1, 1];
+  for (let i = 0; i < 6; i++) {
+    const cx = 34 + i * 62;   // must track hardwareCells()'s own 34 + i * 62 spacing
+    out.push(poly([[cx - 22, 108], [cx + 22, 108]], H));
+    out.push(`  <text x="${cx}" y="126" text-anchor="middle" font-size="13"
+      font-family="Helvetica Neue, Helvetica, Arial, sans-serif" letter-spacing="1.2"
+      fill="currentColor">${counts[i]}×</text>`);
+  }
+  // A single heavier rule closing the block, with the manual's corner tick at the left.
+  out.push(poly([[18, 146], [382, 146]], T));
+  out.push(poly([[18, 141], [18, 151]], T));
+
+  return `<svg viewBox="0 0 400 160" role="img" aria-label="Contents supplied">\n`
+    + out.join('\n') + `\n</svg>`;
+}
+
 /** ART_DIRECTION §13.4 — the ✓, at heavy weight, butt caps, ink. */
 function svgTick() {
   return `<svg viewBox="0 0 24 24" aria-hidden="true">
@@ -516,6 +558,40 @@ const MENU_CSS = `
   transition: opacity 260ms ease;
 }
 #${ROOT_ID}[data-open="1"] .sc-scrim { opacity: 1; }
+
+/*
+ * The photographic night plate ('/img/splash-title.png'), title screen only.
+ *
+ * The live 3D world keeps rendering and keeps drifting underneath — the plate sits at .93, so
+ * the lantern, the lightning and the moon still bleed through, and the frame is never a still.
+ * With the file absent the layer stays at opacity 0 and the title screen is the live forest,
+ * which is what it was before. Nothing about the sheet in front of it changes either way.
+ */
+.sc-splash {
+  position: absolute; inset: 0; opacity: 0; pointer-events: none;
+  background-image: var(--sc-splash, none);
+  background-size: cover; background-position: 50% 44%; background-repeat: no-repeat;
+  transform: scale(1.06);
+}
+/*
+ * No transition on this opacity, deliberately. A backdropped or occluded tab freezes the CSS
+ * timeline, and a transition that never advances leaves the plate at its FROM value — which is
+ * how this layer spent its first hour: correct in the cascade, invisible on screen. The drift
+ * below is decorative and may freeze without costing anything; the plate itself may not.
+ */
+#${ROOT_ID}[data-splash="1"][data-screen="title"][data-open="1"] .sc-splash {
+  opacity: .93;
+  animation: sc-drift 74s ease-in-out infinite alternate;
+}
+#${ROOT_ID}[data-reduced="1"] .sc-splash { animation: none !important; }
+@keyframes sc-drift {
+  from { transform: scale(1.055) translate3d(-0.6%, 0.35%, 0); }
+  to   { transform: scale(1.105) translate3d(0.7%, -0.5%, 0); }
+}
+/* The plate is a night photograph; the sheet needs a little more separation from it. */
+#${ROOT_ID}[data-splash="1"][data-screen="title"] .sc-sheet--title {
+  box-shadow: 0 2px 0 rgba(0,0,0,.5), 0 34px 90px rgba(0,0,0,.85);
+}
 
 .sc-stage {
   position: absolute; inset: 0; display: grid; place-items: center;
@@ -609,6 +685,11 @@ const MENU_CSS = `
   font-size: clamp(.78rem, 1.5vmin, .98rem); letter-spacing: .015em; margin: 0;
   color: rgba(20,24,26,.82);
 }
+/* The line a real flat-pack box carries under the name, printed with the same flat sincerity. */
+.sc-tagline--note {
+  font-size: clamp(.54rem, 1vmin, .68rem); letter-spacing: .21em; margin-top: .75em;
+  color: rgba(20,24,26,.5);
+}
 
 /* --- numbered steps ------------------------------------------------------------------------ */
 .sc-steps { list-style: none; margin: 1.6em 0 0; padding: 0; display: flex; flex-direction: column; gap: .18em; }
@@ -652,15 +733,57 @@ const MENU_CSS = `
 .sc-step.is-sel .sc-step__mark { opacity: 1; transform: translateY(-50%) translateX(0); }
 .sc-step.is-sel .sc-step__label { transform: translateX(3px); }
 
-/* --- title screen layout ------------------------------------------------------------------- */
-.sc-sheet--title { min-height: min(62vh, 36rem); }
-.sc-title-grid {
-  display: grid; grid-template-columns: minmax(0, 1.05fr) minmax(0, 1fr);
-  gap: clamp(20px, 3.6vmin, 56px); align-items: center;
-  padding: clamp(16px, 3vmin, 38px) 0; min-height: 0; flex: 1 1 auto;
+/* --- title screen layout -------------------------------------------------------------------
+ *
+ * The booklet stands at the left of the frame, not in the middle of it: the night plate behind
+ * carries its lantern low and right, and a centred sheet sits straight on top of the one lit
+ * thing in the picture. Anchoring left is what makes the two layers read as one composition
+ * instead of a dialog over a wallpaper.
+ */
+#${ROOT_ID}[data-screen="title"] .sc-stage {
+  place-items: center start;
+  padding-left: clamp(14px, 5.5vw, 110px);
 }
-.sc-plate { min-width: 0; }
-.sc-plate svg { display: block; width: 100%; height: auto; color: var(--sc-ink); }
+@media (max-width: 900px) {
+  #${ROOT_ID}[data-screen="title"] .sc-stage { place-items: center; padding-left: clamp(12px, 3.2vmin, 40px); }
+}
+.sc-title-grid {
+  display: flex; flex-direction: column;
+  padding: clamp(10px, 2vmin, 22px) 0 0; min-height: 0; flex: 0 1 auto;
+}
+/*
+ * The plate is a column: drawing on top, then the rule and the hardware row. The drawing is the
+ * only part allowed to shrink. Before this, the whole plate was one shrinkable, clipped box, and
+ * on a 900 px-tall frame the drawn fallback's hardware roundels were silently cut off the bottom
+ * of the sheet — the fallback screen was a DIFFERENT screen from the one with art, which is
+ * exactly what the fallback exists to prevent.
+ */
+.sc-plate { min-width: 0; flex: 0 1 auto; min-height: 0; display: flex; flex-direction: column; }
+.sc-plate__draw {
+  flex: 0 1 auto; min-height: 0; width: 100%;
+  aspect-ratio: 4 / 3; max-height: min(23vh, 12.5rem);
+}
+.sc-plate__draw svg { display: block; width: 100%; height: 100%; color: var(--sc-ink); }
+.sc-plate img {
+  display: block; width: 100%; height: auto; max-width: 100%; color: var(--sc-ink);
+}
+/*
+ * The supplied plate is 3:2 and already carries the red rule and the hardware roundels, so it
+ * replaces the drawn cabin AND the drawn hardware row. Capping its height keeps the booklet
+ * inside a 900 px frame; 'contain' letterboxes against stock of the same colour, so the
+ * letterboxing is invisible and the drawing never distorts.
+ */
+.sc-plate img {
+  max-height: min(27vh, 15rem); object-fit: contain;
+  /*
+   * The plate's own stock is a shade lighter than ours, so it lands as a pasted rectangle.
+   * DARKEN takes the per-channel minimum: its paper (247,244,236) loses to ours (242,239,230)
+   * and disappears, while every ink stroke and the red rule are already darker and survive
+   * untouched. Multiply would have darkened the whole plate; darken changes nothing but the void.
+   */
+  mix-blend-mode: darken;
+}
+.sc-lock { padding-top: clamp(10px, 2.2vmin, 26px); }
 /*
  * The optional PNG is composited as a BACKGROUND layer multiplied against the stock, not as an
  * <img> with mix-blend-mode: background-blend-mode blends inside the element, so it cannot be
@@ -673,22 +796,35 @@ const MENU_CSS = `
   background-position: center; background-size: contain;
   background-blend-mode: multiply;
 }
-.sc-plate__rule { height: 0; border-top: var(--sc-thin) solid var(--sc-red); margin: .9em 0 .8em; }
-.sc-plate__hw { display: block; }
-.sc-plate__hw svg { color: var(--sc-ink); }
+.sc-plate__rule {
+  flex: 0 0 auto; height: 0; border-top: var(--sc-thin) solid var(--sc-red); margin: .9em 0 .8em;
+}
+.sc-plate__hw { flex: 0 0 auto; display: block; }
+.sc-plate__hw svg { display: block; width: 100%; height: auto; color: var(--sc-ink); }
 .sc-lock { min-width: 0; }
 
-@media (max-width: 760px), (max-height: 560px) {
-  .sc-title-grid { grid-template-columns: 1fr; gap: clamp(10px, 2vmin, 20px); }
+@media (max-height: 620px) {
   .sc-plate { display: none; }
 }
 
 /* --- specification table (settings) --------------------------------------------------------- */
 .sc-scroll {
-  overflow-y: auto; overscroll-behavior: contain;
-  flex: 1 1 auto; min-height: 0; padding-right: .4em;
+  overflow-y: auto; overflow-x: hidden; overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+  flex: 1 1 auto; min-height: 0; padding-right: .9em;
+}
+/*
+ * The settings table is always taller than its box, so a row cut in half by the bottom edge
+ * reads as a rendering fault; fade it instead. Scoped to settings on purpose — the report's
+ * scroller usually does NOT overflow, and an unconditional mask faded the last printed note
+ * ('RETAIN THIS DOCUMENT.') to nothing on the one card that most needs to carry it.
+ */
+#${ROOT_ID}[data-screen="settings"] .sc-scroll {
+  -webkit-mask-image: linear-gradient(to bottom, #000 calc(100% - 26px), transparent 100%);
+  mask-image: linear-gradient(to bottom, #000 calc(100% - 26px), transparent 100%);
 }
 .sc-scroll::-webkit-scrollbar { width: 6px; }
+.sc-scroll::-webkit-scrollbar-track { background: transparent; }
 .sc-scroll::-webkit-scrollbar-thumb { background: rgba(20,24,26,.35); }
 .sc-sect {
   display: flex; align-items: baseline; gap: .85em; margin: 1.5em 0 .2em;
@@ -697,9 +833,14 @@ const MENU_CSS = `
 .sc-sect:first-child { margin-top: .4em; }
 .sc-sect__n { font-size: .68rem; letter-spacing: .1em; opacity: .5; }
 .sc-sect__name { font-size: .78rem; letter-spacing: .3em; }
+/*
+ * A specification table, so the control column is a fixed measure and the label column takes
+ * the slack — the controls line up down the page like a column of figures, which is the only
+ * reason a table is a table. A percentage control column would let the sliders wander.
+ */
 .sc-row {
-  display: grid; grid-template-columns: minmax(0, 1fr) clamp(8rem, 22vmin, 13.5rem) 3.9rem;
-  align-items: center; gap: 1.1em; padding: .46em 0;
+  display: grid; grid-template-columns: minmax(0, 1fr) clamp(11rem, 26vmin, 19rem) 4.2rem;
+  align-items: center; gap: 1.4em; padding: .46em 0;
   border-bottom: var(--sc-hair) solid rgba(20,24,26,.2);
 }
 .sc-row__label { font-size: clamp(.64rem, 1.2vmin, .8rem); letter-spacing: .15em; }
@@ -751,14 +892,31 @@ const MENU_CSS = `
 .sc-check[aria-checked="true"] svg { opacity: 1; }
 
 /* --- the assembly report -------------------------------------------------------------------- */
+/*
+ * Two columns: the count on the left, the disposition on the right. The right column is the
+ * inspector's block on a real QC form — a figure, a rule, a stamp — and it is ruled off from
+ * the counts so it reads as a separate signature rather than a decoration hanging off the page.
+ */
 .sc-report {
-  display: grid; grid-template-columns: minmax(0, 1fr) clamp(9rem, 21vmin, 14rem);
-  gap: clamp(16px, 3vmin, 44px); align-items: end;
+  display: grid; grid-template-columns: minmax(0, 1fr) clamp(10rem, 22vmin, 15rem);
+  gap: clamp(16px, 3.4vmin, 50px); align-items: stretch;
 }
-.sc-report__aside { display: flex; flex-direction: column; align-items: center; gap: .4em; }
-.sc-report__figure { width: clamp(70px, 11vmin, 116px); }
+.sc-report__aside {
+  display: flex; flex-direction: column; align-items: center; justify-content: flex-start;
+  gap: .3em; padding-left: clamp(12px, 2.4vmin, 34px);
+  border-left: var(--sc-hair) solid rgba(20,24,26,.35);
+}
+.sc-report__inspector {
+  font-size: clamp(.5rem, .98vmin, .62rem); letter-spacing: .22em; opacity: .55;
+  margin-bottom: .3em; align-self: stretch; text-align: center;
+}
+.sc-report__figure { width: clamp(78px, 13vmin, 128px); }
 .sc-report__figure svg { display: block; width: 100%; height: auto; color: var(--sc-ink); }
-@media (max-width: 720px) { .sc-report { grid-template-columns: 1fr; } .sc-report__figure { display: none; } }
+@media (max-width: 760px) {
+  .sc-report { grid-template-columns: 1fr; }
+  .sc-report__aside { border-left: 0; padding-left: 0; }
+  .sc-report__figure { display: none; }
+}
 
 .sc-rhead { padding: .1em 0 0; }
 .sc-rhead__kicker { font-size: clamp(.56rem, 1.06vmin, .7rem); letter-spacing: .24em; opacity: .62; }
@@ -802,20 +960,29 @@ const MENU_CSS = `
   font-size: clamp(.48rem, .95vmin, .6rem); letter-spacing: .16em; margin-top: .42em;
   padding-top: .34em; border-top: var(--sc-hair) solid var(--sc-ink); opacity: .8;
 }
+/*
+ * The stamp lands, but its RESTING state is the visible one and the animation only moves it.
+ * The first version faded in from opacity 0 with animation-fill-mode: backwards, and any
+ * condition that stalls the CSS timeline — a backgrounded tab, a static rasterisation, reduced
+ * motion handled badly — left the verdict, which is the punchline of the whole form, invisible
+ * on a form that otherwise looked finished. Nothing load-bearing may depend on a clock.
+ */
 #${ROOT_ID}[data-open="1"] .sc-stampbox {
-  animation: sc-stamp 260ms cubic-bezier(.2,1.5,.4,1) 420ms backwards;
+  animation: sc-stamp 300ms cubic-bezier(.2,1.5,.4,1);
 }
 @keyframes sc-stamp {
-  from { transform: rotate(-9deg) scale(1.5); opacity: 0; }
-  to { transform: rotate(-4.2deg) scale(1); opacity: .87; }
+  from { transform: rotate(-9.5deg) scale(1.18); }
+  to { transform: rotate(-4.2deg) scale(1); }
 }
 
 /* --- the closed manual (pause) --------------------------------------------------------------- */
 .sc-sheet--closed { width: min(94vw, var(--sc-sheet-w, 27rem)); }
 /* The manual, folded shut: the cover is there, and you cannot read it from here. */
 .sc-cover { position: relative; margin: 1.3em 0 .2em; max-height: 34vh; overflow: hidden; }
-.sc-cover svg { display: block; width: 100%; height: auto; color: var(--sc-ink); opacity: .3; }
-.sc-cover .sc-plate__img { opacity: .32; }
+.sc-cover svg, .sc-cover img {
+  display: block; width: 100%; height: auto; max-width: 100%; color: var(--sc-ink); opacity: .3;
+}
+.sc-cover img { aspect-ratio: 1 / .78; object-fit: cover; object-position: 50% 30%; mix-blend-mode: darken; }
 .sc-progress { margin: 1.15em 0 .2em; }
 .sc-progress svg { display: block; width: 100%; height: auto; max-width: 15rem; color: var(--sc-ink); }
 /* Exclamation lozenge — §13.4, max one per page, and it lives on the abandon confirmation. */
@@ -830,11 +997,35 @@ const MENU_CSS = `
 /* --- the title card (STORY §12.2) -------------------------------------------------------------- */
 .sc-card {
   position: absolute; inset: 0; display: grid; place-items: center; pointer-events: none;
-  background: var(--sc-paper); opacity: 0; transition: opacity 320ms ease;
+  background-color: var(--sc-paper); opacity: 0; transition: opacity 320ms ease;
   z-index: 2;
 }
+/*
+ * '/img/nightcard-texture.png' is blank aged manual stock. It is MULTIPLIED over the paper
+ * colour rather than drawn as a layer, so the type on top stays true ink and the card is the
+ * same card with or without the file — with it, the sheet has age; without it, it is clean.
+ */
+.sc-card[data-tex="1"] {
+  background-image: var(--sc-card-src);
+  background-size: cover; background-position: center;
+  background-blend-mode: multiply;
+}
+.sc-card::after {
+  content: ''; position: absolute; inset: 0; pointer-events: none;
+  background-image: var(--sc-fibre); background-size: 128px 128px;
+  mix-blend-mode: multiply; opacity: .5;
+}
 .sc-card[data-on="1"] { opacity: 1; }
-.sc-card__in { text-align: left; padding: 6vmin; max-width: 46rem; }
+/*
+ * Left-anchored to a page margin, not centred. A left-set block centred in the viewport reads
+ * as a mistake; set against a margin it reads as a page, which is the whole conceit.
+ */
+.sc-card { place-items: center start; }
+.sc-card__in {
+  text-align: left; max-width: 46rem;
+  padding: 6vmin clamp(24px, 6vw, 130px);
+}
+@media (max-width: 760px) { .sc-card { place-items: center; } }
 .sc-card__n { font-size: clamp(.66rem, 1.3vmin, .86rem); letter-spacing: .34em; }
 .sc-card__t {
   font-size: clamp(1.4rem, 4.6vmin, 3.1rem); font-weight: 700; letter-spacing: -.018em;
@@ -844,11 +1035,56 @@ const MENU_CSS = `
 .sc-card__s { font-size: clamp(.68rem, 1.3vmin, .88rem); letter-spacing: .03em; min-height: 1.3em; margin: 0; }
 .sc-card__rule { width: 18ch; height: 0; border-top: var(--sc-hair) solid var(--sc-ink); margin-top: 1.5em; }
 
+/* --- the boot plate ---------------------------------------------------------------------------
+ * Up from the Menu constructor until the engine reports booted. index.html paints #05070a and
+ * nothing else, so without this the first eight seconds of the game are a black rectangle.
+ */
+.sc-loading {
+  position: absolute; inset: 0; z-index: 3; pointer-events: none;
+  display: grid; place-items: center; background: #05070a;
+  transition: opacity 420ms ease;
+}
+.sc-loading[data-off="1"] { opacity: 0; }
+.sc-load__sheet {
+  position: relative; box-sizing: border-box; background: var(--sc-paper); color: var(--sc-ink);
+  width: min(88vw, 30rem); padding: clamp(18px, 3vmin, 34px) clamp(20px, 3.2vmin, 38px);
+  box-shadow: 0 2px 0 rgba(0,0,0,.35), 0 24px 60px rgba(0,0,0,.75);
+  overflow: hidden;
+}
+.sc-load__sheet::before {
+  content: ''; position: absolute; inset: 0; pointer-events: none; z-index: 4;
+  background-image: var(--sc-fibre); background-size: 128px 128px;
+  mix-blend-mode: multiply; opacity: .55;
+}
+.sc-load__plate { margin: 1.1em 0 .2em; overflow: hidden; }
+.sc-load__plate svg, .sc-load__plate img {
+  display: block; width: 100%; height: auto; max-width: 100%; color: var(--sc-ink);
+}
+.sc-load__plate img { aspect-ratio: 3 / 1.72; object-fit: cover; object-position: 50% 50%; }
+.sc-load__bar { position: relative; height: 0; border-top: var(--sc-thin) solid rgba(20,24,26,.22); margin: 1.15em 0 .9em; overflow: visible; }
+.sc-load__bar::after {
+  content: ''; position: absolute; left: 0; top: calc(var(--sc-thin) * -1); height: var(--sc-thin);
+  width: 34%; background: var(--sc-red);
+  animation: sc-sweep 2600ms cubic-bezier(.5,0,.5,1) infinite;
+}
+#${ROOT_ID}[data-reduced="1"] .sc-load__bar::after { animation: none; width: 100%; opacity: .5; }
+@keyframes sc-sweep {
+  0% { transform: translateX(0); }
+  50% { transform: translateX(194%); }
+  100% { transform: translateX(0); }
+}
+.sc-load__word { font-size: clamp(.66rem, 1.3vmin, .84rem); letter-spacing: .3em; }
+
 /* --- the blank page --------------------------------------------------------------------------- */
 .sc-blank { display: grid; place-items: center; min-height: 42vh; }
 .sc-blank span { font-size: clamp(.66rem, 1.3vmin, .86rem); letter-spacing: .32em; opacity: .75; }
+/* One centred step, sized to its own label rather than stretched across the sheet. */
+.sc-steps--centre { align-items: center; margin-top: 2.2em; }
+.sc-steps--centre .sc-step { width: auto; grid-template-columns: 2.05em auto; }
+.sc-steps--centre .sc-step__spec { display: none; }
+
 .sc-hjem {
-  display: grid; place-items: center; gap: 3.2em; padding: 6vmin 0;
+  display: grid; place-items: center; gap: 3.2em; padding: 10vmin 0 8vmin;
 }
 .sc-hjem b { font-size: clamp(2.4rem, 8vmin, 5.4rem); font-weight: 700; letter-spacing: .02em; }
 .sc-hjem span { font-size: clamp(.7rem, 1.4vmin, .92rem); letter-spacing: .34em; }
@@ -887,6 +1123,7 @@ export class Menu {
     this._closing = false;
     this._disposed = false;
     this._bootHidden = false;   // suppressed by ?shot / ?nomenu
+    this._lockAskedAt = -1e9;   // de-dupes pointer-lock attempts, see _requestLock()
 
     this._lastScore = null;
     this._lastNight = 1;
@@ -901,9 +1138,44 @@ export class Menu {
     this._imgTitle = null;
     this._imgCover = null;
 
+    this._imgSplash = null;
+    this._imgLoading = null;
+    this._imgCard = null;
+    this._loadingEl = null;
+    this._booted = false;
+
     this._onKeyDown = this._onKeyDown.bind(this);
     this._onCanvasDown = this._onCanvasDown.bind(this);
     this._onLockError = this._onLockError.bind(this);
+
+    /*
+     * NightManager.init() arms a 1.2 s auto-start unless `settings.autoStart` is exactly false
+     * ("when no UI does" — NightManager.js). We are that UI. Every system's constructor runs
+     * before any system's init(), so writing it here is the only moment it is still early enough.
+     * Without this the title screen is built, shown, and destroyed 1.2 s later by `night:begin`,
+     * which is precisely how it went unseen. `Settings.load()` filters unknown keys, so this
+     * never persists into a later session — it is a per-session hand-off, not a stored setting.
+     */
+    try {
+      const p = this._params();
+      if (!p.has('shot') && !p.has('shots') && !p.has('nomenu')) {
+        this.ctx.settings?.set?.('autoStart', false);
+      }
+    } catch (e) {
+      Log.warn('Menu: could not disarm NightManager auto-start.', e);
+    }
+
+    // The boot screen. Built in the constructor because init() does not run until after every
+    // heavy system has finished (texture bake + terrain ≈ 8 s), and those 8 s are the first
+    // thing anyone sees. Errors here are reported, never swallowed — a missing boot screen must
+    // not also cost us the menu.
+    try {
+      this._buildDom();
+      this._probeImages();
+      if (!this._bootSuppressed()) this._showLoading();
+    } catch (e) {
+      Log.error('Menu: boot screen construction failed.', e, e?.stack);
+    }
   }
 
   /* ------------------------------------------------------------------ lifecycle */
@@ -912,14 +1184,23 @@ export class Menu {
     if (this._disposed) return;
     if (typeof document === 'undefined') return;
 
+    // The constructor normally builds the DOM (so the boot screen exists during init). If it
+    // threw, this is the second and last chance — and a failure here is fatal to the menu, so
+    // it is logged with its stack rather than swallowed.
+    if (!this._root) {
+      try {
+        this._buildDom();
+      } catch (e) {
+        Log.error('Menu: DOM construction failed — no menu this session.', e, e?.stack);
+        return;
+      }
+    }
     try {
-      this._buildDom();
       this._bindEvents();
       this._applyVisionMode();
       this.resize(this.ctx.width ?? 0, this.ctx.height ?? 0);
     } catch (e) {
-      Log.error('Menu: DOM setup failed — continuing headless.', e);
-      return;
+      Log.error('Menu: event binding failed — menu will not respond to input.', e, e?.stack);
     }
 
     // Optional art. The screens are finished without it; this only replaces the drawn fallback.
@@ -929,10 +1210,36 @@ export class Menu {
     this._bootHidden = params.has('shot') || params.has('shots') || params.has('nomenu');
 
     const phase = this.ctx.state?.phase ?? 'menu';
-    if (!this._bootHidden && phase === 'menu') {
+    if (this._bootHidden) {
+      this._hideLoading();
+    } else if (params.has('menu')) {
+      // Review hook: `?menu=title|pause|settings|report|report7|card|confirm|loading` opens one
+      // screen straight out of boot, so a screenshot pass never has to race the game loop.
+      this._hideLoading();
+      this._showForReview(params.get('menu'));
+    } else if (phase === 'menu') {
+      this._hideLoading();
       this.showTitle();
+    } else {
+      this._hideLoading();
     }
     Log.debug(`Menu ready (phase '${phase}'${this._bootHidden ? ', suppressed by URL' : ''}).`);
+  }
+
+  /** `?menu=<screen>` — open one screen for review. Never reached in a normal session. */
+  _showForReview(which) {
+    switch (String(which || 'title')) {
+      case 'pause': this.showPause(); break;
+      case 'settings': this.showSettings('title'); break;
+      case 'report': this.showNightEnd(null, { night: 2 }); break;
+      case 'report7': this.showNightEnd(null, { night: 7 }); break;
+      case 'reportfail': this.showNightEnd(null, { night: 3, failed: true }); break;
+      case 'confirm': this._open('confirm', this._renderConfirm('abandon'), { scrim: 0.55, blur: 13, sat: 0.55, bri: 0.44, pause: false, closed: true }); break;
+      case 'card': this.showTitle(); this.showTitleCard(1); break;
+      case 'card5': this.showTitle(); this.showTitleCard(5); break;
+      case 'loading': this._showLoading(); break;
+      default: this.showTitle(); break;
+    }
   }
 
   /**
@@ -1013,30 +1320,43 @@ export class Menu {
     try { this.ctx.canvas?.removeEventListener('pointerdown', this._onCanvasDown); } catch { /* noop */ }
     try { globalThis.document?.removeEventListener('pointerlockerror', this._onLockError); } catch { /* noop */ }
 
+    this._loadingEl?.remove();
+    this._loadingEl = null;
     this._root?.remove();
     this._style?.remove();
     this._root = this._style = this._stage = this._card = this._sheetEl = null;
     this._items.length = 0;
     this._rows.length = 0;
-    this._imgTitle = this._imgCover = null;
+    this._imgTitle = this._imgCover = this._imgSplash = this._imgLoading = this._imgCard = null;
   }
 
   /* ------------------------------------------------------------------ public API */
 
+  /**
+   * A disposed Menu is never open.
+   *
+   * Other systems gate on this (Input, Campers, Shots), so `isOpen` staying true after teardown
+   * means the world believes a sheet is up forever and quietly stops responding. Measured: a
+   * `showNightEnd()` arriving after dispose — a `night:complete` in flight, say — used to leave
+   * `screen === 'report'` and `isOpen === true` on a Menu with no DOM at all.
+   */
   get isOpen() {
-    return this.screen !== null;
+    return !this._disposed && this.screen !== null;
   }
 
   /** The front of the booklet, over a living forest. */
   showTitle() {
+    if (this._disposed) return;
     this._camT = 0;
     this._camReady = false;
-    this._open('title', this._renderTitle(), { scrim: 0.3, blur: 0, sat: 1, bri: 1, pause: false });
+    this._open('title', this._renderTitle(), {
+      scrim: 0.22, blur: 0, sat: 1, bri: 1, pause: false, width: '30.5rem',
+    });
   }
 
   /** The manual folded shut. */
   showPause() {
-    if (this.screen === 'pause') return;
+    if (this._disposed || this.screen === 'pause') return;
     this._open('pause', this._renderPause(), { scrim: 0.52, blur: 13, sat: 0.55, bri: 0.46, pause: true, closed: true });
   }
 
@@ -1045,12 +1365,13 @@ export class Menu {
    * @param {'title'|'pause'} [returnTo] where Escape and RETURN go back to.
    */
   showSettings(returnTo) {
+    if (this._disposed) return;
     if (returnTo === 'title' || returnTo === 'pause') this._settingsReturn = returnTo;
     else if (this.screen === 'title' || this.screen === 'pause') this._settingsReturn = this.screen;
     const fromPause = this._settingsReturn === 'pause';
     this._open('settings', this._renderSettings(), {
       scrim: fromPause ? 0.52 : 0.38, blur: fromPause ? 13 : 4, sat: fromPause ? 0.55 : 0.85,
-      bri: fromPause ? 0.46 : 0.8, pause: fromPause, wide: true,
+      bri: fromPause ? 0.46 : 0.8, pause: fromPause, width: '50rem',
     });
   }
 
@@ -1061,18 +1382,22 @@ export class Menu {
    * @param {object} [opts]  `{ night, failed, reason }`
    */
   showNightEnd(score, opts = {}) {
+    if (this._disposed) return;
     const night = clamp(Math.round(opts.night ?? score?.night ?? this.ctx.state?.night ?? 1), 1, 7);
     this._lastNight = night;
     const normalized = this._normalizeScore(score, night, !!opts.failed);
     this._lastScore = normalized;
     this._open('report', this._renderReport(normalized, night, !!opts.failed), {
-      scrim: 0.46, blur: 6, sat: 0.7, bri: 0.62, pause: false, wide: true,
+      scrim: 0.46, blur: 6, sat: 0.7, bri: 0.62, pause: false,
+      // Night Seven is one word on a page (STORY §12.3); a 64rem form width makes it a banner.
+      width: night >= 7 ? '34rem' : '64rem',
     });
     this._sfx('ui.stamp', 0.9, 460);
   }
 
   /** Close whatever is up and give the world back its pointer. */
   hide() {
+    if (this._disposed) { this.screen = null; return; }
     if (!this._root || this.screen === null) { this.screen = null; return; }
     const wasPaused = this._enginePaused;
     this.screen = null;
@@ -1086,7 +1411,7 @@ export class Menu {
       if (this._disposed || this.screen !== null) return;
       if (this._stage) this._stage.innerHTML = '';
       this._closing = false;
-      if (this._root) this._root.dataset.closing = '0';
+      if (this._root) { this._root.dataset.closing = '0'; this._root.dataset.screen = 'none'; }
     });
 
     if (wasPaused) this._setEnginePaused(false);
@@ -1102,12 +1427,16 @@ export class Menu {
    * Does not count as an open menu: gameplay and the pointer keep running behind it.
    */
   showTitleCard(night) {
-    if (!this._card) return;
+    if (this._disposed || !this._card) return;
     const n = clamp(Math.round(night ?? 1), 1, 7);
     const card = Script?.titleCard?.(n) ?? null;
     if (!card) return;
     const hold = card.subline ? TITLE_CARD_HOLD_MS : TITLE_CARD_HOLD_LONG_MS;
 
+    if (this._imgCard) {
+      this._card.style.setProperty('--sc-card-src', `url("${this._imgCard}")`);
+      this._card.dataset.tex = '1';
+    }
     this._card.innerHTML = `
       <div class="sc-card__in">
         <div class="sc-card__n">${esc(card.line1)}</div>
@@ -1139,6 +1468,9 @@ export class Menu {
     this._root.id = ROOT_ID;
     this._root.dataset.open = '0';
 
+    const splash = doc.createElement('div');
+    splash.className = 'sc-splash';
+
     const scrim = doc.createElement('div');
     scrim.className = 'sc-scrim';
 
@@ -1149,11 +1481,12 @@ export class Menu {
     this._card.className = 'sc-card';
     this._card.dataset.on = '0';
 
-    this._root.append(scrim, this._stage, this._card);
+    this._root.append(splash, scrim, this._stage, this._card);
     doc.body.appendChild(this._root);
 
     this._root.style.setProperty('--sc-fibre', `url("${this._fibreTexture()}")`);
     if (this.ctx.settings?.get?.('reducedMotion')) this._root.dataset.reduced = '1';
+    if (this._imgSplash) this._applySplash();
   }
 
   /**
@@ -1209,8 +1542,14 @@ export class Menu {
     }
   }
 
-  /** Optional art. Nothing waits on it and nothing breaks without it. */
+  /**
+   * Optional art. Nothing waits on it and nothing breaks without it: every one of these five
+   * files has a drawn or CSS fallback already on screen by the time the probe resolves, and the
+   * probe only ever *replaces* a finished screen with a better one.
+   */
   _probeImages() {
+    if (this._probed) return;
+    this._probed = true;
     const load = (src, onOk) => {
       try {
         const im = new Image();
@@ -1226,24 +1565,106 @@ export class Menu {
     };
     load('/img/title-treatment.png', (s) => { this._imgTitle = s; });
     load('/img/manual-cover.png', (s) => { this._imgCover = s; });
+    load('/img/nightcard-texture.png', (s) => { this._imgCard = s; });
+    load('/img/splash-title.png', (s) => {
+      this._imgSplash = s;
+      this._applySplash();
+    });
+  }
+
+  /** The photographic night plate behind the title sheet. Absent → the live world alone. */
+  _applySplash() {
+    if (!this._root || !this._imgSplash) return;
+    this._root.style.setProperty('--sc-splash', `url("${this._imgSplash}")`);
+    this._root.dataset.splash = '1';
+  }
+
+  /* ------------------------------------------------------------------ the boot plate */
+
+  /** True when the URL asks for a bare canvas (screenshot harness, embed). */
+  _bootSuppressed() {
+    const p = this._params();
+    return p.has('shot') || p.has('shots') || p.has('nomenu');
+  }
+
+  /**
+   * Raised by the constructor, before any heavy system has init()ed, and torn down by init()
+   * or by `engine:booted` — whichever arrives first. The boot plate is its own element rather
+   * than a screen so it cannot collide with `screen`/`isOpen` or with pointer-lock logic.
+   */
+  _showLoading() {
+    if (!this._root || this._loadingEl) return;
+    const plate = this._imgLoading
+      ? `<img src="${esc(this._imgLoading)}" alt="" draggable="false">`
+      : svgContentsPlate();
+
+    const el = document.createElement('div');
+    el.className = 'sc-loading';
+    el.dataset.off = '0';
+    el.innerHTML = `
+      <div class="sc-load__sheet">
+        <div class="sc-head">
+          <span class="sc-prop">${esc(PROPERTY_STAMP)}</span>
+          <span class="sc-dim-text">ART. NO. ${esc(ARTICLE_NO)}</span>
+        </div>
+        <div class="sc-load__plate">${plate}</div>
+        <div class="sc-load__bar"></div>
+        <div class="sc-foot">
+          <span class="sc-load__word">CHECK CONTENTS BEFORE BEGINNING.</span>
+          <span class="sc-dim-text">${esc(MAKERS_MARK)}</span>
+        </div>
+      </div>`;
+    this._root.appendChild(el);
+    this._loadingEl = el;
+
+    // The plate has its own probe: it is wanted seconds before init() runs _probeImages().
+    try {
+      const im = new Image();
+      im.onload = () => {
+        if (this._disposed || !this._loadingEl) return;
+        this._imgLoading = '/img/loading-plate.png';
+        const slot = this._loadingEl.querySelector('.sc-load__plate');
+        if (slot) slot.innerHTML = `<img src="/img/loading-plate.png" alt="" draggable="false">`;
+      };
+      im.onerror = () => { /* the drawn hammer is already on screen */ };
+      im.src = '/img/loading-plate.png';
+    } catch { /* noop */ }
+
+    // Two independent teardowns. init() is the normal one; `engine:booted` covers the case
+    // where Menu.init() itself threw, and the timer covers a system that never returns. A boot
+    // plate that outlives the boot is the one failure mode that looks like a crash.
+    try { this.bus?.once?.('engine:booted', () => this._hideLoading()); } catch { /* noop */ }
+    this._after(45000, () => this._hideLoading());
+  }
+
+  _hideLoading() {
+    const el = this._loadingEl;
+    if (!el) return;
+    this._loadingEl = null;
+    el.dataset.off = '1';
+    this._after(460, () => el.remove());
   }
 
   /* ------------------------------------------------------------------ screen plumbing */
 
   _open(name, html, opts) {
+    if (this._disposed) return;
+    // No DOM (headless / construction failed): record the screen so state queries stay coherent,
+    // but never claim to have opened anything.
     if (!this._root || !this._stage) { this.screen = name; return; }
 
     const first = this.screen === null;
     this.screen = name;
     this._closing = false;
     this._root.dataset.closing = '0';
+    this._root.dataset.screen = name;
 
     const st = this._root.style;
     st.setProperty('--sc-scrim', String(opts.scrim ?? 0.4));
     st.setProperty('--sc-blur', `${opts.blur ?? 0}px`);
     st.setProperty('--sc-sat', String(opts.sat ?? 1));
     st.setProperty('--sc-bri', String(opts.bri ?? 1));
-    st.setProperty('--sc-sheet-w', opts.closed ? '27rem' : (opts.wide ? '64rem' : '68rem'));
+    st.setProperty('--sc-sheet-w', opts.width ?? (opts.closed ? '27rem' : (opts.wide ? '64rem' : '68rem')));
 
     this._stage.innerHTML = html;
     this._sheetEl = this._stage.querySelector('.sc-sheet');
@@ -1473,10 +1894,12 @@ export class Menu {
     const saveNight = clamp(Math.round(this._savedNight() ?? 1), 1, 7);
     const parts = this._totalParts();
     const steps = this._totalSteps();
+    // The supplied plate already carries the red rule and the hardware roundels; the drawn
+    // fallback has to print them itself, so the two versions of this sheet say the same things.
     const plate = this._imgTitle
       ? `<img src="${esc(this._imgTitle)}" alt="" draggable="false">`
-      : svgCabin();
-    const hw = this._imgTitle ? '' : `<div class="sc-plate__rule"></div>
+      : `<div class="sc-plate__draw">${svgCabin()}</div>
+          <div class="sc-plate__rule"></div>
           <div class="sc-plate__hw">${svgHardware()}</div>`;
 
     return `
@@ -1488,13 +1911,14 @@ export class Menu {
         </div>
 
         <div class="sc-title-grid">
-          <div class="sc-plate">${plate}${hw}</div>
+          <div class="sc-plate">${plate}</div>
 
           <div class="sc-lock">
             <h1 class="sc-title">Slasher Cabin</h1>
             <div class="sc-subtitle">Some assembly required</div>
             <div class="sc-rule-red"></div>
             <p class="sc-tagline">Build it and they will die.</p>
+            <p class="sc-tagline sc-tagline--note">TWO PERSONS RECOMMENDED.</p>
 
             <div class="sc-steps" role="menu">
               ${this._step(1, 'ASSEMBLE', 'assemble', 'STEP 1 OF 7')}
@@ -1509,7 +1933,6 @@ export class Menu {
           <span class="sc-specs">
             <span>PARTS <b>${group(parts)}</b></span>
             <span>STEPS <b>${group(steps)}</b></span>
-            <span class="sc-dim-text">TWO PERSONS RECOMMENDED</span>
           </span>
           <span class="sc-dim-text">${esc(MAKERS_MARK)} · 1962</span>
         </div>
@@ -1644,7 +2067,7 @@ export class Menu {
             <b>${esc(ASSEMBLY_NAMES[7])}</b>
             <span>${esc(MAKERS_MARK)}</span>
           </div>
-          <div class="sc-steps" role="menu" style="align-items:center">
+          <div class="sc-steps sc-steps--centre" role="menu">
             ${this._step(1, 'CLOSE', 'report-title', '')}
           </div>
         </div>
@@ -1729,6 +2152,7 @@ export class Menu {
           </div>
 
           <div class="sc-report__aside">
+            <div class="sc-report__inspector">DISPOSITION</div>
             <div class="sc-report__figure">${svgBjorn(posture)}</div>
             <div class="sc-rstamp">
               <div class="sc-stampbox">
@@ -2069,12 +2493,58 @@ export class Menu {
     this.ctx.canvas?.addEventListener?.('pointerdown', this._onCanvasDown);
   }
 
+  /**
+   * One canonical token per key, from `code` when the event has one and `key` when it does not.
+   *
+   * `code` is the right primary source — it is layout-independent, so WASD stays under the same
+   * three fingers on AZERTY. But not every keydown carries one: events synthesised by remapping
+   * utilities, on-screen keyboards, some accessibility software and every automation harness
+   * arrive with `code === ''`, and a menu that switches on `code` alone is simply dead to all of
+   * them. Measured, not assumed: a real dispatched Escape reached this handler with an empty
+   * `code` and the pause sheet did not open.
+   *
+   * @returns {string} '' when the key is not one we take.
+   */
+  _keyToken(e) {
+    switch (e.code) {
+      case 'Escape': return 'ESC';
+      case 'ArrowUp': case 'KeyW': return 'UP';
+      case 'ArrowDown': case 'KeyS': return 'DOWN';
+      case 'ArrowLeft': case 'KeyA': return 'LEFT';
+      case 'ArrowRight': case 'KeyD': return 'RIGHT';
+      case 'Tab': return 'TAB';
+      case 'Enter': case 'NumpadEnter': return 'ENTER';
+      case 'Space': return 'SPACE';
+      case 'Digit1': case 'Numpad1': return 'D1';
+      case 'Digit2': case 'Numpad2': return 'D2';
+      case 'Digit3': case 'Numpad3': return 'D3';
+      case 'Digit4': case 'Numpad4': return 'D4';
+      default: break;
+    }
+    switch (e.key) {
+      case 'Escape': case 'Esc': return 'ESC';
+      case 'ArrowUp': case 'Up': case 'w': case 'W': return 'UP';
+      case 'ArrowDown': case 'Down': case 's': case 'S': return 'DOWN';
+      case 'ArrowLeft': case 'Left': case 'a': case 'A': return 'LEFT';
+      case 'ArrowRight': case 'Right': case 'd': case 'D': return 'RIGHT';
+      case 'Tab': return 'TAB';
+      case 'Enter': return 'ENTER';
+      case ' ': case 'Spacebar': return 'SPACE';
+      case '1': return 'D1';
+      case '2': return 'D2';
+      case '3': return 'D3';
+      case '4': return 'D4';
+      default: return '';
+    }
+  }
+
   _onKeyDown(e) {
     if (this._disposed || !this._root) return;
+    const token = this._keyToken(e);
 
     // Escape is the only key we take while gameplay owns the screen.
     if (this.screen === null) {
-      if (e.code !== 'Escape') return;
+      if (token !== 'ESC') return;
       const shots = this.ctx.systems?.get?.('Shots');
       if (shots && shots.active) return;
       if (!PLAYABLE_PHASES.has(this.ctx.state?.phase ?? '')) return;
@@ -2087,33 +2557,33 @@ export class Menu {
     const settings = this.screen === 'settings';
     let handled = true;
 
-    switch (e.code) {
-      case 'Escape':
+    switch (token) {
+      case 'ESC':
         this._back();
         break;
-      case 'ArrowUp': case 'KeyW':
+      case 'UP':
         if (settings && !e.shiftKey) this._moveRow(-1); else this._move(-1);
         break;
-      case 'ArrowDown': case 'KeyS':
+      case 'DOWN':
         if (settings && !e.shiftKey) this._moveRow(1); else this._move(1);
         break;
-      case 'Tab':
+      case 'TAB':
         this._move(e.shiftKey ? -1 : 1);
         break;
-      case 'ArrowLeft': case 'KeyA':
+      case 'LEFT':
         if (settings) this._nudgeRow(-1); else handled = false;
         break;
-      case 'ArrowRight': case 'KeyD':
+      case 'RIGHT':
         if (settings) this._nudgeRow(1); else handled = false;
         break;
-      case 'Enter': case 'NumpadEnter': case 'Space':
-        if (settings && e.code === 'Space') this._nudgeRow(0);
+      case 'ENTER': case 'SPACE':
+        if (settings && token === 'SPACE') this._nudgeRow(0);
         else this._activateSelected();
         break;
-      case 'Digit1': case 'Numpad1': this._activateIndex(0); break;
-      case 'Digit2': case 'Numpad2': this._activateIndex(1); break;
-      case 'Digit3': case 'Numpad3': this._activateIndex(2); break;
-      case 'Digit4': case 'Numpad4': this._activateIndex(3); break;
+      case 'D1': this._activateIndex(0); break;
+      case 'D2': this._activateIndex(1); break;
+      case 'D3': this._activateIndex(2); break;
+      case 'D4': this._activateIndex(3); break;
       default: handled = false;
     }
 
@@ -2164,22 +2634,51 @@ export class Menu {
 
   /* ------------------------------------------------------------------ pointer lock */
 
+  /**
+   * Ask for the pointer back.
+   *
+   * Two things measured here, both of which produced console noise before they were handled:
+   *
+   * 1. `Element.requestPointerLock()` returns a PROMISE in current Chrome, and a refusal REJECTS
+   *    it. A refusal is not exceptional in this game — the browser throttles re-locking for
+   *    ~1.25 s after a user-initiated Escape, which is the single most common way a player
+   *    resumes — so an unhandled rejection is guaranteed on a normal Escape/Escape. It is not
+   *    catchable with try/catch, only with .catch(). Observed as 13 uncaught WrongDocumentError
+   *    rejections across one Escape round-trip.
+   *    TODO(api): Input.requestPointerLock() swallows the call's return value, so the rejection
+   *    escapes there too. We call the canvas directly — the identical call Input makes — and
+   *    Input's own pointerlockchange listener keeps `input.pointerLocked` correct either way.
+   * 2. Three timed attempts from `hide()` and three more from `_startGame()` fire inside 350 ms.
+   *    They are individually harmless but each one is another rejection, so attempts closer
+   *    together than the de-dupe window are dropped.
+   */
   _requestLock() {
-    const input = this.ctx.systems?.get?.('Input');
-    const canvas = this.ctx.canvas;
+    const input = this.ctx.systems?.get?.('Input') ?? null;
+    const canvas = this.ctx.canvas ?? null;
     if (!input && !canvas) return;
 
     const attempt = () => {
       if (this._disposed || this.isOpen) return;
       if (!PLAYABLE_PHASES.has(this.ctx.state?.phase ?? '')) return;
       if (input?.pointerLocked) return;
-      if (typeof input?.requestPointerLock === 'function') input.requestPointerLock();
-      else canvas?.requestPointerLock?.();
+      const now = (globalThis.performance?.now?.() ?? Date.now());
+      if (now - this._lockAskedAt < 250) return;
+      this._lockAskedAt = now;
+
+      if (typeof canvas?.requestPointerLock === 'function') {
+        let p = null;
+        try { p = canvas.requestPointerLock(); } catch (e) { Log.debug('Menu: pointer lock threw.', e); }
+        if (p && typeof p.catch === 'function') {
+          p.catch((e) => Log.debug('Menu: pointer lock refused — will retry.', e?.name ?? e));
+        }
+      } else if (typeof input?.requestPointerLock === 'function') {
+        input.requestPointerLock();
+      }
     };
 
     attempt();
-    // Browsers throttle re-locking for ~1.25 s after a user-initiated Escape. Retry past it;
-    // the canvas pointer-down handler is the belt-and-braces path if the user never waits.
+    // Retry past the browser's post-Escape throttle; the canvas pointer-down handler is the
+    // belt-and-braces path if the user never waits.
     this._after(320, attempt);
     this._after(1400, attempt);
   }
@@ -2328,6 +2827,9 @@ export class Menu {
   }
 
   _after(ms, fn) {
+    // Never arm a timer on a disposed Menu — dispose() already drained the set, so anything
+    // added afterwards is a handle nobody will ever clear.
+    if (this._disposed) return 0;
     const id = setTimeout(() => {
       this._timers.delete(id);
       if (this._disposed) return;
