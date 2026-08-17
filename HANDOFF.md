@@ -28,7 +28,7 @@ real and named below.
 
 ---
 
-## THE MOST IMPORTANT THING: measurement on this project has lied seven times
+## THE MOST IMPORTANT THING: measurement on this project has lied eight times
 
 Every one of these produced *confident, precise, wrong numbers*. Several sent real work backwards;
 one caused a committed regression. Two were inside the tool built to prevent the others.
@@ -59,6 +59,20 @@ one caused a committed regression. Two were inside the tool built to prevent the
    render measurement was ever affected** — but three of the seven failures are now inside the
    one tool built to prevent the other four. Distrust it accordingly; it earns trust only by
    printing `-> OK` on the calibration line.
+
+8. **THE BROWSER PANE CANNOT PRESS THIS GAME'S KEYS.** `src/core/Input.js:12-26` binds every
+   action to `KeyboardEvent.code` (`'KeyW'`, `'Tab'`, `'KeyE'`), and `Input.js:94` does
+   `this._down.add(e.code)`. Key events delivered through the pane arrive with **`code: ""`** —
+   logged directly as `["down","w","",true]`. So **WASD, E, Tab, F, G and R/T are all inert**
+   through that path. `Escape` appears to work only because the pause menu reads `e.key`, which
+   makes the harness look functional while every gameplay verb silently does nothing. Pointer lock
+   is refused in the pane as well, so mouse-look is dead too; the Chrome-extension route is worse
+   (background tabs are rAF-throttled — 9 frames in 20 s).
+   **Consequence: an agent that "played the game" through the pane and reported the player stuck
+   or unresponsive has measured the harness, not the build.** To really drive it, dispatch DOM
+   events carrying the correct `code` on `document`, or drive the system directly — and **say
+   which method you used for every result you report.** The agents that got real playtests done
+   here (the P-01 run, the pry loop) used trusted CDP `Input.dispatchKeyEvent`.
 
 ### The rules that came out of it
 
