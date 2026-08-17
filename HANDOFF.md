@@ -114,10 +114,15 @@ would push `site-close` out of spec, so this needs judgement rather than a tweak
 4. **Visual gaps to the key art:** the lake has no water surface or reflection; tent interiors
    glow *inverted* (openings darker than canvas); cabin windows are flat rectangles with no spill;
    `ridge` is the "grey mush" failure `ART_DIRECTION §11` explicitly forbids.
-5. **Deploy is untested.** `netlify.toml` is configured (site `slasher-cabin` linked, `npm run
-   build` → `dist`, Node 22). **`dist` is ~59 MB** — a brutal first load, and the generated audio
-   and images are likely being copied wholesale. The production build has never been served and
-   verified. *Nothing has been deployed. That call is the owner's.*
+5. **First-load weight: `dist` is 46 MB** (down from 59). The production build has now been
+   served and verified — every asset resolves, sourcemaps are off, reference keyart is stripped.
+   But **27 MB is `img/` and 17 MB is `audio/`**, and the images are full-resolution PNGs straight
+   out of gpt-image-2. The obvious win nobody has taken: downscale and re-encode them (most are
+   used at a fraction of their native size), and consider lazy-loading the audio beds rather than
+   shipping all 33 up front. Also, six generated images are not yet wired to anything
+   (`icons-tools`, `icons-parts`, `mascot-sheet`, `hardware-plate`, two decals) — they were
+   deliberately left in the build rather than stripped, because excluding an image that works in
+   dev and 404s in production the moment someone wires it is the worst kind of trap.
 
 ---
 

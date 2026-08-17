@@ -1,5 +1,5 @@
 import { defineConfig } from 'vite';
-import { writeFileSync, mkdirSync } from 'node:fs';
+import { writeFileSync, mkdirSync, existsSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 
 /**
@@ -48,9 +48,35 @@ function shotWriter() {
   };
 }
 
+/**
+ * Drop reference-only art from the production build.
+ *
+ * `public/img/keyart-*.png` are the art-direction targets that visual-review agents open and
+ * compare renders against (ARCHITECTURE §11d). They are documentation, not game assets — nothing
+ * in `src/` loads them, only comments mention them — but `public/` is copied wholesale, so they
+ * were shipping 4.5 MB to every player.
+ *
+ * Deliberately conservative: it removes ONLY files nothing could load. Images that exist but are
+ * not yet wired up (icon sheets, the mascot sheet) are left in, because excluding them would work
+ * in dev and 404 in production the moment someone wires them — the worst kind of trap.
+ */
+function stripReferenceArt() {
+  const REFERENCE_ONLY = ['img/keyart-site.png', 'img/keyart-lake.png'];
+  return {
+    name: 'slasher-strip-reference-art',
+    apply: 'build',
+    closeBundle() {
+      for (const rel of REFERENCE_ONLY) {
+        const p = join(process.cwd(), 'dist', rel);
+        if (existsSync(p)) { rmSync(p); this.info?.(`stripped reference art: ${rel}`); }
+      }
+    },
+  };
+}
+
 export default defineConfig({
   base: './',
-  plugins: [shotWriter()],
+  plugins: [shotWriter(), stripReferenceArt()],
   server: {
     host: '127.0.0.1',
     port: 5173,
@@ -58,7 +84,9 @@ export default defineConfig({
   },
   build: {
     target: 'esnext',
-    sourcemap: true,
+    // Sourcemaps are for local debugging. Shipping 28 of them published the full annotated
+    // source and dominated dist/assets.
+    sourcemap: false,
     chunkSizeWarningLimit: 2000,
   },
   assetsInclude: ['**/*.mp3', '**/*.ogg', '**/*.wav'],
