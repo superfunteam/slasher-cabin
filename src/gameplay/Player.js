@@ -60,6 +60,17 @@
  *     are a carpenter."), so the `throwPart` binding is wired to the silent 2.1 s SET DOWN.
  *   - It does not emit `build:*`. Those belong to BuildSystem even when BuildSystem is absent.
  *   - It does not let fear touch control. Fear is a camera property. The slasher is never panicked.
+ *
+ * ---------------------------------------------------------------------------------------------
+ * THE VERBS THIS FILE OWNS THE KEYS FOR
+ *
+ *   E                interact / place / repair — forwarded to BuildSystem's hooks
+ *   Q  tap           drop, loud (§4.1)                         requires a part in hand
+ *   Q  hold 2.1 s    set down, silent (§4.1)                   requires a part in hand
+ *   Q  hold 1.1 s    PRY OUT — `BuildSystem.removeJoin()`      requires EMPTY hands + a join
+ *   G  hold 2.1 s    set down, silent (§9.6 deleted the throw)
+ *
+ * The three `Q` verbs are disjoint by hand state, not by convention — see `_updatePry`.
  */
 
 import * as THREE from 'three';
@@ -196,6 +207,13 @@ const T = {
   // (the lantern tap-vs-hold threshold lives in Flashlight.TUNING.tapSeconds — Flashlight owns
   //  the `lantern` action end to end. Player deliberately holds no lantern timing constant.)
 
+  // --- PRY OUT — the input path for `build:remove` (see `_updatePry`, and the argument above it)
+  pryTime: 1.10,            // s of held Q before the 8 s removal starts
+  pryReach: 3.00,           // m — between HUD._lookAtSlot's 3.4 and BuildSystem's placeReach 2.4
+  pryDot: 0.35,             // cos of the aim cone; the same number HUD and BuildSystem both use
+  pryWarnAfter: 0.12,       // s — a flush join carries no standing prompt, but it does get a ring
+  pryScanEvery: 3,          // frames — the same budget the interaction ray runs on
+
   // --- fear (Player-owned; no document assigns these, so they are named and commented)
   fearRise: 1.6,            // /s toward target — fright arrives fast
   fearFall: 0.10,           // /s — and leaves slowly. A full 1.0 takes ten seconds to clear.
@@ -265,6 +283,8 @@ const _euler = new THREE.Euler(0, 0, 0, 'YXZ');
 const _quat = new THREE.Quaternion();
 
 /** Pre-allocated event payloads. Reused every frame — listeners must COPY, not retain. */
+/** Reused so `HUD.setPrompt()` can be driven every frame without allocating an options object. */
+const _promptOpts = { progress: 0 };
 const _movePayload = { position: new THREE.Vector3(), speed: 0, crouched: false };
 const _footPayload = { position: new THREE.Vector3(), surface: 'duff', loud: 0 };
 const _sfxPayload = { id: '', position: new THREE.Vector3(), volume: 1, rate: 1 };
@@ -498,6 +518,19 @@ export class Player {
     this._interactHeldAtRelease = 0;
     this._surfaceTick = 0;
 
+    // --- PRY OUT (`_updatePry`). `_pryScan` is a flat mirror of BuildSystem's slot table, rebuilt
+    //     only when that table changes size, so the per-frame scan allocates nothing.
+    this._pryHeld = 0;
+    this._pryLatched = false;
+    this._pryPromptOn = false;
+    this._prySlotId = null;
+    this._pryRec = { id: null, visual: '' };
+    this._pryScan = [];
+    this._pryScanSize = -1;
+    this._pryPush = (s) => { this._pryScan.push(s); };
+    /** How many joins this player has pried out this session. Read by nothing; useful in a probe. */
+    this.pryCount = 0;
+
     this._prevEye = new THREE.Vector3(0, T.standEye, 6);
     this._currEye = new THREE.Vector3(0, T.standEye, 6);
 
@@ -661,6 +694,11 @@ export class Player {
     this.carriedPart = null;
 
     if (this.handAnchor?.parent) this.handAnchor.parent.remove(this.handAnchor);
+
+    // Give the prompt card back before we go, or a forced pry prompt outlives the player.
+    this._pryClearPrompt();
+    this._pryScan.length = 0;
+    this._pryScanSize = -1;
 
     this.interactTarget = null;
     this._targetRec = null;
@@ -1180,7 +1218,11 @@ export class Player {
   _updateVerbs(dt) {
     const input = this._input();
     if (!input) return;
-    if (!this.controlEnabled) { this.interactHold = 0; this._dropHeld = 0; this._setDownHeld = 0; return; }
+    if (!this.controlEnabled) {
+      this.interactHold = 0; this._dropHeld = 0; this._setDownHeld = 0;
+      this._pryHeld = 0; this._pryLatched = false; this._pryClearPrompt();
+      return;
+    }
 
     // ---------------------------------------------------------------- interact / place
     const interactDown = !!input.isDown?.('interact');
@@ -1201,6 +1243,9 @@ export class Player {
     // so the `throwPart` binding is a second, dedicated set-down rather than a throw.
     this._dropHeld = this._holdVerb(input, 'drop', dt, this._dropHeld, true);
     this._setDownHeld = this._holdVerb(input, 'throwPart', dt, this._setDownHeld, false);
+
+    // ---------------------------------------------------------------- pry out (`build:remove`)
+    this._updatePry(input, dt);
 
     // ---------------------------------------------------------------- lantern (GAME_DESIGN §4.1)
     // NOT HANDLED HERE. `Flashlight` reads the `lantern` action itself (Flashlight._readInput):
@@ -1229,6 +1274,202 @@ export class Player {
       held = 0;
     }
     return held;
+  }
+
+  // ===============================================================================================
+  // PRY OUT — the input path for `BuildSystem.removeJoin()`.
+  //
+  // WHY THIS KEY, AND WHY IT CANNOT COLLIDE.
+  //
+  //   `Q` (`drop`) already means one thing: LET GO OF WHAT IS IN YOUR HANDS. A tap drops it loudly,
+  //   a 2.1 s hold sets it down silently (GAME_DESIGN §4.1, §10.3). With your hands empty, the only
+  //   thing you are still holding is the cabin — so the same key, held, aimed at a join you built,
+  //   takes it back out. One key, one meaning, two hand states.
+  //
+  //   The collision check is structural, not a convention: every existing `Q` verb is gated on
+  //   `this.carried.length`, and this one returns immediately unless `carried` is EMPTY. The two
+  //   branches are disjoint by construction and cannot both fire from one press. MEASURED, and it
+  //   is why the latch below exists: without it a single unbroken press completed the 2.1 s
+  //   set-down, emptied the hands, and then armed the pry 1.1 s later — one key, two verbs, on a
+  //   player who never let go. A press that ever held a part is spent for the rest of that press.
+  //   Nothing else is
+  //   touched — `E` interact/repair/provoke, `G` set down, `R`/`T` rotate, `F` lantern (Flashlight
+  //   owns that binding end to end) and `LMB` place/seat/saw are all unchanged, and BuildSystem's
+  //   own `Q` fallback only runs when Player does not own the carry, where `dropHeld()` on empty
+  //   hands is already a no-op.
+  //
+  //   1.10 s: half the set-down, so the gesture reads as less ceremony than putting a beam down,
+  //   and long enough that §10.3's panic-drop reflex cannot tear the foundation out by accident.
+  //
+  // WHY IT HAD TO EXIST. GAME_DESIGN §6.3 — "Removal (`build:remove`) is always allowed, costs 8 s"
+  // — and §7.4's Re-seat is `build:remove` + re-place, the honest fix for a seating deficit. §17
+  // spends the beat at 4:52 on it: the first creak fires, Dale turns toward the plot, and "the
+  // player must now re-seat (8 s + 3.0 s, loud), or hide, or freeze. All three work." Two of those
+  // three had inputs. This is the third.
+  //
+  // NO TEXT. §17 is binding: the game has not addressed the player since the title card. The verb
+  // announces itself the way every other verb in this file does — a pictogram on a keycap, drawn by
+  // HUD, through its documented `setPrompt(text, key, opts)`. `remove` is already in HUD's
+  // pictogram table; `drop` is already an action HUD can label. Not one word is added anywhere.
+  // ===============================================================================================
+
+  /**
+   * Held `Q`, empty-handed, aimed at a join → `BuildSystem.removeJoin(slotId)`.
+   *
+   * Player does not implement removal and does not make its noise: BuildSystem owns the 8 s action,
+   * the single `wrench` emit at 24 m / 0.45, the `nail.pull` sfx and the dropped part. All this
+   * method does is choose the join, count the hold, and draw the card.
+   */
+  _updatePry(input, dt) {
+    const down = !!input.isDown?.('drop');
+    if (!down) { this._pryHeld = 0; this._pryLatched = false; }
+
+    // Hands full: `Q` is the drop and the set-down. Not ours — and this press never becomes ours,
+    // even after the set-down empties the hands, or one unbroken hold would put a beam down and
+    // then start tearing out the join behind it. Let go and press again to pry.
+    if (this.carried.length) { this._pryLatched = true; this._pryReset(); return; }
+
+    const bs = this._sys('BuildSystem');
+    if (!bs || typeof bs.removeJoin !== 'function') { this._pryReset(); return; }
+
+    // An 8 s removal is running. Hold the card up and let the ring report it — this is the only
+    // progress readout the verb gets, and it is drawn on a keycap rather than said out loud.
+    let act = null;
+    try { act = bs.action; } catch { act = null; }
+    if (act) {
+      this._pryHeld = 0;
+      this._pryLatched = true;
+      if (act.kind === 'remove') this._pryPrompt('remove', clamp01((act.t || 0) / (act.duration || 1)));
+      else this._pryClearPrompt();
+      return;
+    }
+
+    const slotId = this._pryTarget(bs);
+    if (slotId !== this._prySlotId) { this._prySlotId = slotId; this._pryHeld = 0; }
+    if (!slotId) { this._pryClearPrompt(); return; }
+
+    // §7.4 / §6.3: refused while anything resting on it is still filled. `removeJoin` refuses too;
+    // pre-checking is what lets the card say so — with the ✗ glyph, wordlessly — before the hold.
+    const blocked = this._pryBlocked(bs, slotId);
+
+    if (down && !this._pryLatched && !blocked) {
+      this._pryHeld += dt;
+      if (this._pryHeld >= T.pryTime) {
+        this._pryLatched = true;
+        this._pryHeld = 0;
+        let ok = false;
+        try { ok = bs.removeJoin(slotId) === true; }
+        catch (e) { Log.once('player:pry', 'Player: BuildSystem.removeJoin threw.', e); }
+        if (ok) this.pryCount++;
+        return;
+      }
+    }
+
+    // The standing prompt appears only where the cabin is VISIBLY wrong — proud, gapped, sagging,
+    // split. A flush join is not nagged about, because the manual does not nag and the game has
+    // never once told the player what to do. It still shows up the moment a hold starts on one,
+    // which is the wordless "are you sure": release before the ring closes and nothing happened.
+    const wrong = this._pryRec.visual !== 'flush';
+    if (!wrong && this._pryHeld < T.pryWarnAfter) { this._pryClearPrompt(); return; }
+
+    // One card at a time: while `E` is mid-repair on this join, that verb owns the prompt.
+    let intent = null;
+    try { intent = bs.repairIntent; } catch { intent = null; }
+    if (intent && this._pryHeld <= 0) { this._pryClearPrompt(); return; }
+
+    this._pryPrompt(blocked ? 'blocked' : 'remove', clamp01(this._pryHeld / T.pryTime));
+  }
+
+  /**
+   * The installed join under the reticle, or null. Rate-limited to `pryScanEvery` frames and
+   * allocation-free: the slot list is a cached flat mirror and `visualStateFor()` returns a string.
+   */
+  _pryTarget(bs) {
+    if (this._frame % T.pryScanEvery !== 0) return this._pryRec.id;
+    const rec = this._pryRec;
+    rec.id = null;
+    rec.visual = '';
+
+    const list = this._pryScanList(bs);
+    if (!list || !list.length) return null;
+
+    _fwd.copy(this.lookAt);
+    let bestScore = -Infinity;
+    for (let i = 0; i < list.length; i++) {
+      const s = list[i];
+      if (!s || !Number.isFinite(s.px)) continue;
+      _v2.set(s.px, s.py, s.pz).sub(this._currEye);
+      const dist = _v2.length();
+      if (dist > T.pryReach || dist < 1e-4) continue;
+      _v2.multiplyScalar(1 / dist);
+      const dot = _v2.dot(_fwd);
+      if (dot < T.pryDot) continue;
+      let visual = 'empty';
+      try { visual = bs.visualStateFor(s.id) || 'empty'; } catch { visual = 'empty'; }
+      if (visual === 'empty') continue;          // nothing installed here — nothing to take out
+      const score = dot * 2 - dist * 0.3;
+      if (score > bestScore) { bestScore = score; rec.id = s.id; rec.visual = visual; }
+    }
+    return rec.id;
+  }
+
+  /** Any dependent still filled refuses the removal (§6.3). Reads only documented BuildSystem API. */
+  _pryBlocked(bs, slotId) {
+    let slot = null;
+    try { slot = bs.slotById?.(slotId) ?? null; } catch { return false; }
+    const deps = slot?.dependents;
+    if (!deps || !deps.length) return false;
+    for (let i = 0; i < deps.length; i++) {
+      let v = 'empty';
+      try { v = bs.visualStateFor(deps[i]); } catch { /* a stub BuildSystem blocks nothing */ }
+      if (v && v !== 'empty') return true;
+    }
+    return false;
+  }
+
+  /**
+   * A flat mirror of BuildSystem's slot table, rebuilt only when that table changes size — once a
+   * night, not once a frame. `Map.forEach` with a pre-bound callback allocates nothing.
+   */
+  _pryScanList(bs) {
+    let map = null;
+    try { map = bs.slots; } catch { map = null; }
+    if (!map || typeof map.size !== 'number' || typeof map.forEach !== 'function') {
+      try { return bs.nightSlots ?? null; } catch { return null; }
+    }
+    if (map.size !== this._pryScanSize) {
+      this._pryScanSize = map.size;
+      this._pryScan.length = 0;
+      map.forEach(this._pryPush);
+    }
+    return this._pryScan;
+  }
+
+  /** HUD's documented `setPrompt(text, key, opts)`. A pictogram, a keycap, and a ring. No words. */
+  _pryPrompt(icon, progress) {
+    const hud = this._sys('HUD');
+    if (!hud || typeof hud.setPrompt !== 'function') return;
+    _promptOpts.progress = progress;
+    try { hud.setPrompt(icon, 'drop', _promptOpts); } catch (e) {
+      Log.once('player:pryprompt', 'Player: HUD.setPrompt threw.', e);
+    }
+    this._pryPromptOn = true;
+  }
+
+  /** Hands the prompt back to HUD's own logic. Never touches the hold timer. */
+  _pryClearPrompt() {
+    if (!this._pryPromptOn) return;
+    this._pryPromptOn = false;
+    const hud = this._sys('HUD');
+    try { hud?.setPrompt?.(null, null); } catch { /* nothing to hand back to */ }
+  }
+
+  _pryReset() {
+    this._pryHeld = 0;
+    this._prySlotId = null;
+    this._pryRec.id = null;
+    this._pryRec.visual = '';
+    this._pryClearPrompt();
   }
 
   // ===============================================================================================

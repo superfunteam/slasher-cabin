@@ -58,6 +58,7 @@
  *
  *   // state (all read-only)
  *   currentNight  stage  stageCount  heldPart  heldParts  targetSlot  progress
+ *   ghostValid    ghostBlock         snapDistance       (see GHOST_BLOCK — WHY it refuses)
  *   available     installedCount     slotCount  creakRisk  creakDebt   seating
  *   pocket        toolBelt           shortfalls repairIntent  carryClass  carryMass
  *   carrySpeedMultiplier  carryTurnMultiplier  canCrouch  canSprint  blocksView
@@ -111,7 +112,12 @@ export const TUNING = Object.freeze({
   interactDot: 0.35,            // cos of the half-angle of the "am I looking at it" cone
   forcePlaceHold: 3.00,         // s — the Wrong-part verb (§6.4, raised from v1.0's 1.4)
   rotateStepDeg: 15,            // R / T nudge; the SNAP still picks nearest of k (§6.4.2)
-  obstructionSeconds: 1.10,     // s — the county survey stake (STORY §1.4). Silent. No prompt.
+  // s — the county survey stake (STORY §1.4). Silent: it makes no NOISE, nobody hears it, and it
+  // costs the player nothing on the stealth ledger. That is what "silent" meant and all it meant.
+  // It is NOT invisible: §1.4 calls this "unmissable — the tutorial's first input", and an input
+  // the player cannot see is not unmissable. See `_updateObstructionCue()`.
+  obstructionSeconds: 1.10,
+  obstructionMarkRadius: 3.20,  // m — inside this, and looking at it, the stake is marked in red
 
   // --- the seating check (§6.5)
   rampSeconds: 3.00,            // T_ramp. LINEAR.
@@ -223,9 +229,45 @@ export const TUNING = Object.freeze({
   // --- housekeeping
   ghostOpacityValid: 0.34,
   ghostOpacityBlocked: 0.15,    // §6.3: dependencies unmet renders in #d92b2b at 15%
+  // The obstruction mark is NOT the blocked ghost and does not share its opacity. 0.15 over a
+  // frame whose mean luminance is 0.0218 is below the noise floor — the blocked ghost is a
+  // whisper, which is correct for "you are holding the wrong board" and useless for "there is a
+  // steel post standing in the hole". The mark is on the OBSTRUCTION, not on the part.
+  obstructionMarkOpacity: 0.46,
   colorGhost: 0xdfe6ec,
   colorRed: 0xd92b2b,           // the manual's red. The only saturated red besides blood.
 });
+
+/**
+ * Why the ghost refuses, when it refuses. `null` means it does not.
+ *
+ * This exists because `targetSlot && !ghostValid` is FOUR different situations wearing one
+ * boolean, and one of them — an obstruction — is the only one the player can fix by standing
+ * still. The force-place verb (§6.4) reads this: leaning on the button is "I insist, split it",
+ * which is a legitimate thing to insist on when you are holding the wrong part, and is nonsense
+ * when a county survey stake is in the way. See `_forceArmed()`.
+ */
+export const GHOST_BLOCK = Object.freeze({
+  OBSTRUCTION: 'obstruction',   // something is physically in the slot; E clears it
+  TYPE: 'type',                 // this slot does not accept this part
+  DEPS: 'deps',                 // what this rests on is missing or is under torque 0.5
+  CUT: 'cut',                   // the part needs a saw pass first
+});
+
+/**
+ * Where an obstruction physically STANDS, relative to its slot, so the red mark lands on the
+ * thing in the way rather than on the empty square. `dx/dy/dz` are metres from `(px, py, pz)`;
+ * `w/h/d` are the mark's extents, deliberately a loose sleeve around the object so it reads as
+ * an annotation and never z-fights with it.
+ *
+ * `county-stake` matches `CabinSite._gSitePrep()` exactly: a 0.045 x 0.92 x 0.045 weathered post
+ * at (PIER_XZ[0] + 0.14, 0.44, PIER_XZ[0] + 0.10), yaw 0.3, with the concrete tag at 0.80. Pier
+ * slots sit at `P.PIER_Y = 0.20`, so the post's centre is 0.24 above the slot.
+ */
+const OBSTRUCTIONS = Object.freeze({
+  'county-stake': { dx: 0.14, dy: 0.24, dz: 0.10, w: 0.17, h: 1.04, d: 0.17, yaw: 0.3 },
+});
+const OBSTRUCTION_DEFAULT = Object.freeze({ dx: 0, dy: 0.30, dz: 0, w: 0.26, h: 0.92, d: 0.26, yaw: 0 });
 
 /** The five outcomes of §6.4. `correct` in the event payload is true only for SEATED. */
 export const OUTCOMES = Object.freeze({
@@ -748,9 +790,15 @@ export class BuildSystem {
     this.targetSlot = null;
     this.snapDistance = Infinity;   // m to the current snap target, for HUD/diagnostics
     this.ghostValid = false;
+    /** @type {string|null} one of GHOST_BLOCK, or null when `ghostValid`. Public; HUD may read. */
+    this.ghostBlock = null;
     this._carryYaw = 0;
     this._nearestCandidate = 0;
     this._forceHold = 0;
+
+    // --- the obstruction cue (STORY §1.4)
+    this._obstructionSlot = null;   // the slot whose obstruction is currently marked, or null
+    this._obstructionPrompt = false; // is our HUD prompt override live right now?
 
     // --- the seating check (§6.5)
     this.seating = {
@@ -801,6 +849,8 @@ export class BuildSystem {
     this._ghost = null;
     this._ghostMatOk = null;
     this._ghostMatBad = null;
+    this._obstructionMark = null;
+    this._obstructionMat = null;
     this._geoCache = new Map();
     this._matCache = new Map();
     this._ownedGeo = [];
@@ -1419,6 +1469,19 @@ export class BuildSystem {
     this._ghost.renderOrder = 3;
     this._ghost.frustumCulled = false;
     this._group.add(this._ghost);
+
+    // The obstruction mark. Same box, its own material, its own mesh — sharing `_ghost` would
+    // make the two fight for one transform on exactly the frame both want it.
+    this._obstructionMat = new THREE.MeshBasicMaterial({
+      color: TUNING.colorRed, transparent: true, opacity: TUNING.obstructionMarkOpacity,
+      depthWrite: false, side: THREE.DoubleSide, toneMapped: false,
+    });
+    this._ownedMat.push(this._obstructionMat);
+    this._obstructionMark = new THREE.Mesh(g, this._obstructionMat);
+    this._obstructionMark.visible = false;
+    this._obstructionMark.renderOrder = 4;
+    this._obstructionMark.frustumCulled = false;
+    this._group.add(this._obstructionMark);
   }
 
   /** Where the hands are. Player owns this when Player exists; the camera stands in until then. */
@@ -1448,6 +1511,8 @@ export class BuildSystem {
     this._sampleMask();
     this._updateSnap();      // before input, so a place acts on THIS frame's ghost
     this._pollInput(d);
+    // After input: an E press this frame starts the pull, and the cue must see that action.
+    this._updateObstructionCue(building);
     this._updateSeating();
     this._updateAction(d);
     this._updateTaps(d);
@@ -1517,7 +1582,10 @@ export class BuildSystem {
     if (lmb) {
       if (lmbEdge && !this.seating.active && !this.action) this.beginPlace();
       else if (this.action?.kind === 'saw') this._sawHold(dt);
-      else if (!this.seating.active && this.targetSlot && !this.ghostValid) this._forceHold += dt;
+      else if (!this.seating.active && this.targetSlot && this._forceArmed()) this._forceHold += dt;
+      // Not armed any more (the block changed, or the stake came out): the clock goes back to
+      // zero rather than resuming where it left off. Never touches the -1e9 fired sentinel.
+      else if (this._forceHold > 0) this._forceHold = 0;
       if (this._forceHold >= TUNING.forcePlaceHold) { this._forcePlace(); this._forceHold = -1e9; }
     } else {
       this._forceHold = 0;
@@ -1634,6 +1702,18 @@ export class BuildSystem {
   _updateSnap() {
     const part = this.heldPart;
     if (!part || this.seating.active || this.action) {
+      // With nothing in the hands there is no snap and there is no ghost, so `targetSlot` and
+      // `ghostValid` are both lies from the last frame the player was carrying. They were left
+      // set after a successful install — heldPart null, Player.carried 0, and the pair still read
+      // `P-02` / true — and the force-place branch is a function of exactly that pair.
+      // A mid-action or mid-seating early return keeps them: the seating check owns them.
+      if (!part) {
+        this.targetSlot = null;
+        this.snapDistance = Infinity;
+        this.ghostValid = false;
+        this.ghostBlock = null;
+        this._nearestCandidate = 0;
+      }
       if (!this.seating.active) this._showGhost(null, false);
       return;
     }
@@ -1652,7 +1732,10 @@ export class BuildSystem {
     this.snapDistance = best ? bestD : Infinity;
     // Clear `ghostValid` too, or it stays true from the last slot the player walked away from and
     // the force-place branch (`targetSlot && !ghostValid`) reads a ghost that is no longer there.
-    if (!best) { this.ghostValid = false; this._showGhost(null, false); this._nearestCandidate = 0; return; }
+    if (!best) {
+      this.ghostValid = false; this.ghostBlock = null;
+      this._showGhost(null, false); this._nearestCandidate = 0; return;
+    }
 
     const k = Math.max(1, best.yawCandidates | 0);
     const step = TAU / k;
@@ -1664,6 +1747,14 @@ export class BuildSystem {
     const depsOk = this._dependenciesMet(best);
     const cutOk = !best.requiresCut || (part.sawProgress ?? 0) >= 1;
     this.ghostValid = typeOk && depsOk && cutOk && !best.obstruction;
+    // Obstruction is tested FIRST, and it outranks the other three: a stake in the hole is the
+    // reason nothing can go in, whatever else is also true, and it is the only one of the four
+    // the player can clear from where they are standing.
+    this.ghostBlock = this.ghostValid ? null
+      : best.obstruction ? GHOST_BLOCK.OBSTRUCTION
+        : !typeOk ? GHOST_BLOCK.TYPE
+          : !depsOk ? GHOST_BLOCK.DEPS
+            : GHOST_BLOCK.CUT;
     this._showGhost(best, this.ghostValid);
   }
 
@@ -1727,6 +1818,96 @@ export class BuildSystem {
     g.rotation.set(0, slot.yaw + (TAU / Math.max(1, slot.yawCandidates)) * this._nearestCandidate, 0);
     g.material = valid ? this._ghostMatOk : this._ghostMatBad;
     g.visible = true;
+  }
+
+  // ------------------------------------------------------------------------ the obstruction cue
+
+  /**
+   * STORY §1.4, the mechanical channel: "Night One, first player action: the chalked slot for
+   * pier P-01 has a county stake standing in it… **Unmissable — it is the tutorial's first
+   * input.**"
+   *
+   * It was missable. Measured: with a pier in hand at 0.115 m the ghost fired 48 times, stayed
+   * invalid every time, and the game said nothing about why — HUD's verb resolver reaches its
+   * `pull` pictogram only on the EMPTY-HANDED branch, and a player carrying a part is on the
+   * carrying branch, where the answer to every kind of invalid is the same ✗. So the one slot in
+   * Night One that has a verb attached to it is the one slot that looks identical to a mistake.
+   *
+   * Two wordless channels, and no third:
+   *
+   *  1. **The mark.** The obstruction — not the slot, not the part — is sleeved in the manual's
+   *     red at 46%, from 3.2 m, whenever the player is looking at it. Red on an object is already
+   *     this game's grammar for "this item is the problem": §6.9 outlines the missing sixth pier
+   *     in red on the manifest, and the blocked ghost is red too. The player is being shown WHICH
+   *     THING is in the way. Nothing animates and nothing pulses.
+   *  2. **The prompt.** Only while carrying, because that is the only time HUD's reticle has been
+   *     claimed by the ✗ and the card is the last channel left. `setPrompt('obstruction', …)`
+   *     resolves through HUD's own `VERB_PICTO` to the `pull` pictogram — the closed arrow set of
+   *     ART §13.4, a stake leaving the ground — over the `E` cap. Empty-handed we do not touch it:
+   *     HUD already puts `pull` on the reticle there and deliberately shows no card, and that is
+   *     its call to make.
+   *
+   * No word is added to the screen. A pictogram and a keycap are an input legend, which is the
+   * distinction HUD's own PROMPT header draws and the reason the prompt card exists at all.
+   */
+  _updateObstructionCue(building) {
+    let slot = null;
+    if (building && !this._disposed) {
+      const t = this.targetSlot;
+      if (t && t.obstruction) slot = t;
+      const a = this.action;
+      if (!slot && a && a.kind === 'obstruction') {
+        const s = this.slots.get(a.slotId);
+        if (s && s.obstruction) slot = s;
+      }
+      if (!slot) {
+        const b = this._bestSlot();
+        if (b && b.obstruction) slot = b;
+      }
+      if (slot) {
+        const eye = this._eye(_v1);
+        const dx = slot.px - eye.x, dy = slot.py - eye.y, dz = slot.pz - eye.z;
+        const r = TUNING.obstructionMarkRadius;
+        if (dx * dx + dy * dy + dz * dz > r * r) slot = null;
+      }
+    }
+
+    const mark = this._obstructionMark;
+    if (mark && slot !== this._obstructionSlot) {
+      if (!slot) mark.visible = false;
+      else {
+        const o = OBSTRUCTIONS[slot.obstruction] ?? OBSTRUCTION_DEFAULT;
+        mark.position.set(slot.px + o.dx, slot.py + o.dy, slot.pz + o.dz);
+        mark.scale.set(o.w, o.h, o.d);
+        mark.rotation.set(0, o.yaw, 0);
+        mark.visible = true;
+      }
+    }
+    this._obstructionSlot = slot;
+
+    // The card. Re-asserted rather than edge-set: HUD drops every forced prompt when it rebuilds
+    // or when §12.8 strips it, and an override we set once and never repeat would come back
+    // silently wrong. Six field writes and a Map lookup, no allocation.
+    const want = !!slot && !!this.heldPart && !this.action;
+    if (!want && !this._obstructionPrompt) return;
+    const hud = this.ctx?.systems?.get?.('HUD');
+    if (typeof hud?.setPrompt !== 'function') { this._obstructionPrompt = false; return; }
+    try {
+      if (want) hud.setPrompt('obstruction', 'interact');
+      else hud.setPrompt(null, null);
+    } catch (e) { Log.once('bs:prompt', 'HUD.setPrompt threw; the obstruction cue is mark-only.', e); }
+    this._obstructionPrompt = want;
+  }
+
+  /** Give the prompt back to HUD unconditionally. Called on dispose and at night end. */
+  _releaseObstructionPrompt() {
+    if (this._obstructionMark) this._obstructionMark.visible = false;
+    this._obstructionSlot = null;
+    if (!this._obstructionPrompt) return;
+    this._obstructionPrompt = false;
+    const hud = this.ctx?.systems?.get?.('HUD');
+    if (typeof hud?.setPrompt !== 'function') return;
+    try { hud.setPrompt(null, null); } catch { /* HUD is gone; so is the prompt */ }
   }
 
   _inheritedOffsetMm(slot) {
@@ -1815,12 +1996,33 @@ export class BuildSystem {
     this._install(slot, part, torque, band, split, false);
   }
 
+  /**
+   * Is holding LMB allowed to become the force-place verb right now?
+   *
+   * §6.4's force-place is the player OVERRULING the ghost: "I have read the manual, I disagree,
+   * put it in." It scores WRONG_PART, w = 1.00, the highest wrongness in the game, and that is
+   * fair — it is a deliberate act with a 3.0 s commitment.
+   *
+   * It is not fair when the ghost is refusing because a county survey stake is standing in the
+   * hole. That is the first slot of the first night, the player has no idea what a ghost is yet,
+   * and "it will not go in, so push harder" is the single most natural thing a human being does
+   * with a heavy object. Punishing it permanently, on the first join, with no way to know, is a
+   * trap rather than a choice. So the verb does not arm on an obstruction: leaning on the button
+   * does nothing at all, and E — which the mark and the prompt are both pointing at — clears it.
+   */
+  _forceArmed() {
+    return this.ghostBlock !== null && this.ghostBlock !== GHOST_BLOCK.OBSTRUCTION;
+  }
+
   /** §6.4: the ghost refuses; the player holds place for 3.0 s and the wood splits. */
   _forcePlace() {
     const part = this.heldPart;
     const slot = this.targetSlot;
     if (!part || !slot || this.ghostValid) return;
     if (this.joins.has(slot.id)) return;
+    // Belt and braces. `_pollInput` will not arm the hold on an obstruction, and any other caller
+    // that reaches here must not be able to route around that.
+    if (slot.obstruction) return;
     this._install(slot, part, TUNING.torqueSplit, 'split', true, true);
   }
 
@@ -2331,7 +2533,7 @@ export class BuildSystem {
     const j = this.joins.get(slotId);
     if (!j || j.outcome !== OUTCOMES.UNDER_FASTENED) return false;
     if (this.pocket.fasteners <= 0 || !this._hasHardware(j.slot.hardware)) return false;
-    this._startAction('top-up', slotId, TUNING.topUpSeconds, true, () => {
+    return this._startAction('top-up', slotId, TUNING.topUpSeconds, true, () => {
       const need = Math.max(0, (j.slot.fasteners | 0) - Math.round((j.slot.fasteners | 0) * j.fastenerRatio));
       this.pocket.fasteners = Math.max(0, this.pocket.fasteners - need);
       j.fastenerRatio = 1;
@@ -2342,14 +2544,13 @@ export class BuildSystem {
       this._seatVisual(j);
       this.bus?.emit('ui:toast', { text: '', icon: 'checkbox-filled', ms: 1200 });
     });
-    return true;
   }
 
   /** The cheat everyone loves. 2.5 s, silent, one wedge: s -= 0.35, and w -= 0.15 if it applies. */
   applyShim(slotId) {
     const j = this.joins.get(slotId);
     if (!j || this.pocket.shims <= 0 || j.shimmed) return false;
-    this._startAction('shim', slotId, TUNING.shimSeconds, true, () => {
+    return this._startAction('shim', slotId, TUNING.shimSeconds, true, () => {
       this.pocket.shims--;
       j.shimmed = true;
       j.torque = clamp01(j.torque + TUNING.shimSeatingGain);
@@ -2359,14 +2560,13 @@ export class BuildSystem {
       this._syncJoin(j);
       this._seatVisual(j);
     });
-    return true;
   }
 
   /** Strictly temporary. lambda x 0.45 for 150 s on every join within 3 m. Buys you one haul. */
   applyTallow(slotId) {
     const j = this.joins.get(slotId);
     if (!j || this.pocket.tallow <= 0) return false;
-    this._startAction('tallow', slotId, TUNING.tallowSeconds, true, () => {
+    return this._startAction('tallow', slotId, TUNING.tallowSeconds, true, () => {
       this.pocket.tallow--;
       const until = this._t + TUNING.tallowSeconds_effect;
       const r2 = TUNING.tallowRadius * TUNING.tallowRadius;
@@ -2376,24 +2576,26 @@ export class BuildSystem {
         if (dx * dx + dy * dy + dz * dz <= r2) o.tallowUntil = until;
       }
     });
-    return true;
   }
 
   /** Reduces the NOISE, not the creak. The join still moves; the camp stops hearing it so far. */
   applyFelt(slotId) {
     const j = this.joins.get(slotId);
     if (!j || this.pocket.felt <= 0 || j.felted || this.currentNight < 6) return false;
-    this._startAction('felt', slotId, TUNING.feltSeconds, true, () => {
+    return this._startAction('felt', slotId, TUNING.feltSeconds, true, () => {
       this.pocket.felt--;
       j.felted = true;
       this._syncJoin(j);
     });
-    return true;
   }
 
   /**
    * §6.3 / §7.4. Removal is always allowed, costs 8 s, and is loud: `wrench`, 24 m, 0.45.
    * Undoing is loud. This is the redemption loop and it must exist.
+   *
+   * Returns `_startAction`'s verdict, not `true`. `_startAction` refuses outright while another
+   * action is live, and this method used to swallow that and report success — a caller that asked
+   * to pull a join out mid-recut was told the join was coming out and it was not.
    */
   removeJoin(slotId) {
     const j = this.joins.get(slotId);
@@ -2402,7 +2604,7 @@ export class BuildSystem {
     const deps = j.slot.dependents || [];
     for (let i = 0; i < deps.length; i++) if (this.joins.has(deps[i])) return false;
 
-    this._startAction('remove', slotId, TUNING.removeSeconds, false, () => {
+    return this._startAction('remove', slotId, TUNING.removeSeconds, false, () => {
       const part = j.part;
       this._noise('wrench', j.slot.px, j.slot.py, j.slot.pz, TUNING.removeRadius, TUNING.removeIntensity);
       this.bus?.emit('audio:sfx', { id: 'nail.pull', position: this._slotVec(j.slot), volume: 0.8 });
@@ -2425,7 +2627,6 @@ export class BuildSystem {
       this._worldChanged(j.slot);
       this.bus?.emit('build:remove', { part: part ?? null, slot: j.slot });
     });
-    return true;
   }
 
   /**
@@ -2535,11 +2736,10 @@ export class BuildSystem {
   removeObstruction(slotId) {
     const slot = this.slots.get(slotId);
     if (!slot?.obstruction) return false;
-    this._startAction('obstruction', slotId, TUNING.obstructionSeconds, true, () => {
+    return this._startAction('obstruction', slotId, TUNING.obstructionSeconds, true, () => {
       slot.obstruction = null;
       this.ctx?.state?.flag?.('pulledCountyStake');
     });
-    return true;
   }
 
   _startAction(kind, slotId, duration, silent, done) {
@@ -3050,6 +3250,7 @@ export class BuildSystem {
     const st = this.ctx?.state;
     if (st?.stats) st.stats.creakDebtCarry = this.creakDebt * TUNING.debtCarryover;
     this.cancelPlace();
+    this._releaseObstructionPrompt();
     this.action = null;
     this._fuses.length = 0;
     this._cascadeQueue.length = 0;
@@ -3252,6 +3453,7 @@ export class BuildSystem {
 
   dispose() {
     if (this._disposed) return;
+    this._releaseObstructionPrompt();
     this._disposed = true;
 
     for (let i = 0; i < this._unsubs.length; i++) {
@@ -3277,6 +3479,8 @@ export class BuildSystem {
       this._group = null;
     }
     this._ghost = null;
+    this._obstructionMark = null;
+    this._obstructionMat = null;
 
     for (let i = 0; i < this._ownedGeo.length; i++) this._ownedGeo[i]?.dispose?.();
     for (let i = 0; i < this._ownedMat.length; i++) this._ownedMat[i]?.dispose?.();

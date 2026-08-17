@@ -148,6 +148,9 @@ export const TUNING = Object.freeze({
   briefingHoldNight1: 15.0,  // s — Night 1 gets longer. The first figure IS the tutorial (§17).
   briefingSkipAfter: 2.6,    // s — after this, closing the manual or moving starts the night
 
+  // --- the first five minutes (§17). Night 1 only; every other night is 0.
+  openingHoldSeconds: 300.0, // s — the rubber band stays off the scripted opening (§17 t=4:52)
+
   // --- night-end (§5.1 "Dawn: No clock, 0:50 card")
   closingImageHold: 6.0,     // s — the last stage lands, then the closing image, then the card
   nightEndAuto: 50.0,        // s — if Menu is absent, advance ourselves rather than stalling
@@ -328,6 +331,11 @@ export class NightManager {
 
     // --- pacing state ---------------------------------------------------------------------
     this._pacingEnabled = true;
+    // §17: for the first five minutes of Night 1 the sequence is scripted theatre, so the
+    // rubber band (§5.4) may not touch it. Build seconds before the band is allowed to run;
+    // 0 on every other night. Held separately from `_pacingEnabled` so that releasing it at
+    // t=5:00 cannot silently undo an external setPacingEnabled(false).
+    this._openingHold = 0;
     this._bandT = 0;
     this._bandLast = { ahead: -1e9, behind: -1e9, hard: -1e9 };
     this._lull = 0;             // seconds of lull remaining
@@ -553,6 +561,7 @@ export class NightManager {
     this._patrolBonus = 0;
     this._patrolLadder = 0;
     this._bandT = 0;
+    this._openingHold = night === 1 ? TUNING.openingHoldSeconds : 0;
     this._bandLast.ahead = this._bandLast.behind = this._bandLast.hard = -1e9;
     this._lastProgress = 0;
     this._autosaveT = 0;
@@ -596,6 +605,11 @@ export class NightManager {
     if (night === 1 && !opts.restored) {
       this._emit('audio:sfx', { id: 'crate_settle', volume: 0.9 });
     }
+
+    // §17 t=0:00 — he arrives at dusk with the lamp already burning. MUST come after the
+    // night:begin emit above: Flashlight's own handler for that event refills the tank and
+    // forces `on = false`, so anything we do before it is overwritten. See _lightTheLamp().
+    this._lightTheLamp(night);
 
     this._applyPatrolDensity();
     this._fireTrigger('night-begin');
@@ -825,7 +839,12 @@ export class NightManager {
     this._updateThreat(dt);
 
     // ---- pacing -------------------------------------------------------------------------------
-    if (this._pacingEnabled && !this._scripted) {
+    // §17 t=4:52: "every verb in §9.6 is now motivated, so the director stops holding the floor."
+    // Before that, on Night 1 only, the band is silent. It is not a difficulty concession — the
+    // band's "behind by > 0.18" response RELOCATES an un-found Tier-3 item (§5.4), and the whole
+    // 2:05–2:40 sequence is the player reading a contour inset that points at a fixed fallen log.
+    // Moving the sixth pier out from under that inset would break §17's central joke.
+    if (this._pacingEnabled && !this._scripted && this._buildSeconds >= this._openingHold) {
       this._bandT += dt;
       if (this._bandT >= TUNING.bandInterval) { this._bandT = 0; this._updateRubberBand(); }
       this._updatePressure(dt);
@@ -1821,8 +1840,57 @@ export class NightManager {
 
   // ===============================================================================================
   // FIRST-RUN ONBOARDING (§17) — five minutes, zero tutorial text.
-  // Everything here is a SOUND or a SCHEDULE. Nothing here writes a word on screen.
+  // Everything here is a SOUND, a LIGHT or a SCHEDULE. Nothing here writes a word on screen.
   // ===============================================================================================
+
+  /**
+   * THE LAMP IS ALREADY LIT WHEN NIGHT ONE OPENS.
+   *
+   * THE BUG. `Flashlight` binds `night:begin` and sets `on = false` on every night, and nothing
+   * anywhere told the player the lamp existed. §17 forbids tutorial text, STORY.md §A.4 forbids
+   * a narrator, and GAME_DESIGN §4.1 hides `F` in a remappable input table nobody reads. So the
+   * measured result was a player eleven minutes into Night 1 who had never pressed F, looking at
+   * a frame that reads meanY 0.0065 with 93.7% of its pixels below Y 0.02 and no warm pixel in
+   * it at all — an unreadable black rectangle, against ART_DIRECTION §3.1.1's 0.018–0.028 window.
+   *
+   * THE FIX, and why it is this one and not a prompt. Ansel is a joiner who drove up here at dusk
+   * to work. A professional does not walk into a black forest carrying an unlit lamp; he lights it
+   * at the truck. So the director lights it for him at t=0:00 — during the briefing, so the 0.9 s
+   * ignition ramp lands under the title card and the world comes up warm as §17's 3 s fade-in
+   * resolves. Not one word is written on screen, no glyph is drawn, and the input table is not
+   * mentioned. The lamp simply is what it would be.
+   *
+   * AND THE VERB IS STILL TAUGHT, by the economy rather than by us. §11.2: 100 units, 0.55/s open.
+   *   0:00        lit. The whole taught build sequence (§17 0:14–2:40) happens in warm light.
+   *   ~2:34       15 units. The flame starves: shorter, redder, gutters at 3 Hz, audibly.
+   *   ~3:02       the tank is dry and it does not click out, it just stops.
+   * §17's own t=3:20 line assumes the player is **unlit** when Dale's torch crosses at 45 m —
+   * "(§9.3 — unlit, walking, 20 m is 29.9 s to detect)". So the tank running dry at 3:02 lands
+   * exactly where the document already wanted the player dark, on the one night that is safe.
+   * A player who reads the gutter and hoods or douses at 2:34 banks the difference. That is the
+   * §17 crouch lesson again: discovered under motivation, never instructed.
+   *
+   * NIGHT 1 ONLY. From Night 2 the flame is a 180 m advertisement to three or more people (§9.4)
+   * and lighting it for the player would be a trap, not a kindness. Every other night keeps
+   * Flashlight's own default: full tank, unlit, in his fist at the treeline.
+   */
+  _lightTheLamp(night) {
+    if (night !== 1) return false;
+    const lamp = this._flashlight();
+    if (!lamp) return false;
+    try {
+      // Shutter open first, so the ignition does not come up behind a closed hood.
+      if (typeof lamp.setHood === 'function') lamp.setHood(0, 0.05);
+      const lit = typeof lamp.ignite === 'function' ? lamp.ignite()
+        : typeof lamp.setOn === 'function' ? lamp.setOn(true)
+          : (lamp.on = true);
+      Log.debug(`§17 t=0:00 — the lamp is lit at the treeline (${lit ? 'burning' : 'refused'}).`);
+      return !!lit;
+    } catch (e) {
+      Log.once('nm:lamp', 'NightManager: could not light the lantern for Night 1', e);
+      return false;
+    }
+  }
 
   _buildOnboarding(night) {
     this._onboard.length = 0;
@@ -1836,7 +1904,14 @@ export class NightManager {
     push(90.0, () => this._sayAt('DAL_HEAR_01', 150, 0.6), () => this._hammerCount >= 6);
     // The first class-D lift, then the first creak, are BuildSystem's. We answer the creak.
     // t=4:52 — every verb in §9.6 is now motivated, so the director stops holding the floor.
-    push(300.0, () => { this._setFlag('sawIntroPanel'); }, null);
+    // This step used to only set a story flag nothing reads, which made it a no-op; the floor
+    // is what §17 actually says is released here, so it releases it. `_openingHold` already
+    // gates the band on the same number — clearing it is belt-and-braces plus a legible log.
+    push(300.0, () => {
+      this._openingHold = 0;
+      this._setFlag('sawIntroPanel');
+      Log.debug('§17 t=5:00 — the opening is over; the rubber band has the floor.');
+    }, null);
   }
 
   _updateOnboarding(dt) {
