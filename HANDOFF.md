@@ -126,11 +126,24 @@ would push `site-close` out of spec, so this needs judgement rather than a tweak
    **So what is actually missing is only the observation**: nobody has watched a bad join produce a
    creak that produces a noise that a camper visibly reacts to, in one continuous run. That is a
    playtest, not a repair. Do it before assuming anything is broken.
-3. **Two first-run traps.** P-01 — the first pier slot of the game — is the only obstructed slot
-   in Night 1, its tuning comment literally reads *"Silent. No prompt."*, and holding LMB (the
-   natural response to "it won't go in") triggers `_forcePlace`, which scores WRONG_PART. Also,
-   the `remove` verb is finished, works, has a HUD pictogram, is advertised by `inspect()` — and
-   **nothing calls it.** Both were dispatched; verify.
+3. ~~Two first-run traps~~ **BOTH WERE ALREADY FIXED in `f3f6172`. This entry was wrong, and it
+   cost a full agent run.** Recorded verbatim as a warning about how to verify a claim like it:
+   - *"the `remove` verb — nothing calls it"* was **false**. It is called from `Player.js:1361`,
+     bound to **held `Q` with empty hands** (`_updatePry`, 1.10 s), latched so one unbroken press
+     cannot also fire another `Q` verb. The grep that "proved" it missing searched for `.remove(`;
+     the call site reads `bs.removeJoin(slotId)`. **A grep that finds nothing is not evidence.**
+   - *"holding LMB at P-01 scores WRONG_PART"* was **false**. `_forceArmed()` already returns
+     false when `ghostBlock === 'obstruction'`. It is also design-correct: `GAME_DESIGN §6.4`'s
+     Wrong-part row requires a wrong `acceptsType` **forced**, and an obstruction is not a wrong
+     part. Measured: LMB held 5.0 s against a 3.0 s `forcePlaceHold` produced zero `build:place`.
+
+   **What was actually broken, and nobody had looked:** `removeObstruction()` cleared
+   `Slot.obstruction` — the gameplay flag — and stopped. The physical 0.045 × 0.92 m post lives in
+   `CabinSite`'s site-prep dressing, so after a legitimate pull the stake mesh was still visible
+   spanning **y 17.055 → 17.975** against a seated pier top face at **17.475**: half a metre of
+   officially-removed stake standing through the finished pier, on the first join of the first
+   night. Fixed via a `suppressed` gate ANDed into `_rebuild()`'s `requires` test — a bare
+   `node.visible` write gets clobbered on every rebuild, which is the trap to know here.
 4. **Visual gaps to the key art:** the lake has no water surface or reflection; tent interiors
    glow *inverted* (openings darker than canvas); cabin windows are flat rectangles with no spill;
    `ridge` is the "grey mush" failure `ART_DIRECTION §11` explicitly forbids.
