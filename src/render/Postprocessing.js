@@ -62,6 +62,35 @@ const _m4b = new THREE.Matrix4();
 const _v2a = new THREE.Vector2();
 const _v3a = new THREE.Vector3();
 
+/* --------------------------------------------------------------------------------------------
+ * EXPOSURE CONSTANTS — the single most consequential numbers in this file.
+ *
+ * ART_DIRECTION §3.1 pins the scripted base at 0.62 (EV -3.2, 'cinema night, not documentary
+ * night') and §3.1.2 states outright, in bold, that exposure in this game is scripted and NOT
+ * adaptive. THERE IS NO AUTO-EXPOSURE IN THIS GAME. That is not a tuning preference, it is the
+ * art direction: a metering loop pointed at a wet black forest will correctly and reliably hand
+ * you an overcast afternoon, which is the one thing a horror game may never ship.
+ *
+ * History, so nobody re-derives it a third time:
+ *   - v1 ran a metered gain clamped to [0.55, 2.6] against a metering floor of 1e-5. The
+ *     log-average of a night frame sits BELOW any floor low enough to be honest, so the metric
+ *     read a flat 1e-5 forever, the solve saturated, and every frame in the game shipped at
+ *     0.62 * 2.6 = 1.61 — plus 1.38 stops over the bible.
+ *   - v2 raised the floor to 1e-4 and narrowed the clamp to [0.88, 1.14]. Measured on the ridge
+ *     shot afterwards: adaptation = 1.013e-4, i.e. STILL pinned on the floor, so the gain still
+ *     saturated — just at 1.14 instead of 2.6. The loop had never once adapted. It was a
+ *     constant multiplier wearing an adaptation loop as a disguise.
+ *
+ * So the trim is gone. EXPOSURE_GAIN_MIN == EXPOSURE_GAIN_MAX == 1 is a tombstone, not a knob:
+ * the composite no longer divides by the metered luminance at all. The luminance chain stays
+ * because the 1x1 adaptation target also carries the reticle FOCUS distance that DOF needs
+ * (adapt.y), and because §3.1.1's per-weather luminance assert meters off the same mip.
+ * -------------------------------------------------------------------------------------------- */
+const EXPOSURE_BASE = 0.62;
+const EXPOSURE_KEY = 0.00105;
+const EXPOSURE_GAIN_MIN = 1.0;
+const EXPOSURE_GAIN_MAX = 1.0;
+
 /** Halton(2,3) — the TAA jitter sequence, phase-locked with the alpha hash (§10.3). */
 const HALTON = (() => {
   const h = (i, b) => { let f = 1, r = 0, n = i; while (n > 0) { f /= b; r += f * (n % b); n = Math.floor(n / b); } return r; };
@@ -410,6 +439,17 @@ uniform sampler2D tDiffuse;
 uniform vec2 uTexel;
 uniform float uSpan;    // taps per axis
 
+// METERING FLOOR. This number is load-bearing and it was wrong.
+// A night sky and a tree core in this game sit around 1e-6 scene-linear, i.e. below any floor
+// we could sensibly pick. With the old 1e-5 floor those pixels dragged the LOG-average onto the
+// floor itself, so the metered luminance read a flat 1e-5 in literally every frame of the game,
+// the exposure gain solved to key/1e-5 = a huge number, and it pinned at whatever the clamp
+// ceiling was, forever. The auto-exposure was therefore not adapting -- it was a constant
+// +1.4 stop multiplier hiding behind an adaptation loop. 1e-4 is roughly EV -13, two stops under
+// moonlit mud, which is low enough to keep real shadow information in the metric and high enough
+// that empty sky cannot own it.
+const float SC_METER_FLOOR = 1e-4;
+
 void main() {
   float sum = 0.0;
   float n = 0.0;
@@ -418,7 +458,7 @@ void main() {
       vec2 o = ( vec2( float( x ), float( y ) ) + 0.5 ) / 8.0 - 0.5;
       vec2 uv = clamp( vUv + o * uSpan * uTexel, vec2( 0.001 ), vec2( 0.999 ) );
       float l = scLuma( max( texture2D( tDiffuse, uv ).rgb, vec3( 0.0 ) ) );
-      sum += log( max( l, 1e-5 ) );
+      sum += log( max( l, SC_METER_FLOOR ) );
       n += 1.0;
     }
   }
@@ -461,7 +501,9 @@ void main() {
   float adaptedL = mix( pl, target, kl );
   float adaptedF = mix( pf, fd, kf );
 
-  gl_FragColor = vec4( clamp( adaptedL, 1e-5, 40.0 ), adaptedF, target, 1.0 );
+  // Same floor as the metering pass, so a frame that really is all sky cannot hand the composite
+  // a denominator small enough to demand a two-stop lift.
+  gl_FragColor = vec4( clamp( adaptedL, 1e-4, 40.0 ), adaptedF, target, 1.0 );
 }
 `;
 
@@ -782,8 +824,13 @@ uniform vec4 uVignette;    // artAmount, artInner, artOuter, opticalAmount
 uniform vec4 uGrain;       // amount, sizePx, flicker, time
 uniform vec4 uLens;        // caStrength, warp, panic, lightning
 uniform vec3 uVigTint;
+uniform vec3 uSplitCool;   // multiplier at luma 0 -- shadows
+uniform vec3 uSplitWarm;   // multiplier at luma 1 -- highlights only
 uniform float uTime;
 uniform float uFrame;
+
+// 'shadow.abyss' #060b0e (§2.2) as display-space 8-bit codes. The game's true black.
+const vec3 SC_ABYSS = vec3( 6.0 / 255.0, 11.0 / 255.0, 14.0 / 255.0 );
 
 vec3 sampleScene( vec2 uv ) {
   return max( texture2D( tDiffuse, clamp( uv, vec2( 0.0 ), vec2( 1.0 ) ) ).rgb, vec3( 0.0 ) );
@@ -813,25 +860,49 @@ void main() {
     col = sampleScene( uv );
   }
 
-  // --- bloom
+  // --- bloom. Fetched here, ADDED after the exposure multiply below -- the bloom prefilter has
+  // already multiplied by the same exposure, so adding it before the multiply applied exposure to
+  // it twice and made the glow scale as exposure-squared.
   vec3 bloom = max( texture2D( tBloom, uv ).rgb, vec3( 0.0 ) );
   // Procedural veiling / lens dirt. Very subtle: if you can see it, it is wrong.
   float dirt = 0.85 + 0.30 * texture2D( tNoise, uv * 3.0 ).x;
-  col += bloom * uBloom.x * mix( 1.0, dirt, uBloom.y );
 
-  // --- exposure: scripted base * auto-exposure gain (hard clamped so the player is never
-  // blinded stepping into firelight and never lost stepping back into the trees).
-  vec4 adapt = texture2D( tAdapt, vec2( 0.5 ) );
-  float gain = clamp( uExposure.y / max( adapt.x, 1e-5 ), uExposure.z, uExposure.w );
-  col *= uExposure.x * gain;
+  // --- EXPOSURE. Scripted, and ONLY scripted.
+  // ART_DIRECTION §3.1.2 is binding and unambiguous: 'Exposure is NOT auto-adaptive. We ship a
+  // scripted curve.' uExposure.x IS that curve — base 0.62 (EV -3.2, §3.1), ramped by
+  // setExposure() for the blueprint, the whiteout, lightning and dawn, and by nothing else.
+  //
+  // There is deliberately no metered gain here. Two successive attempts to keep one 'as a small
+  // trim' both shipped a metric pinned on its own clamp, i.e. a constant multiplier that quietly
+  // moved the whole game off the bible's EV. See the constant block at the top of this file.
+  // uExposure.yzw are kept only so the numbers stay visible and the door stays shut.
+  col *= uExposure.x;
+
+  // Bloom is already in exposed space; add it now. The moon disc is authored at 8-13 scene-linear
+  // precisely so that at this exposure it survives here, clips AgX, and feeds the mip chain.
+  col += bloom * uBloom.x * mix( 1.0, dirt, uBloom.y );
 
   // --- tone map. ONCE. renderer.toneMapping is NoToneMapping.
   col = scAgX( col );
 
   // --- the toe (ART_DIRECTION §12.4). Monotonic, and it never reaches zero.
-  col = col * mix( vec3( 0.55 ), vec3( 1.0 ), smoothstep( vec3( 0.006 ), vec3( 0.055 ), col ) ) + 0.0026;
+  //
+  // The band matters more here than in a normally-exposed game. Measured on the site-close
+  // frame, lantern-lit timber lands at 0.078 display and wet ground at 0.054 — i.e. everything
+  // §4 asks the player to actually FIND lives between 0.04 and 0.09. A toe running to 0.055-0.06
+  // therefore crushes the readable band by up to half while doing nothing at all to the
+  // highlights. It ends at 0.045: deep enough to keep true black off the neutral axis, short
+  // enough to leave the search band intact.
+  col = col * mix( vec3( 0.62 ), vec3( 1.0 ), smoothstep( vec3( 0.003 ), vec3( 0.045 ), col ) ) + 0.0022;
 
-  // --- lift / gamma / gain split-tone. Blue shadows, amber highlights. THIS is the look.
+  // --- lift / gamma / gain. §12.4.
+  //
+  // All three are HUE-NEUTRAL-TO-COOL and they stay that way. The previous values were
+  // gain (1.06, 1.00, 0.92) and gamma (1.02, 1.00, 0.96): a +15% red-over-blue swing applied to
+  // every pixel in the frame. That is a global amber grade lift, and §2.4 forbids it by name --
+  // 'the amber only ever appears as point sources and their falloff, never as a global grade
+  // lift'. It is also most of why the wet blue-black world was rendering as chalky neutral grey:
+  // warm the shadows of a blue scene and they land on the neutral axis.
   col = col + uGradeLift.rgb;
   col = pow( max( col, vec3( 1e-5 ) ), vec3( 1.0 ) / max( uGradeGamma.rgb, vec3( 0.05 ) ) );
   col = col * uGradeGain.rgb;
@@ -841,8 +912,17 @@ void main() {
   // Highlights go creamy rather than radioactive; shadows keep their blue instead of going grey.
   float hi = smoothstep( uSat.y, 1.0, luma );
   col = mix( col, mix( vec3( luma ), col, uSat.z ), hi );
-  float lo = 1.0 - smoothstep( 0.0, 0.08, luma );
+  // The shadow-saturation band runs to 0.20 display, not 0.08. Everything this game asks the
+  // player to READ -- wet mud, a stud in the moon, the far treeline -- lives between 0.05 and
+  // 0.20, and at 0.08 the blue was being restored only to pixels already too dark to see it in.
+  float lo = 1.0 - smoothstep( 0.0, 0.20, luma );
   col = mix( col, mix( vec3( luma ), col, uSat.w ), lo );
+
+  // --- split-tone, and this is the ONLY place amber is allowed near the grade. The warm half is
+  // weighted by 'hi', so it can only ever reach a highlight -- a fire core, the lantern hotspot,
+  // a lit window. Everything below that is pushed the other way, into the blue-black the whole
+  // palette (§2.1) is built on.
+  col *= mix( uSplitCool, uSplitWarm, hi );
 
   // --- panic desaturation
   col = mix( col, vec3( scLuma( col ) ), uLens.z * 0.55 );
@@ -869,7 +949,9 @@ void main() {
     vec3 n = texture2D( tNoise, guv ).rgb * 2.0 - 1.0;
     n *= vec3( 1.25, 1.0, 1.25 );          // dye-cloud behaviour: R and B are coarser
     float L = scLuma( col );
-    float amp = uGrain.x * ( 0.042 * pow( 1.0 - clamp( L, 0.0, 1.0 ), 1.4 ) + 0.006 );
+    // 0.042 put +/- 0.04 of display-space noise on a frame whose readable range tops out around
+    // 0.20 -- a 20% boil that reads as mush, not as stock. 0.030 is still clearly film.
+    float amp = uGrain.x * ( 0.030 * pow( 1.0 - clamp( L, 0.0, 1.0 ), 1.4 ) + 0.005 );
     col += n * amp;
   }
 
@@ -877,7 +959,13 @@ void main() {
   // bottom 5% will otherwise punch channels to hard 0 across half the screen, which is the exact
   // histogram spike this document calls a bug. Floor it above the grain, dither on top, floor
   // again by 1 LSB less so the dither still has somewhere to go.
-  col = max( col, vec3( 4.0 / 255.0 ) );
+  //
+  // The floor is COLOURED, not neutral. A flat vec3(4/255) floor is a grey floor, and a grey
+  // floor quietly repaints every deep shadow in the game -- which is most of the game -- as
+  // neutral mush, throwing away the blue-black that §2.1 and §12.1 exist to protect. SC_ABYSS is
+  // 'shadow.abyss' #060b0e from the §2.2 swatch table: relative luminance 0.0031, inside the
+  // §3.1 'blackest 1% in [0.002, 0.006] linear' window, and still unmistakably blue-black.
+  col = max( col, SC_ABYSS );
 
   // --- triangular-PDF blue-noise dither, +/- 1 LSB. MANDATORY: our whole useful range lives in
   // the bottom 5% of an 8-bit framebuffer and would band catastrophically without it.
@@ -886,7 +974,7 @@ void main() {
   float tri = ( dn.x + dn.y - 1.0 );
   col += tri / 255.0;
 
-  gl_FragColor = vec4( clamp( col, 3.0 / 255.0, 1.0 ), 1.0 );
+  gl_FragColor = vec4( clamp( col, SC_ABYSS - 1.0 / 255.0, vec3( 1.0 ) ), 1.0 );
 }
 `;
 
@@ -1107,8 +1195,8 @@ export class Postprocessing {
     this._dt = 1 / 60;
 
     // exposure state (ART_DIRECTION §3.1.2)
-    this._exposureBase = 0.62;
-    this._exposureTarget = 0.62;
+    this._exposureBase = EXPOSURE_BASE;
+    this._exposureTarget = EXPOSURE_BASE;
     this._exposureRate = 1 / 0.55;
     this._lightningExp = 1;
     this._panic = 0;
@@ -1143,10 +1231,16 @@ export class Postprocessing {
     this._sprint = Math.max(0, Math.min(1, Number.isFinite(v) ? v : 0));
   }
 
-  /** Scripted exposure ramp. `attack` in seconds. */
+  /**
+   * Scripted exposure ramp (§3.1.2). `attack` in seconds.
+   *
+   * Ceiling is 1.0, not 2.0. The brightest scripted value in the whole bible is the dawn ramp at
+   * 0.95; anything above 1.0 is a caller mistake and would put the frame a stop and a half over
+   * the §3.1 target, which is how a horror game accidentally ships as an overcast afternoon.
+   */
   setExposure(target, attack = 0.4) {
     if (!Number.isFinite(target)) return;
-    this._exposureTarget = Math.max(0.05, Math.min(2.0, target));
+    this._exposureTarget = Math.max(0.05, Math.min(1.0, target));
     this._exposureRate = 1 / Math.max(0.02, attack);
   }
 
@@ -1221,9 +1315,9 @@ export class Postprocessing {
 
     // --- dawn ramp (§3.1.2): 0.62 -> 0.95 across timeOfNight 0.85..1.0
     const ton = state?.timeOfNight;
-    if (Number.isFinite(ton) && ton > 0.85 && this._exposureTarget === 0.62) {
+    if (Number.isFinite(ton) && ton > 0.85 && this._exposureTarget === EXPOSURE_BASE) {
       const t = Math.min(1, (ton - 0.85) / 0.15);
-      this._exposureBase = 0.62 + (0.95 - 0.62) * t;
+      this._exposureBase = EXPOSURE_BASE + (0.95 - EXPOSURE_BASE) * t;
     }
 
     // --- lightning: fast stop-down, slow recovery. Reads Materials.globalUniforms.uLightning.
@@ -1641,16 +1735,22 @@ export class Postprocessing {
       tNoise: { value: this._noise },
       uResolution: { value: new THREE.Vector2(1920, 1080) },
       uNoiseSize: { value: new THREE.Vector2(this._noiseSize, this._noiseSize) },
-      uExposure: { value: new THREE.Vector4(0.62, 0.10, 0.55, 2.6) },
-      uBloom: { value: new THREE.Vector4(0.055, 0.10, 0.08, 0) },
-      uGradeLift: { value: new THREE.Vector4(0.000, 0.004, 0.016, 0) },
-      uGradeGamma: { value: new THREE.Vector4(1.02, 1.00, 0.96, 0) },
-      uGradeGain: { value: new THREE.Vector4(1.06, 1.00, 0.92, 0) },
-      uSat: { value: new THREE.Vector4(0.86, 0.75, 0.70, 1.18) },
+      uExposure: { value: new THREE.Vector4(EXPOSURE_BASE, EXPOSURE_KEY, EXPOSURE_GAIN_MIN, EXPOSURE_GAIN_MAX) },
+      // Bloom carries the warm human light, which in both key-art references is the only thing in
+      // frame with a halo. 0.055 was too quiet to read as a lantern in rain.
+      uBloom: { value: new THREE.Vector4(0.078, 0.10, 0.08, 0) },
+      uGradeLift: { value: new THREE.Vector4(0.0000, 0.0018, 0.0068, 0) },
+      uGradeGamma: { value: new THREE.Vector4(0.985, 1.000, 1.030, 0) },
+      uGradeGain: { value: new THREE.Vector4(0.985, 1.000, 1.040, 0) },
+      // global sat 1.0: a 0.86 global desaturation on a world whose entire thesis is 'blue-green'
+      // (§2.1) is self-defeating. Desaturation belongs in the highlights, where AgX puts it.
+      uSat: { value: new THREE.Vector4(1.00, 0.70, 0.72, 1.42) },
       uVignette: { value: new THREE.Vector4(0.30, 0.42, 1.10, 1.0) },
       uGrain: { value: new THREE.Vector4(1.0, 1.35, 0.020, 0) },
       uLens: { value: new THREE.Vector4(0.0016, 0, 0, 0) },
       uVigTint: { value: new THREE.Vector3(0.0037, 0.0075, 0.0114) },  // #0a1216 in linear
+      uSplitCool: { value: new THREE.Vector3(0.955, 1.000, 1.075) },
+      uSplitWarm: { value: new THREE.Vector3(1.090, 1.000, 0.885) },
       uTime: { value: 0 },
       uFrame: { value: 0 },
     });
@@ -1672,14 +1772,14 @@ export class Postprocessing {
     const add = (evt, fn) => { const off = bus.on(evt, fn); this._unsubs.push(typeof off === 'function' ? off : () => bus.off?.(evt, fn)); };
 
     add('ui:blueprint-open', () => this.setExposure(0.44, 0.18));
-    add('ui:blueprint-close', () => this.setExposure(0.62, 0.55));
+    add('ui:blueprint-close', () => this.setExposure(EXPOSURE_BASE, 0.55));
     add('player:spotted', () => this.setPanic(1));
     add('player:hidden', () => this.setPanic(0));
-    add('night:begin', () => { this.setExposure(0.62, 0.6); this.setPanic(0); this._taaPass?.reset(); });
+    add('night:begin', () => { this.setExposure(EXPOSURE_BASE, 0.6); this.setPanic(0); this._taaPass?.reset(); });
     add('weather:change', (p) => {
       const fog = p?.fog ?? 0;
       // Whiteout is a brighter, flatter night — and that is physically true (§3.1.1).
-      this.setExposure(fog > 0.85 ? 0.70 : 0.62, 4.0);
+      this.setExposure(fog > 0.85 ? 0.70 : EXPOSURE_BASE, 4.0);
     });
     add('engine:context-restored', () => { this._taaPass?.reset(); this._prevValid = false; });
   }
@@ -1701,10 +1801,15 @@ export class Postprocessing {
 
     if (this._compositePass) {
       const u = this._compositePass.uniforms;
+      // Re-assert the exposure trim window every time the tier changes. Nothing else in the build
+      // is allowed to widen it (§3.1.2, and see the constant block at the top of this file).
+      u.uExposure.value.y = EXPOSURE_KEY;
+      u.uExposure.value.z = EXPOSURE_GAIN_MIN;
+      u.uExposure.value.w = EXPOSURE_GAIN_MAX;
       u.uGrain.value.x = (s?.get?.('filmGrain') ?? true) ? 1 : 0;
       u.uLens.value.x = (s?.get?.('chromaticAberration') ?? true) ? 0.0016 : 0;
       u.uVignette.value.x = (s?.get?.('vignette') ?? true) ? 0.30 : 0;
-      u.uBloom.value.x = t >= 1 ? 0.055 : 0;
+      u.uBloom.value.x = t >= 1 ? 0.078 : 0;
     }
     if (this._taaPass) {
       this._taaPass.material.uniforms.uParams.value.w = t >= 3 ? 0.22 : 0.0;
@@ -1950,9 +2055,12 @@ export class Postprocessing {
   }
 
   _autoGainEstimate() {
-    // The real gain lives on the GPU; the bloom prefilter only needs a stable approximation so
-    // the threshold does not breathe. Mid-key at our exposure sits near 1.0.
-    return 1.0;
+    // Exactly 1. The composite applies the scripted exposure and nothing else, so the exposure
+    // the bloom prefilter thresholds against is now bit-for-bit the exposure the composite
+    // applies, and the 1.15 threshold in §12.2 finally means what §12.2 says it means. This used
+    // to be the centre of a metered trim window, which meant the prefilter and the composite
+    // disagreed by up to 2.6x about what 'bright' was.
+    return (EXPOSURE_GAIN_MIN + EXPOSURE_GAIN_MAX) * 0.5;
   }
 
   _fogTexture() {

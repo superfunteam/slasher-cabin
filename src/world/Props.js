@@ -297,6 +297,18 @@ void main(){
 }
 `;
 
+/*
+ * The additive shell that makes a lit tent glow. Two rules learned the hard way:
+ *
+ *  - It may only ever be a MODULATION of a surface that is already visible. An additive shell
+ *    laid over canvas that renders near-black is not a glowing tent, it is a flat orange card
+ *    floating in the dark, with a hard polygon silhouette and nothing inside it. That is why
+ *    the lit tents now use the emissive 'canvas-lit' material (see _makeOwnMaterials) and this
+ *    shell only adds the lamp's near-field gradient on top.
+ *  - Under SC_GLOW_TEX it is multiplied by the canvas colour map, normalised against
+ *    uTexRef, so the weave, the mildew blooms and the patched panels show up IN the light.
+ *    Flat colour reads as a card; modulated colour reads as cloth.
+ */
 const GLOW_FRAG = /* glsl */`
 ${NOISE_GLSL}
 uniform vec3 uColor;
@@ -304,6 +316,11 @@ uniform float uIntensity;
 uniform float uFlicker;
 uniform float uFogK;
 uniform vec2 uSeam;        // x period in metres, y strength
+#ifdef SC_GLOW_TEX
+uniform sampler2D uTex;
+uniform float uTexAmt;
+uniform float uTexRef;
+#endif
 varying float vGlow;
 varying vec2 vUv;
 varying float vDepth;
@@ -315,7 +332,15 @@ void main(){
     g *= 1.0 - uSeam.y * (smoothstep(0.86, 1.0, s) + smoothstep(0.92, 1.0, t) * 0.6);
   }
   g *= 0.90 + 0.10 * scVal(vUv * 28.0);
-  gl_FragColor = vec4(uColor * max(g, 0.0) * exp(-vDepth * uFogK), 1.0);
+  vec3 tint = uColor;
+  #ifdef SC_GLOW_TEX
+    vec3 weave = texture2D(uTex, vUv).rgb;
+    float lum = dot(weave, vec3(0.2126, 0.7152, 0.0722));
+    float m = clamp(lum / max(uTexRef, 0.001), 0.42, 1.75);
+    g *= mix(1.0, m, uTexAmt);
+    tint *= mix(vec3(1.0), weave / max(lum, 0.002), uTexAmt * 0.40);
+  #endif
+  gl_FragColor = vec4(tint * max(g, 0.0) * exp(-vDepth * uFogK), 1.0);
 }
 `;
 
@@ -335,6 +360,20 @@ void main(){
 }
 `;
 
+/*
+ * Contact darkening. This used to emit vec3(1.0 - a) with MultiplyBlending, which is
+ * mathematically the same darkening BUT the fragment itself is near-WHITE everywhere the
+ * decal does nothing (the whole outside of the radial falloff, i.e. the corners of every
+ * quad). The instant anything upstream does not honour the multiply blend equation for this
+ * draw — an MRT/prepass, a depth-only pass, a state-cache miss — 265 white plates appear
+ * lying flat on the ground across the camp. They did. That is the "sheets of paper on the
+ * grass" defect.
+ *
+ * The safe formulation is the identical operation written as premultiplied-free straight
+ * alpha over BLACK:  dst = 0 * a + dst * (1 - a)  ==  dst * (1 - a).
+ * Same maths, and the worst case if a pass ignores blending is an invisible black smudge
+ * on already-black ground rather than a blown white card.
+ */
 const DECAL_FRAG = /* glsl */`
 uniform float uStrength;
 uniform vec2 uFade;
@@ -345,7 +384,8 @@ void main(){
   float a = 1.0 - smoothstep(0.06, 1.0, d);
   a = pow(a, 1.5) * uStrength;
   a *= 1.0 - smoothstep(uFade.x, uFade.y, vDepth);
-  gl_FragColor = vec4(vec3(1.0 - a), 1.0);
+  if (a < 0.004) discard;
+  gl_FragColor = vec4(0.0, 0.0, 0.0, a);
 }
 `;
 
@@ -458,6 +498,18 @@ class Kit {
       }
       g.setAttribute('aGlow', new THREE.BufferAttribute(gl, 1));
     }
+    // mergeGeometries() refuses a group that mixes indexed and non-indexed geometry, and when it
+    // refuses it drops the ENTIRE group — every merged mesh for that material, silently, with one
+    // console error. `Kit.UNIT_ICO` is the only non-indexed primitive in the kit, so the granite
+    // group (cabin piers, the 1968 foundation stones, the fire ring, the ash bowl) merged with
+    // the fire-ring icosahedra and vanished from the camp. Give everything a trivial index: same
+    // vertex count, no memory cost worth naming, and the group can never be dropped again.
+    if (!g.index) {
+      const vc = g.attributes.position.count;
+      const idx = vc > 65535 ? new Uint32Array(vc) : new Uint16Array(vc);
+      for (let i = 0; i < vc; i++) idx[i] = i;
+      g.setIndex(new THREE.BufferAttribute(idx, 1));
+    }
     trimGeo(g, isGlow);
 
     let arr = this.groups.get(mat);
@@ -495,6 +547,29 @@ Kit.UNIT_CYL_HI = new THREE.CylinderGeometry(0.5, 0.5, 1, 16, 1);
 Kit.UNIT_CONE = new THREE.ConeGeometry(0.5, 1, 10, 1);
 Kit.UNIT_SPHERE = new THREE.SphereGeometry(0.5, 14, 9);
 Kit.UNIT_ICO = new THREE.IcosahedronGeometry(0.5, 1);
+
+/**
+ * A unit triangular prism: isoceles triangle in XY (apex at +Y), 1 deep in Z. Three.js has no
+ * wedge, and without one a gable end has to be faked with a row of boxes of increasing height —
+ * which reads as a staircase, not a roof. Used for tent gables and anywhere else a real
+ * triangular silhouette matters. Winding is CCW-outward on all five faces.
+ */
+Kit.UNIT_WEDGE = (() => {
+  const A = [-0.5, -0.5], B = [0.5, -0.5], C = [0, 0.5];
+  const zf = 0.5, zb = -0.5;
+  const p = [];
+  const tri = (a, b, c) => p.push(a[0], a[1], a[2], b[0], b[1], b[2], c[0], c[1], c[2]);
+  tri([A[0], A[1], zf], [B[0], B[1], zf], [C[0], C[1], zf]);   // front cap
+  tri([B[0], B[1], zb], [A[0], A[1], zb], [C[0], C[1], zb]);   // back cap
+  for (const [u, v] of [[A, B], [B, C], [C, A]]) {
+    tri([u[0], u[1], zb], [v[0], v[1], zb], [v[0], v[1], zf]);
+    tri([u[0], u[1], zb], [v[0], v[1], zf], [u[0], u[1], zf]);
+  }
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.Float32BufferAttribute(p, 3));
+  g.computeVertexNormals();
+  return g;
+})();
 
 /* ==============================================================================================
  * Story-prop re-anchoring (see header note 6).
@@ -551,6 +626,8 @@ export class Props {
     this._instanced = [];
     this._ownGeo = [];
     this._ownMat = [];
+    /** @type {Map<string,THREE.Material>} material keys Props authors itself, see _makeFabric. */
+    this._ownNamed = new Map();
     this._unsub = [];
     this._t = 0;
     this._decals = [];          // {x,y,z,r,s,nx,ny,nz}
@@ -706,6 +783,7 @@ export class Props {
     for (const m of this._ownMat) { try { m.dispose(); } catch { /* ignore */ } }
     this._ownGeo.length = 0;
     this._ownMat.length = 0;
+    this._ownNamed.clear();
     this._meshes.length = 0;
     this._instanced.length = 0;
     this.group.clear();
@@ -781,10 +859,13 @@ export class Props {
   }
 
   _mat(name) {
+    const own = this._ownNamed.get(name);
+    if (own) return own;
     if (this._mats) return this._mats.get(name);
     let m = this._fallbackMats && this._fallbackMats.get(name);
     if (!m) {
-      m = new THREE.MeshStandardMaterial({ color: 0x3b464b, roughness: 0.8, name: `sc-props-fb-${name}` });
+      // ART §2.2 mid.slate, matte. A fallback must still be inside the palette.
+      m = new THREE.MeshStandardMaterial({ color: 0x243740, roughness: 0.9, name: `sc-props-fb-${name}` });
       if (!this._fallbackMats) this._fallbackMats = new Map();
       this._fallbackMats.set(name, m);
       this._ownMat.push(m);
@@ -953,15 +1034,30 @@ export class Props {
       toneMapped: false,
     });
 
+    // The canvas colour map, if Textures is up. Used both as the glow shell's modulator and as
+    // the lit tent's emissiveMap, so the SAME dirt shows in the fabric and in the light.
+    const canvasSet = (this._textures && typeof this._textures.get === 'function')
+      ? this._textures.get('canvas-tent') : null;
+    const canvasMap = (canvasSet && canvasSet.map) ? canvasSet.map : null;
+
     this.uGlowCanvas = {
       uColor: new THREE.Uniform(new THREE.Color(PAL.lantern).convertSRGBToLinear()),
-      uIntensity: new THREE.Uniform(1.35), uFlicker: new THREE.Uniform(1),
+      // 1.35 used to be the ENTIRE lit tent, because the canvas under it was black. The fabric
+      // now carries the lamp itself; this is only the near-field gradient laid over it.
+      uIntensity: new THREE.Uniform(0.90), uFlicker: new THREE.Uniform(1),
       uFogK: new THREE.Uniform(fogK), uSeam: new THREE.Uniform(new THREE.Vector2(0.95, 0.45)),
+      uTex: new THREE.Uniform(canvasMap),
+      uTexAmt: new THREE.Uniform(0.7),
+      // Approximate linear mean of the canvas albedo (#5c5b46 class). Only a normaliser: the
+      // shader clamps around it, so being a little off shifts brightness, never breaks it.
+      uTexRef: new THREE.Uniform(0.085),
     };
     this.matGlowCanvas = new THREE.ShaderMaterial({
       name: 'sc-glow-canvas', uniforms: this.uGlowCanvas, vertexShader: GLOW_VERT, fragmentShader: GLOW_FRAG,
+      defines: canvasMap ? { SC_GLOW_TEX: '' } : {},
       blending: THREE.AdditiveBlending, depthWrite: false, transparent: true, toneMapped: false,
-      polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -2, side: THREE.DoubleSide,
+      // No polygonOffset: _buildTent now places the shell outside the canvas (see there).
+      side: THREE.DoubleSide,
     });
 
     this.uGlowWindow = {
@@ -979,38 +1075,102 @@ export class Props {
       uStrength: new THREE.Uniform(0.78),
       uFade: new THREE.Uniform(new THREE.Vector2(34, 72)),
     };
+    // NormalBlending over a black fragment — see the note above DECAL_FRAG. Never Multiply.
     this.matDecal = new THREE.ShaderMaterial({
       name: 'sc-contact', uniforms: this.uDecal, vertexShader: DECAL_VERT, fragmentShader: DECAL_FRAG,
-      blending: THREE.MultiplyBlending, depthWrite: false, transparent: true, toneMapped: false,
+      blending: THREE.NormalBlending, depthWrite: false, transparent: true, toneMapped: false,
       polygonOffset: true, polygonOffsetFactor: -4, polygonOffsetUnits: -4,
     });
 
-    // Cloth: towels, the flag, flagging tape and life jackets. Opted into the global wetness /
-    // wind system through the documented Materials.patchMaterial() path.
-    this.matCloth = new THREE.MeshStandardMaterial({
-      name: 'sc-props-cloth', color: new THREE.Color(0x6b6a55), roughness: 0.84, metalness: 0,
+    // ---- Props-owned surfaces. These four keys are NOT in the shared library; before this
+    // existed, `_mat('cloth')` / `_mat('cloth-warm')` fell straight through to the Materials
+    // fallback (flat untextured `mid.slate`, and Materials logs a warning once). Everything
+    // here is opted into the global wetness / wind system through the documented
+    // Materials.patchMaterial() path, and everything here is dirty. Nothing is white.
+
+    // Camp cotton: towels on the line, chair slings, the volleyball tape. Weathered and mildewed.
+    this.matCloth = this._makeFabric('sc-props-cloth', 0x5f5e4a, 0.92, {
+      porosity: 0.9, wetScale: 1.0, uv: [1.4, 1.4], detail: [22, 0.5],
+      breakup: [0.26, 24], ao: 0.65, wind: [1.15, 0.95, 0.0, 1.6],
+    });
+    // The one warm garment class in the props set (flag, life jackets) — ART §2.2 garment.warm,
+    // sun-bleached and rain-beaten so it never competes with the fire.
+    this.matClothWarm = this._makeFabric('sc-props-cloth-warm', 0x9d5636, 0.90, {
+      porosity: 0.9, wetScale: 1.0, uv: [1.4, 1.4], detail: [22, 0.5],
+      breakup: [0.24, 18], ao: 0.65, wind: [1.15, 0.95, 0.0, 1.6],
+    });
+    // The weighted tarp. The shared `tarp-plastic` is authored at roughness 0.28 with
+    // wetScale 1.35, which is right for a crumpled cover but turns a 3.2 x 2.4 m sheet lying
+    // flat on the ground into one coherent mirror aimed at the moon — a blown white slab.
+    // Props keeps its own: same hue, matte, and barely wet-responsive.
+    this.matTarpSheet = this._makeFabric('sc-props-tarp-sheet', 0x27343d, 0.72, {
+      porosity: 0.30, wetScale: 0.30, uv: [1.6, 1.6], detail: [16, 0.85],
+      breakup: [0.30, 9], ao: 0.85, cavity: { contrast: 1.5, bias: 0.10 },
+    });
+
+    // ---- LIT TENT CANVAS. ART §6.3: a tent lit from inside is the best image this game has,
+    // and it only works if the thing that glows is FABRIC. Before this, the lit tents used the
+    // ordinary shared `canvas` material — which, under a 0.06-intensity moon with no local
+    // light at the tents (they are fog proxies, header note 2), renders essentially black — and
+    // the whole read was carried by the additive shell on top of it. The result was five flat
+    // orange polygons floating in the dark with hard edges and no surface: a card, not a tent.
+    //
+    // The fix is emissive canvas. Same albedo, same weave/dirt/patch maps, and the colour map
+    // doubles as the emissiveMap so the light coming through is modulated by the cloth's own
+    // grime. Bright panels glow, mildewed ones do not, seams stay dark. No `transmission` — §6.3
+    // is explicit that transmission costs a whole second forward pass and is forbidden here.
+    this.matCanvasLit = this._makeFabric('sc-props-canvas-lit', 0x5c5b46, 0.86, {
+      porosity: 0.9, wetScale: 0.85, uv: [1.1, 1.1], detail: [18, 0.45],
+      breakup: [0.22, 20], ao: 0.7,
+    });
+    this.matCanvasLit.emissive = new THREE.Color(PAL.lantern);
+    this.matCanvasLit.emissiveMap = this.matCanvasLit.map || null;
+    // Low. The fabric only has to stop being BLACK; the additive shell above supplies the hot
+    // gradient around the lamp. Pushed higher the tent becomes an amber cardboard box.
+    this.matCanvasLit.emissiveIntensity = this.matCanvasLit.emissiveMap ? 0.22 : 0.03;
+    this.matCanvasLit.side = THREE.DoubleSide;
+
+    /** Names `_mat()` resolves locally instead of asking the shared library. */
+    this._ownNamed.set('cloth', this.matCloth);
+    this._ownNamed.set('cloth-warm', this.matClothWarm);
+    this._ownNamed.set('tarp-sheet', this.matTarpSheet);
+    this._ownNamed.set('canvas-lit', this.matCanvasLit);
+
+    this._ownMat.push(this.matFlame, this.matEmber, this.matCoal, this.matGlowCanvas,
+      this.matGlowWindow, this.matDecal, this.matCloth, this.matClothWarm, this.matTarpSheet,
+      this.matCanvasLit);
+  }
+
+  /**
+   * A Props-owned fabric-ish MeshStandardMaterial wearing the shared canvas texture set and
+   * patched into the global wetness/wind system. Init-time only.
+   * @param {string} name
+   * @param {number} hex   sRGB display value (ART_DIRECTION §2)
+   * @param {number} rough scalar roughness, used only when no ORM map is bound
+   * @param {object} patch Materials.patchMaterial() options
+   */
+  _makeFabric(name, hex, rough, patch) {
+    const m = new THREE.MeshStandardMaterial({
+      name, color: new THREE.Color(hex), roughness: rough, metalness: 0,
       side: THREE.DoubleSide, dithering: true,
     });
     try {
       if (this._textures && typeof this._textures.get === 'function') {
         const set = this._textures.get('canvas-tent');
         if (set && set.map) {
-          this.matCloth.map = set.map;
-          this.matCloth.normalMap = set.normalMap || null;
-          this.matCloth.roughnessMap = set.roughnessMap || null;
-          if (this.matCloth.roughnessMap) this.matCloth.roughness = 1;
+          m.map = set.map;
+          m.normalMap = set.normalMap || null;
+          m.roughnessMap = set.roughnessMap || null;
+          // Textures.js bakes ABSOLUTE roughness into the ORM green channel and three
+          // multiplies by the scalar, so the scalar has to be 1 or we double-darken it.
+          if (m.roughnessMap && set.roughAbsolute !== false) m.roughness = 1;
         }
       }
       if (this._mats && typeof this._mats.patchMaterial === 'function') {
-        this._mats.patchMaterial(this.matCloth, {
-          porosity: 0.9, wetScale: 1.0, uv: [1.4, 1.4], detail: [22, 0.5],
-          breakup: [0.22, 24], ao: 0.6, wind: [1.15, 0.95, 0.0, 1.6],
-        });
+        this._mats.patchMaterial(m, patch);
       }
-    } catch (e) { Log.warn('Props: cloth material patch failed — towels will not sway.', e); }
-
-    this._ownMat.push(this.matFlame, this.matEmber, this.matCoal, this.matGlowCanvas,
-      this.matGlowWindow, this.matDecal, this.matCloth);
+    } catch (e) { Log.warn(`Props: material patch failed for '${name}' — it will not weather.`, e); }
+    return m;
   }
 
   // =============================================================================================
@@ -1425,10 +1585,19 @@ export class Props {
       const gw = winW * 0.98, gh = winH * 0.98;
       kit.add('glow-window', Kit.UNIT_PLANE, TRS(-1.55, winY, -hd - 0.05, 0, gw, gh, 1), { glow: 1 });
       kit.add('glow-window', Kit.UNIT_PLANE, TRS(1.55, winY, -hd - 0.05, 0, gw * 0.9, gh, 1), { glow: 0.7 });
-      // warm spill on the ground under the window
+      // Warm spill on the ground under the window. The falloff MUST reach zero inside the quad.
+      // The old term (0.22 - 0.03*d, measured from the cabin centre) was still ~0.10 at the
+      // quad's corners, so every lit cabin laid a hard-edged 5.0 x 3.4 m warm rectangle on the
+      // grass — a lit slab, not light. Radial from the spill's own centre, squared, to zero.
+      const spillC = new THREE.Vector3(0, 0, -hd - 1.5).applyMatrix4(TRS(x, y, z, ry));
       kit.add('glow-window', Kit.UNIT_PLANE,
         TRS(0, -y + this._h(x, z) + 0.05, -hd - 1.5, 0, 5.0, 3.4, 1, -Math.PI / 2),
-        { glowFn: (gx, gy, gz) => Math.max(0, 0.22 - 0.03 * Math.hypot(gx - x, gz - z + 0)) });
+        {
+          glowFn: (gx, gy, gz) => {
+            const t = 1 - Math.hypot(gx - spillC.x, gz - spillC.z) / 2.3;
+            return t > 0 ? 0.085 * t * t : 0;
+          },
+        });
       const wp = new THREE.Vector3(-1.55, winY, -hd - 0.4).applyMatrix4(TRS(x, y, z, ry));
       this._proxy(wp.x, wp.y, wp.z, PAL.lantern, 2.4, 9, true);
       this._decal(x, z - hd - 1.2, 2.6, 0.18);
@@ -1664,24 +1833,37 @@ export class Props {
     }
 
     // canvas: two side walls, two roof slopes, two gables. A sagging ridge sells the age.
+    // A LIT tent's canvas is the emissive 'canvas-lit' variant — the fabric itself carries the
+    // lamp, so the tent reads as a paper lantern made of cloth instead of a floating orange
+    // card. An unlit tent gets the ordinary shared canvas and stays a silhouette.
+    const CANVAS = lit ? 'canvas-lit' : M.canvas;
     const sag = 0.055;
     const slopeLen = Math.hypot(hw, ridgeH - wallH);
     const slopeAng = Math.atan2(ridgeH - wallH, hw);
     for (const s of [-1, 1]) {
-      kit.box(M.canvas, 0.03, wallH, D, s * hw, deck + 0.05 + wallH * 0.5, 0, 0, { exposure: 1, uvOffset: seed * 0.7 });
-      kit.add(M.canvas, Kit.UNIT_BOX,
+      kit.box(CANVAS, 0.03, wallH, D, s * hw, deck + 0.05 + wallH * 0.5, 0, 0, { exposure: 1, uvOffset: seed * 0.7 });
+      kit.add(CANVAS, Kit.UNIT_BOX,
         TRS(s * hw * 0.5, deck + 0.05 + (wallH + ridgeH) * 0.5 - sag * 0.5, 0, 0, slopeLen + 0.06, 0.03, D, 0, s * slopeAng),
         { exposure: 1, uvOffset: seed * 0.3 });
     }
+    // Gable ends. These used to be a row of boxes of increasing height standing in for a
+    // triangle; on a LIT tent that row is the silhouette of the brightest object in the frame
+    // and it read unmistakably as a bar chart. A real wedge, plus a wall band under it, and on
+    // one tent the door flap is tied open — a gap in the wall band, not a missing stair.
+    const gabH = ridgeH - wallH;
+    const wallY = deck + 0.05 + wallH * 0.5;
     for (const s of [-1, 1]) {
-      for (let i = 0; i < 5; i++) {
-        const t = (i + 0.5) / 5;
-        const top = wallH + (ridgeH - wallH) * (1 - Math.abs(t * 2 - 1));
-        const px = (t - 0.5) * W;
-        const isDoor = s < 0 && i >= 1 && i <= 3;
-        if (isDoor && seed % 2 === 0) continue;   // the flap on one tent is tied open
-        kit.box(M.canvas, W / 5 * 0.99, top, 0.03, px, deck + 0.05 + top * 0.5, s * hd, 0, { exposure: 1 });
+      const doorOpen = s < 0 && seed % 2 === 0;
+      if (doorOpen) {
+        const sw = Math.max(0.25, (W - 0.95) * 0.5);
+        for (const q of [-1, 1]) {
+          kit.box(CANVAS, sw, wallH, 0.03, q * (W - sw) * 0.5, wallY, s * hd, 0, { exposure: 1 });
+        }
+      } else {
+        kit.box(CANVAS, W, wallH, 0.03, 0, wallY, s * hd, 0, { exposure: 1 });
       }
+      kit.add(CANVAS, Kit.UNIT_WEDGE,
+        TRS(0, deck + 0.05 + wallH + gabH * 0.5, s * hd, 0, W, gabH, 0.03), { exposure: 1 });
     }
     // ridge pole, uprights, guy ropes and stakes
     kit.add(M.wood, Kit.UNIT_CYL, TRS(0, deck + 0.05 + ridgeH - sag, 0, 0, 0.07, D + 0.5, 0.07, Math.PI / 2));
@@ -1698,21 +1880,39 @@ export class Props {
     if (lit) {
       // the interior lamp card (ART §6.3 item 2) and the additive canvas glow shell
       const ly = deck + 0.05 + 0.62;
-      kit.add('glow-canvas', Kit.UNIT_SPHERE, TRS(0, ly, 0.35, 0, 0.16, 0.22, 0.16), { glow: 3.0 });
+      kit.add('glow-canvas', Kit.UNIT_SPHERE, TRS(0, ly, 0.35, 0, 0.16, 0.22, 0.16), { glow: 2.2 });
       const lampL = new THREE.Vector3(0, ly, 0.35);
       const falloff = (px, py, pz) => {
         const dx = px - (x + Math.cos(-ry) * lampL.x - Math.sin(-ry) * lampL.z);
         const dz = pz - (z + Math.sin(-ry) * lampL.x + Math.cos(-ry) * lampL.z);
         const dy = py - (y + ly);
         const d2 = dx * dx + dy * dy + dz * dz;
-        return Math.min(1.6, 1.15 / (0.35 + d2 * 0.55));
+        // Sharp enough that the far end of a 4.4 m tent is genuinely dimmer than the panel the
+        // lamp is leaning against. A flat shell over a 4 m object is a lit box, not a lamp.
+        return Math.min(1.0, 0.90 / (0.30 + d2 * 1.30));
       };
+      // The shell sits just OUTSIDE the canvas, never inside it. Inside, it fails the depth test
+      // against its own tent and only shows through a polygonOffset hack — which produced a
+      // dashed z-fighting stipple along every panel edge that read as neon piping. Outside, it
+      // composites cleanly. It is also kept fractionally SMALLER than the canvas on every axis so
+      // its silhouette can never exceed the tent's.
+      const OUT = 0.04;
       for (const s of [-1, 1]) {
-        kit.add('glow-canvas', Kit.UNIT_BOX, TRS(s * (hw - 0.02), deck + 0.05 + wallH * 0.5, 0, 0, 0.02, wallH, D), { glowFn: falloff });
         kit.add('glow-canvas', Kit.UNIT_BOX,
-          TRS(s * hw * 0.5, deck + 0.05 + (wallH + ridgeH) * 0.5 - sag * 0.5 - 0.02, 0, 0, slopeLen, 0.02, D, 0, s * slopeAng),
+          TRS(s * (hw + OUT), deck + 0.05 + wallH * 0.5, 0, 0, 0.01, wallH * 0.99, D * 0.99),
           { glowFn: falloff });
-        kit.add('glow-canvas', Kit.UNIT_BOX, TRS(0, deck + 0.05 + wallH * 0.55, s * (hd - 0.02), 0, W, wallH * 1.5, 0.02), { glowFn: falloff });
+        kit.add('glow-canvas', Kit.UNIT_BOX,
+          TRS(s * hw * 0.5, deck + 0.05 + (wallH + ridgeH) * 0.5 - sag * 0.5 + 0.055, 0,
+            0, slopeLen * 0.99, 0.01, D * 0.99, 0, s * slopeAng),
+          { glowFn: falloff });
+        // The gable glow used to be ONE card, W x wallH*1.5, centred at 0.55*wallH: it hung
+        // below the tent platform and stopped short of the ridge, so the tent's brightest
+        // element had a silhouette that was not the tent's. Now it IS the gable.
+        kit.add('glow-canvas', Kit.UNIT_BOX,
+          TRS(0, wallY, s * (hd + OUT), 0, W * 0.99, wallH * 0.99, 0.01), { glowFn: falloff });
+        kit.add('glow-canvas', Kit.UNIT_WEDGE,
+          TRS(0, deck + 0.05 + wallH + gabH * 0.5, s * (hd + OUT), 0, W * 0.99, gabH * 0.99, 0.01),
+          { glowFn: falloff });
       }
       const wp = new THREE.Vector3(lampL.x, ly, lampL.z).applyMatrix4(TRS(x, y, z, ry));
       this._proxy(wp.x, wp.y, wp.z, PAL.lantern, 3.6, 10, true);
@@ -1982,8 +2182,10 @@ export class Props {
       kit.box(M.rope, 0.012, 0.95, 0.012, x - 4.4 + i * 0.63, netY - 0.48, z, 0);
     }
     for (let i = 0; i < 5; i++) kit.box(M.rope, 8.8, 0.012, 0.012, x, netY - i * 0.235, z, 0);
-    kit.box('cloth-warm', 8.9, 0.09, 0.02, x, netY + 0.03, z, 0);
-    kit.box('cloth-warm', 8.9, 0.07, 0.02, x, netY - 0.98, z, 0);
+    // The net tape is grubby canvas, not a warm garment: 8.9 m of `garment.warm` strung across
+    // the clearing was the second-brightest horizontal in the frame and read as a lit strip.
+    kit.box('cloth', 8.9, 0.09, 0.02, x, netY + 0.03, z, 0);
+    kit.box('cloth', 8.9, 0.07, 0.02, x, netY - 0.98, z, 0);
     // a ball in the dirt, and the worn sand rectangle
     kit.add(M.tarp, Kit.UNIT_SPHERE, TRS(x + 2.4, this._h(x + 2.4, z + 3) + 0.11, z + 3, 0, 0.22, 0.22, 0.22));
     this._decal(x + 2.4, z + 3, 0.4, 0.7);
@@ -2206,8 +2408,11 @@ export class Props {
   _buildTarp(kit, x, z, ry) {
     const r = new Rand(0x7A29);
     const y = this._lowest(x, z, 1.6, 1.2, ry);
-    // a folded, sagging sheet — nine panels with real sag, so puddles have somewhere to sit
-    const seg = 6;
+    // A folded, sagging sheet. The mesh is dense and genuinely crumpled on purpose: a smooth
+    // sheet this size lying flat is one continuous specular lobe, and at grazing moon angles
+    // that reads as a blown white slab on the grass. Wrinkles at ~12 cm break the lobe into
+    // fragments, which is what a wet tarp actually looks like.
+    const seg = 22;
     const g = new THREE.PlaneGeometry(3.2, 2.4, seg, seg);
     g.rotateX(-Math.PI / 2);
     const p = g.attributes.position;
@@ -2216,10 +2421,14 @@ export class Props {
       const edge = Math.min(u, 1 - u, v, 1 - v) * 2;
       const sag = -0.22 * Math.sin(Math.PI * u) * Math.sin(Math.PI * v)
         + 0.06 * Math.sin(u * 9.1) * Math.sin(v * 7.3);
-      p.setY(i, 0.42 * Math.min(1, edge * 2.2) + sag);
+      // deterministic crumple (ARCHITECTURE §6: never Math.random)
+      const w = 0.030 * Math.sin(u * 27.4 + v * 9.7) * Math.cos(v * 31.1 - u * 5.3)
+        + 0.017 * Math.sin(u * 61.3 - v * 44.9)
+        + 0.011 * (ihash1(((u * 512) | 0) * 131 + ((v * 512) | 0)) - 0.5) * 2.0;
+      p.setY(i, 0.42 * Math.min(1, edge * 2.2) + sag + w * Math.min(1, edge * 3.0));
     }
     g.computeVertexNormals();
-    kit.add(M.tarp, g, TRS(x, y, z, ry), { exposure: 1 });
+    kit.add('tarp-sheet', g, TRS(x, y, z, ry), { exposure: 1 });
     g.dispose();
     for (let i = 0; i < 6; i++) {
       const a = (i / 6) * 6.28 + 0.4;

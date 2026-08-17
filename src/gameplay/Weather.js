@@ -239,13 +239,16 @@ uniform vec3  uLanternPos;
 uniform vec3  uLanternAxis;
 uniform vec4  uLanternParams;   // x cosOuter, y cosInner, z intensity, w range
 uniform float uFogD0;
+uniform vec3  uRainColor;
+uniform vec3  uLanternColor;
+uniform vec3  uFlashColor;
 
 attribute vec3  aOffset;
 attribute vec4  aParams;        // x shell 0/1, y lenScale, z widthScale, w speedScale
 attribute float aSeed;
 
 varying float vAlpha;
-varying float vLit;
+varying vec3  vColor;
 varying vec2  vQuad;
 
 void main() {
@@ -262,7 +265,13 @@ void main() {
     // Cull instances above the current rainfall: light rain is genuinely fewer drops, not
     // the same drops at lower alpha. Costs nothing and it is the difference between
     // "drizzle" and "someone turned the opacity down".
-    float alive = step(aSeed, uRain * 1.06);
+    //
+    // The curve is pow(rain, 0.55), not rain. Rain is atmosphere: what sells it is a LOT of
+    // very faint drops, not a few legible ones. A linear cull at rain 0.3 left ~25 streaks
+    // on screen, which the eye resolves as individual white dashes — a particle effect. The
+    // same rainfall at pow(0.55) is ~370 of them at a third the alpha, which the eye
+    // integrates into a mist. Density is the read; per-drop brightness is the artefact.
+    float alive = step(aSeed, pow(uRain, 0.55) * 1.04);
     float box = mix(uShellSize.x, uShellSize.y, aParams.x);
     vec3 vel = vec3(uWind.x * 0.55, -uFallSpeed * aParams.w, uWind.z * 0.55);
     vec3 p = aOffset * box + vel * uTime;
@@ -281,7 +290,15 @@ void main() {
   side = sl > 1e-4 ? side / sl : vec3(1.0, 0.0, 0.0);
 
   float len = length(vel) * uShutter * aParams.y;
-  float wid = max(aParams.z * 0.013, dist * uPxWidth);
+
+  // WIDTH IS SCREEN SPACE, ALWAYS. This used to carry a world-space floor
+  // (max(aParams.z * 0.013, ...)), i.e. a hard 1.3 cm minimum thickness. 72% of the drops
+  // live in an 11 m box centred on the camera, so a large fraction of them sit 1-2 m from
+  // the lens, where 1.3 cm subtends eight to twelve pixels — and that is exactly what the
+  // defect frame showed: solid white bars, not rain. A raindrop is ~1 mm across. It is
+  // never more than a couple of pixels wide at any distance a game camera can get to it,
+  // so the pixel figure is the ONLY correct authority and the world figure is deleted.
+  float wid = dist * uPxWidth * aParams.z;
 
   vec3 wp = p + dir * ((position.y - 0.5) * len) + side * (position.x * wid);
 
@@ -295,9 +312,23 @@ void main() {
     float shell = aParams.x;
   #endif
 
-  float nearFade = smoothstep(0.30, 1.10, dist);
+  // A drop 0.4 m from the lens covers a hundred pixels for free and is the single largest
+  // source of "rain looks like a glitch". Push the fade band out: nothing inside 0.6 m draws
+  // at all, and a drop is not at full weight until it is 2.2 m away, by which point its
+  // screen footprint is a thin streak instead of a bar.
+  float nearFade = smoothstep(0.60, 2.20, dist);
   float fogFade = exp(-dist * uFogD0 * 0.85);
-  float a = alive * edge * nearFade * fogFade * mix(0.56, 0.30, shell);
+
+  // ART §1 / keyart-site.png: rain is a FINE MIST. Per-drop alpha is in the low hundredths,
+  // essentially invisible against the black forest, and it exists to be *found* by the
+  // lantern beam. The old 0.56 near-shell alpha, flat-topped across a multi-pixel quad, was
+  // opaque paint. These numbers came down again when the density went up: the integrated
+  // veil is what should read, never a single drop.
+  float base = mix(0.085, 0.055, shell);
+  #ifdef DRIP
+    base = 0.17;                       // a canopy drip is a fat slow drop and reads as one
+  #endif
+  float a = alive * edge * nearFade * fogFade * base;
 
   #ifndef DRIP
     a *= smoothstep(0.02, 0.22, uRain);
@@ -309,12 +340,27 @@ void main() {
   float cosA = dot(toL / max(dl, 1e-4), uLanternAxis);
   float cone = smoothstep(uLanternParams.x, uLanternParams.y, cosA)
              * (1.0 - smoothstep(uLanternParams.w * 0.45, uLanternParams.w, dl));
-  // ART §5.4: a streak inside a light cone is lit at 2.2x ambient rain brightness. The ambient
-  // term has to be high enough that the 2.2x actually reads as the classic image and not as a
-  // slightly less invisible drop.
-  vLit = 0.44 + 0.44 * uMoon + 2.20 * cone * uLanternParams.z + 2.60 * uLightning;
+  float lantern = cone * uLanternParams.z;
 
-  vAlpha = a;
+  // ART §2.1, THE ONE RULE: the only warm light in the world is human. A drop crossing the
+  // lantern beam is lit BY the lantern, so it must come back amber, not blue — in
+  // keyart-site.png the rain inside the beam is the same sodium-amber as the timber it is
+  // falling on, and that is what makes it read as the same photograph. Summing three tinted
+  // terms rather than scaling one cold colour costs two multiply-adds and is the difference
+  // between weather and an overlay.
+  //
+  // The moon term is deliberately below the moonlit mud it falls on (§3.1 target 0.045 rel.
+  // luminance): rain in the open forest is not allowed to paint itself over the black.
+  vColor = uRainColor    * (0.13 + 0.26 * uMoon)
+         + uLanternColor * (2.10 * lantern)
+         + uFlashColor   * (1.60 * uLightning);
+
+  // The beam does not just make a drop brighter, it makes it *present*: alpha rises inside
+  // the cone too. That is the whole point of the effect — nearly nothing in the forest,
+  // unmistakable in the lantern — and brightness alone cannot buy it at 0.08 alpha.
+  a *= 1.0 + 3.6 * lantern + 1.4 * uLightning;
+
+  vAlpha = min(a, 0.42);
   if (a < 0.002) {
     gl_Position = vec4(2.0, 2.0, 2.0, 1.0);   // off-screen, no fill cost
     return;
@@ -326,21 +372,19 @@ void main() {
 const STREAK_FRAG = /* glsl */`
 precision highp float;
 
-uniform vec3 uRainColor;
-
 varying float vAlpha;
-varying float vLit;
+varying vec3  vColor;
 varying vec2  vQuad;
 
 void main() {
-  // Flat-topped across the streak, not a triangle. A streak is only ~2 px wide: with a
+  // Flat-topped across the streak, not a triangle. A streak is only ~1.3 px wide: with a
   // triangular profile the rasteriser samples the ramp at a random offset and the drop reads
   // at a third of its intended brightness, which is how rain becomes invisible.
   float across = smoothstep(0.0, 0.45, 1.0 - abs(vQuad.x - 0.5) * 2.0);
   float along = smoothstep(0.0, 0.20, vQuad.y) * (1.0 - smoothstep(0.72, 1.0, vQuad.y));
   float a = vAlpha * across * along;
-  if (a < 0.003) discard;
-  gl_FragColor = vec4(uRainColor * vLit, a);
+  if (a < 0.002) discard;
+  gl_FragColor = vec4(vColor, a);
 
   // Composite exactly like every other material in the scene. Without these two chunks the
   // shader writes linear radiance straight into whatever buffer is bound, so rain is graded
@@ -360,13 +404,19 @@ uniform float uLightning;
 uniform float uMoon;
 uniform vec3  uCamPos;
 uniform float uFogD0;
+uniform vec3  uRippleColor;
+uniform vec3  uLanternColor;
+uniform vec3  uFlashColor;
+uniform vec3  uLanternPos;
+uniform vec3  uLanternAxis;
+uniform vec4  uLanternParams;
 
 attribute vec3  aPos;
 attribute float aSpawn;
 attribute float aScale;
 
 varying float vAlpha;
-varying float vLit;
+varying vec3  vColor;
 
 void main() {
   float age = uTime - aSpawn;
@@ -381,8 +431,23 @@ void main() {
 
   float dist = length(uCamPos - wp);
   float fogFade = exp(-dist * uFogD0 * 0.9);
-  vAlpha = (1.0 - k) * (1.0 - k) * fogFade * 0.55;
-  vLit = 0.30 + 0.45 * uMoon + 1.8 * uLightning;
+  // Same discipline as the streaks: a splash ring is a disturbance on black water, not a
+  // drawn shape. 0.55 read as a white hoop; 0.22 reads as the surface breaking.
+  vAlpha = (1.0 - k) * (1.0 - k) * fogFade * 0.22;
+
+  // Same ONE RULE as the streaks: a ring breaking in the lantern pool is lit by the lantern
+  // and comes back amber. A cold ring inside a warm pool reads as a decal sitting on top of
+  // the image instead of a disturbance in it.
+  vec3 toL = wp - uLanternPos;
+  float dl = length(toL);
+  float cosA = dot(toL / max(dl, 1e-4), uLanternAxis);
+  float lantern = smoothstep(uLanternParams.x, uLanternParams.y, cosA)
+                * (1.0 - smoothstep(uLanternParams.w * 0.45, uLanternParams.w, dl))
+                * uLanternParams.z;
+  vColor = uRippleColor  * (0.16 + 0.30 * uMoon)
+         + uLanternColor * (1.10 * lantern)
+         + uFlashColor   * (1.20 * uLightning);
+  vAlpha *= 1.0 + 1.6 * lantern;
 
   gl_Position = projectionMatrix * viewMatrix * vec4(wp, 1.0);
 }
@@ -391,14 +456,12 @@ void main() {
 const RIPPLE_FRAG = /* glsl */`
 precision highp float;
 
-uniform vec3 uRippleColor;
-
 varying float vAlpha;
-varying float vLit;
+varying vec3  vColor;
 
 void main() {
   if (vAlpha < 0.003) discard;
-  gl_FragColor = vec4(uRippleColor * vLit, vAlpha);
+  gl_FragColor = vec4(vColor, vAlpha);
   #include <tonemapping_fragment>
   #include <colorspace_fragment>
 }
@@ -618,9 +681,12 @@ export class Weather {
     // sub-pixelling into nothing.
     const fov = (this.ctx?.camera?.fov ?? 72) * Math.PI / 180;
     const px = (2 * Math.tan(fov * 0.5)) / Math.max(1, height || this.ctx?.height || 1080);
-    // ~2.4 px minimum. Below about two pixels a streak is a coverage lottery and the rain
-    // silently disappears at distance instead of receding.
-    const w = clamp(px * 2.4, 0.0006, 0.02);
+    // ~1.25 px. The fragment profile (STREAK_FRAG) is flat-topped across the middle 55% with
+    // soft shoulders, so 1.25 px of quad is ~0.7 px of solid core plus antialiased edges —
+    // a hairline, which is what a raindrop is. The old 2.4 was chosen to stop far streaks
+    // sub-pixelling away; the hard 0.006 ceiling now does that job without letting a NEAR
+    // streak grow into a bar, because width is no longer allowed a world-space floor at all.
+    const w = clamp(px * 1.25, 0.0006, 0.006);
     this._streakMat.uniforms.uPxWidth.value = w;
     if (this._dripMat) this._dripMat.uniforms.uPxWidth.value = w * 1.5;
   }
@@ -1611,7 +1677,10 @@ export class Weather {
     const tier = this.ctx?.settings?.tier?.bind(this.ctx.settings)
       ?? ((a, b, c, d) => d);
 
-    const streakCount = tier(1200, 2600, 4600, 7000);
+    // Rain reads by COUNT, not by per-drop alpha (see the alive/pow note in STREAK_VERT).
+    // These are cheap: an instance is 4 verts and ~30 covered pixels, so 11k slots at ultra
+    // is well under 0.2 ms and only ~half of them are alive at a typical rainfall.
+    const streakCount = tier(2200, 4800, 9000, 14000);
     const rippleCount = tier(24, 48, 96, 160);
     const dripCount = tier(12, 24, 40, 56);
 
@@ -1620,7 +1689,12 @@ export class Weather {
     this.group.frustumCulled = false;
     scene.add(this.group);
 
+    // ART §2.2: `fog.lit` for moon-scattered water, `lantern` for anything a human light
+    // touches, `#c9d6ee` for lightning. Three separate tints, summed in the vertex shader —
+    // see the ONE RULE note in STREAK_VERT.
     const rainColor = new THREE.Color(0x8fa6bb);
+    const lanternColor = new THREE.Color(0xffb865);
+    const flashColor = new THREE.Color(0xc9d6ee);
     const rippleColor = new THREE.Color(0x9fb3c4);
 
     const commonUniforms = () => ({
@@ -1628,13 +1702,15 @@ export class Weather {
       uCamPos: new THREE.Uniform(new THREE.Vector3()),
       uWind: new THREE.Uniform(new THREE.Vector3(0, 0, 0)),
       uRain: new THREE.Uniform(0),
-      uShutter: new THREE.Uniform(0.030),
-      uPxWidth: new THREE.Uniform(0.0022),
+      uShutter: new THREE.Uniform(0.013),
+      uPxWidth: new THREE.Uniform(0.0020),
       uShellSize: new THREE.Uniform(new THREE.Vector2(11, 48)),
       uFallSpeed: new THREE.Uniform(9.0),
       uLightning: new THREE.Uniform(0),
       uMoon: new THREE.Uniform(0.35),
       uRainColor: new THREE.Uniform(rainColor),
+      uLanternColor: new THREE.Uniform(lanternColor),
+      uFlashColor: new THREE.Uniform(flashColor),
       uLanternPos: new THREE.Uniform(new THREE.Vector3(0, -999, 0)),
       uLanternAxis: new THREE.Uniform(new THREE.Vector3(0, 0, -1)),
       uLanternParams: new THREE.Uniform(new THREE.Vector4(0.86, 0.97, 0, 22)),
@@ -1661,14 +1737,18 @@ export class Weather {
       off[i * 3 + 0] = r.next();
       off[i * 3 + 1] = r.next();
       off[i * 3 + 2] = r.next();
-      // 72% of the drops live in the near 11 m box: ~130x the volumetric density of the far
-      // shell, for a quarter of the instances. That is the whole trick — rain reads because
-      // it is dense in the two metres you can actually resolve, not because there is a lot
-      // of it at forty.
-      const shell = i < streakCount * 0.72 ? 0 : 1;
+      // 78% of the drops live in the near 11 m box: ~250x the volumetric density of the far
+      // shell, for under a quarter of the instances. That is the whole trick — rain reads
+      // because it is dense in the few metres you can actually resolve, not because there
+      // is a lot of it at forty, where it is a sub-pixel smear and costs the same.
+      const shell = i < streakCount * 0.78 ? 0 : 1;
       par[i * 4 + 0] = shell;
       par[i * 4 + 1] = r.range(0.7, 1.5) * (shell ? 1.5 : 1.0);
-      par[i * 4 + 2] = r.range(0.7, 1.4) * (shell ? 1.8 : 1.0);
+      // aParams.z is now a multiplier on a PIXEL width, not on a world width, so its range
+      // is the variation between one drop and another (a little scatter keeps the field from
+      // reading as a screen-door) and nothing more. The far shell is allowed a third again
+      // so a 40 m streak still lands on a whole pixel; anything beyond that is a bar.
+      par[i * 4 + 2] = r.range(0.85, 1.20) * (shell ? 1.35 : 1.0);
       par[i * 4 + 3] = r.range(0.82, 1.22);
       sed[i] = r.next();
     }
@@ -1705,7 +1785,7 @@ export class Weather {
     const dSed = new Float32Array(dripCount);
     for (let i = 0; i < dripCount; i++) {
       dPar[i * 4 + 1] = r.range(1.1, 2.0);     // longer streak: a drip is a fat slow drop
-      dPar[i * 4 + 2] = r.range(1.6, 2.6);
+      dPar[i * 4 + 2] = r.range(1.05, 1.45);   // pixel-width multiplier — see the streak note
       dPar[i * 4 + 3] = TUNING.dripFall;
     }
     this._dripAttr = new THREE.InstancedBufferAttribute(dOff, 3);
@@ -1774,6 +1854,11 @@ export class Weather {
         uCamPos: new THREE.Uniform(new THREE.Vector3()),
         uFogD0: new THREE.Uniform(0.018),
         uRippleColor: new THREE.Uniform(rippleColor),
+        uLanternColor: new THREE.Uniform(lanternColor),
+        uFlashColor: new THREE.Uniform(flashColor),
+        uLanternPos: new THREE.Uniform(new THREE.Vector3(0, -9999, 0)),
+        uLanternAxis: new THREE.Uniform(new THREE.Vector3(0, 0, -1)),
+        uLanternParams: new THREE.Uniform(new THREE.Vector4(0.86, 0.97, 0, 22)),
       },
       vertexShader: RIPPLE_VERT,
       fragmentShader: RIPPLE_FRAG,
@@ -1821,7 +1906,11 @@ export class Weather {
     su.uMoon.value = moon;
     su.uFogD0.value = fogD0;
     su.uFallSpeed.value = lerp(6.4, 10.4, clamp01(this.rain));
-    su.uShutter.value = 0.030;
+    // The streak IS the motion blur, so this is a shutter angle and it is short. 0.030 s at
+    // 9 m/s is a 0.27 m smear, which at the two metres where most drops live is 120 screen
+    // pixels of falling white line. 0.010-0.015 s puts a near streak at 25-45 px, which is
+    // the length rain has in the reference plate.
+    su.uShutter.value = lerp(0.010, 0.015, clamp01(this.rain));
 
     this._readLantern(su.uLanternPos.value, su.uLanternAxis.value, su.uLanternParams.value);
 
@@ -1836,6 +1925,10 @@ export class Weather {
       du.uLanternPos.value.copy(su.uLanternPos.value);
       du.uLanternAxis.value.copy(su.uLanternAxis.value);
       du.uLanternParams.value.copy(su.uLanternParams.value);
+      // The drip material never had its shutter driven, so it ran on the constructor default
+      // forever. A drip falls at 6.2 m/s against the streaks' 6.4-10.4, so it needs a LONGER
+      // shutter to smear the same visible length — a fat slow drop that reads as one.
+      du.uShutter.value = 0.020;
     }
     if (pu) {
       pu.uTime.value = elapsed;
@@ -1843,6 +1936,9 @@ export class Weather {
       pu.uLightning.value = this.lightning;
       pu.uMoon.value = moon;
       pu.uFogD0.value = fogD0;
+      pu.uLanternPos.value.copy(su.uLanternPos.value);
+      pu.uLanternAxis.value.copy(su.uLanternAxis.value);
+      pu.uLanternParams.value.copy(su.uLanternParams.value);
     }
 
     this._updateDrips(dt, elapsed, cam);

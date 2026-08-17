@@ -56,6 +56,10 @@
  *    broadphase). Handles are released in dispose().
  *  - There is NO GLSL in this file. All shading comes from Materials.get(); if Materials is
  *    missing we fall back to plain MeshStandardMaterials and the forest still renders.
+ *  - The cutout foliage cards are alpha-TESTED, not alpha-to-coverage and not blended. Forest
+ *    asserts that on the shared materials at init (`_restoreCutout`) because A2C is inert
+ *    against a single-sample buffer and turns every needle card into an opaque quad. If you add
+ *    a card material, add its threshold to FOLIAGE_ALPHA_TEST — do not reach for `blending`.
  */
 
 import * as THREE from 'three';
@@ -97,13 +101,47 @@ const LOD_SEGS = [13, 7, 4];
 const LOD_WHORLS = [10, 5, 3];
 const LOD_BRANCH = [6, 4, 3];
 
-/** Material keys per species: [bark, foliage|null]. */
+/**
+ * Material keys per species: [bark, foliage|null].
+ *
+ * Birch used to take 'foliage-fern'. It was the wrong texture twice over: a single fern frond
+ * stretched across a 3.4 x 5 m crown card is a five-metre leaf, and it is the card whose mean
+ * alpha (0.337) sat just above the 0.30 cutout, so every birch crown in the mid-ground inflated
+ * into an opaque quad. The needle sprig tiles finely enough to read as a leaf mass at any
+ * distance, which is all ART_DIRECTION §1 asks of a canopy at night ("foliage that reads as
+ * silhouette mass rather than individual leaves"). Fern stays where a fern belongs: undergrowth.
+ */
 const SPECIES_MATS = [
   ['bark-pine', 'foliage-pine'],
   ['bark-pine', 'foliage-pine'],
-  ['bark-birch', 'foliage-fern'],
+  ['bark-birch', 'foliage-pine'],
   ['weathered-wood', null],
 ];
+
+/**
+ * ALPHA-TESTED FOLIAGE — the two numbers that stop the canopy being white rectangles.
+ *
+ * Materials ships both cutout cards at `alphaTest: 0.30`. That single threshold cannot serve
+ * both textures, because a mip chain averages alpha toward the texture's MEAN, and the two
+ * baked cards sit on opposite sides of 0.30:
+ *
+ *     foliage-pine  mean alpha 0.106   ->  0.30 discards the WHOLE card two LODs out.
+ *                                          Every conifer past ~40 m lost its needles and read
+ *                                          as a bare dead stick.
+ *     foliage-fern  mean alpha 0.337   ->  0.30 KEEPS the whole card two LODs out.
+ *                                          Every fern / birch crown became an opaque quad,
+ *                                          which the aerial-perspective term then filled with
+ *                                          fog grey: the white rectangles in shots/ridge.png.
+ *
+ * Straddle the means instead. Below the mean, the coarse mip survives (a distant conifer stays
+ * a needle mass, which is what a real one is). Above it, the coarse mip dies out entirely, so a
+ * fern fades away rather than inflating into a card. Measured off the baked 1024² textures with
+ * a readPixels histogram, not guessed.
+ */
+const FOLIAGE_ALPHA_TEST = {
+  'foliage-pine': 0.11,
+  'foliage-fern': 0.55,
+};
 
 /** Every tunable in one object. */
 export const FOREST_TUNING = {
@@ -346,6 +384,11 @@ export class Forest {
     this._colliders = [];
     this._unsub = [];
 
+    // Shared cutout foliage we have tuned. We do not own these materials — we only keep the
+    // alpha cutout honest on them, and we never dispose them.
+    this._cutoutMats = [];
+    this._msaa = null;          // null = not probed yet
+
     // canopy field
     this._cgN = 0; this._cgCell = FT.canopyCell; this._cgX0 = 0; this._cgZ0 = 0;
     this._canopy = null;
@@ -403,6 +446,7 @@ export class Forest {
       this._bakeCanopy();
       this._buildTreeBuckets(new Rand(hashInt(seed ^ 0x7ee511) | 0));
       this._buildUndergrowthBuckets(new Rand(hashInt(seed ^ 0x9a1177) | 0));
+      this._restoreCutout();
       this._registerColliders();
       this._bindEvents();
 
@@ -433,6 +477,14 @@ export class Forest {
     if (typeof this.bus?.on !== 'function') return;
     const off = this.bus.on('game:resume', () => { this._framesSinceRebuild = 999; });
     if (typeof off === 'function') this._unsub.push(off);
+    // Materials.setAlphaToCoverage() rewrites alphaTest on every cutout material it owns, and
+    // Postprocessing may call it on a quality change. Re-assert our thresholds afterwards or
+    // the canopy silently reverts to rectangles mid-night.
+    const reassert = () => { if (!this._disposed) this._restoreCutout(); };
+    for (const ev of ['night:begin', 'game:resume', 'settings:changed']) {
+      const u = this.bus.on(ev, reassert);
+      if (typeof u === 'function') this._unsub.push(u);
+    }
   }
 
   /**
@@ -442,19 +494,115 @@ export class Forest {
   _material(name, fallback) {
     try {
       const m = this.mats?.get?.(name);
-      if (m && m.isMaterial) return m;
+      if (m && m.isMaterial) { this._tuneCutout(name, m); return m; }
+      Log.once(`forest:mat:${name}`,
+        `Forest: Materials.get('${name}') returned nothing — using a local stand-in. `
+        + 'An untextured card is an opaque quad; expect flat foliage until Materials is up.');
     } catch (e) { Log.once('forest:mat', 'Forest: Materials.get failed', e); }
+    // No map means no alpha, and an alphaTest against a=1 passes every fragment. Do NOT ask
+    // for a cutout we cannot honour — a dark opaque leaf mass is an honest degradation, a
+    // white card is not.
     const mat = new THREE.MeshStandardMaterial({
       color: fallback?.color ?? 0x2a2a24,
       roughness: fallback?.roughness ?? 0.9,
       metalness: 0.0,
       side: fallback?.side ?? THREE.FrontSide,
-      alphaTest: fallback?.alphaTest ?? 0,
+      alphaTest: 0,
+      alphaToCoverage: false,
       transparent: false,
+      blending: THREE.NormalBlending,
       name: `forest-fallback-${name}`,
     });
     this._ownedMaterials.push(mat);
     return mat;
+  }
+
+  /**
+   * Is the colour pass actually multisampled? `alphaToCoverage` is a lie without MSAA: three
+   * compiles `ALPHA_TO_COVERAGE`, which replaces the hard `if (a < alphaTest) discard;` with a
+   * smoothstep written into `gl_FragColor.a` and resolved by the sample mask. With one sample
+   * per pixel there is no mask, nothing is discarded, and every needle card draws as a fully
+   * opaque quad that the aerial-perspective term then fills with fog grey.
+   *
+   * Engine builds the context with `antialias: false` and Postprocessing's targets carry no
+   * `samples`, so this returns false today — but ask rather than assume, because the day someone
+   * turns MSAA on, true alpha-to-coverage is the better image and we should get out of its way.
+   */
+  _msaaActive() {
+    try {
+      const r = this.ctx?.renderer;
+      if (!r) return false;
+      const rt = typeof r.getRenderTarget === 'function' ? r.getRenderTarget() : null;
+      if (rt && (rt.samples | 0) > 0) return true;
+      const post = this.ctx?.systems?.get?.('Postprocessing');
+      const psam = post?.sceneTarget?.samples ?? post?.target?.samples ?? 0;
+      if ((psam | 0) > 0) return true;
+      const gl = typeof r.getContext === 'function' ? r.getContext() : null;
+      const attrs = gl && typeof gl.getContextAttributes === 'function'
+        ? gl.getContextAttributes() : null;
+      return !!(attrs && attrs.antialias);
+    } catch { return false; }
+  }
+
+  /**
+   * Restore a real alpha cutout on the shared foliage cards.
+   *
+   * Materials documents `setAlphaToCoverage(bool)` as the switch Postprocessing is supposed to
+   * throw once it renders into a multisampled target (Materials.js §22/§78). Nobody ever threw
+   * it, so on high/ultra the cards shipped with A2C on against a single-sample buffer — see
+   * `_msaaActive()` for what that does to a card. Throw it here, from the module that owns 95%
+   * of the cutout geometry in the scene, and then straddle the per-texture mean alpha with
+   * FOLIAGE_ALPHA_TEST so the threshold does the work at every LOD.
+   */
+  _restoreCutout() {
+    this._msaa = this._msaaActive();
+    if (this._msaa) return;
+    try {
+      if (typeof this.mats?.setAlphaToCoverage === 'function') {
+        this.mats.setAlphaToCoverage(false);
+        Log.debug('Forest: scene target is single-sampled — alpha-to-coverage off, cutout on.');
+      }
+    } catch (e) { Log.once('forest:a2c', 'Forest: setAlphaToCoverage failed', e); }
+    for (let i = 0; i < this._cutoutMats.length; i++) {
+      const e = this._cutoutMats[i];
+      this._applyCutout(e.name, e.mat, e.depth);
+    }
+  }
+
+  /** Remember a cutout material and bring it into line. Idempotent; safe to call again. */
+  _tuneCutout(name, mat) {
+    if (FOLIAGE_ALPHA_TEST[name] === undefined) return;
+    let rec = null;
+    for (let i = 0; i < this._cutoutMats.length; i++) {
+      if (this._cutoutMats[i].mat === mat) { rec = this._cutoutMats[i]; break; }
+    }
+    if (!rec) {
+      rec = { name, mat, depth: this._depthMaterial(name) };
+      this._cutoutMats.push(rec);
+    }
+    if (this._msaa === null) this._msaa = this._msaaActive();
+    if (!this._msaa) this._applyCutout(name, rec.mat, rec.depth);
+  }
+
+  _applyCutout(name, mat, depth) {
+    const want = FOLIAGE_ALPHA_TEST[name];
+    if (want === undefined || !mat) return;
+    let dirty = false;
+    if (mat.alphaToCoverage) { mat.alphaToCoverage = false; dirty = true; }
+    if (mat.transparent) { mat.transparent = false; dirty = true; }
+    if (mat.blending !== THREE.NormalBlending) { mat.blending = THREE.NormalBlending; dirty = true; }
+    if (mat.premultipliedAlpha) { mat.premultipliedAlpha = false; dirty = true; }
+    if (Math.abs((mat.alphaTest ?? 0) - want) > 1e-4) { mat.alphaTest = want; dirty = true; }
+    if (mat.depthWrite === false) { mat.depthWrite = true; dirty = true; }
+    if (dirty) mat.needsUpdate = true;
+    // The shadow caster has to cut out on exactly the same threshold or the canopy throws a
+    // rectangular shadow that the canopy itself no longer has.
+    if (depth) {
+      let dd = false;
+      if (depth.alphaToCoverage) { depth.alphaToCoverage = false; dd = true; }
+      if (Math.abs((depth.alphaTest ?? 0) - want) > 1e-4) { depth.alphaTest = want; dd = true; }
+      if (dd) depth.needsUpdate = true;
+    }
   }
 
   _depthMaterial(name) {
@@ -1817,6 +1965,9 @@ export class Forest {
       try { this._ownedTextures[i].dispose(); } catch (e) { /* already released */ }
     }
     this._ownedTextures.length = 0;
+    // Shared library materials — we only tuned their alpha cutout. Drop the references;
+    // disposing them here would take the foliage out from under Props and CabinSite.
+    this._cutoutMats.length = 0;
 
     if (this.group) {
       if (this.group.parent) this.group.parent.remove(this.group);
