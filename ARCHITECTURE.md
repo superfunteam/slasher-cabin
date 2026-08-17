@@ -284,6 +284,48 @@ Boot takes ~8s (procedural texture baking, terrain generation). Poll
 Other agents editing files triggers a Vite hot reload that restarts boot underneath you — if a
 probe returns nothing, poll again rather than concluding the system is broken.
 
+## 11d. Measuring the image — calibrate the instrument, or do not report
+
+**Three separate instrumentation bugs on this project produced confident, precise, and
+completely wrong numbers.** Each one read as rigorous — histograms, percentiles, before/after
+tables — and each sent real work in the wrong direction:
+
+1. `Engine.captureFrame()` rendered a frame immediately after a resize, which clears TAA history
+   and the volumetric reprojection. Every capture was a cold frame the game never displays:
+   75.6% of pixels below luminance 0.02, where the warm frame reads 28.3%. **Five stops.**
+2. A luma metric computed on sRGB bytes **without linearizing**. It inverted the sign of the
+   error, "proved" the frame was darker than the reference when it was 2-4x brighter, and a
+   regression was committed on the strength of it.
+3. An evaluator, finding rAF throttled in a hidden browser pane, drove the engine by hand-stepping
+   systems and calling `_render()` directly. That starves exposure adaptation of real frame
+   deltas: it measured `ridge` at meanY 0.1759 where the same shot captured properly reads
+   **0.02408 — a 7.3x error**, and reported the build 8x over spec when it was in spec.
+
+### The rules
+
+- **Use `tools/luma.mjs`.** It measures in the space the spec is written in (sRGB byte -> linear
+  -> Rec.709 Y) and it **refuses to report until it reproduces `keyart-site.png` at meanY 0.0218
+  and 79.77% below 0.02.** If that gate fails, the tool is broken and nothing it says counts.
+- **Capture only via `window.__CAPTURE__(name, w, h)`.** It converges 70 frames after a resize.
+  Never hand-step systems and call `_render()` yourself to work around a throttled pane — the
+  numbers will be wrong by multiples, not percentages.
+- **A measurement claim must show the instrument reproducing a known reference before it is
+  acted on.** "I measured X" is not evidence. "I measured the reference correctly, and then
+  measured X" is.
+
+### The contract (ART_DIRECTION 3.1.1, night 1 / fog <= 0.8)
+
+| quantity | window | keyart-site actual |
+|---|---|---|
+| mean frame luminance | 0.018 - 0.028 | 0.0218 |
+| blackest 1% | 0.002 - 0.006 | 0 |
+| min channel | >= 3 | 0 |
+| zero-channel pixels | 0% | 4.31% |
+
+Note the reference itself fails the last two rows. The floor requirement is stricter than the
+image it exists to match, so do not chase it at the cost of the mean — the mean is the one that
+reads as wrong to a human eye.
+
 ## 12. Performance guardrails
 
 - No allocations in `update()`. Reuse scratch vectors (`const _v = new THREE.Vector3()` at
