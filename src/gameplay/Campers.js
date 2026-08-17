@@ -195,6 +195,28 @@ export const CAMPER_TUNING = {
   skylineHz: 7.5,
   gridRejectBelow: 0.02,
 
+  // --- THE PLOT VIGIL. GAME_DESIGN §3.5 (Tier 2, 58–108 m: "1 patrol passes every ~50 s") and
+  // §9.5 (a structure report "routes a patrol past the plot every ~110 s") both require that a
+  // camper is periodically inside earshot of the build site. Navmesh authors exactly that route —
+  // `the-long-way-round` turns at its own `plot-approach` anchor, 26 m out — and it is the right
+  // owner for it. But a route is only as good as the ground it resolves onto: if that waypoint
+  // fails to validate, the route silently drops it, every live loop stays 180+ m away, and NOTHING
+  // the player builds can ever be heard by anyone. That is not a difficulty setting, it is the
+  // game not having a consequence system. So Campers measures the roster's actual closest approach
+  // and, when nothing is coming, walks one person out to the site itself. It is a fallback: the
+  // instant a real route delivers the proximity, the vigil stands down and never fires.
+  plotWatchPeriod: 110.0,       // §9.5's cadence, and the ceiling on how often this may happen
+  plotWatchEarshot: 60.0,       // m — somebody is already close enough; do nothing
+  plotWatchRouteRange: 70.0,    // m — a walked route already comes this close; do nothing
+  plotWatchStandoff: 30.0,      // m — where the vigil stops. Navmesh's keep-out is 16 m (§9.6).
+  plotWatchHold: 11.0,          // s standing at the turn, torch on the frame
+  // 300 s of walking, which is a lot, and it is measured rather than guessed: the camp resolves
+  // ~300 m from the plot at runtime, and 300 m at 1.2 m/s is 250 s. GAME_DESIGN §3.3 puts the
+  // camp buildings 142–176 m out, so this budget is roughly twice what the design intends and
+  // should be halved the day the site layout matches the document.
+  plotWatchTimeout: 300.0,      // s — a vigil never eats a whole night
+  plotWatchMinNight: 2,         // §12.2: Night 1's single camper is theatre and must stay theatre
+
   // --- group behaviour
   shareRadius: 7.0,
   shareCooldown: 6.0,
@@ -384,6 +406,16 @@ function approachAngle(current, target, maxStep) {
   return current + Math.sign(d) * maxStep;
 }
 function isNum(v) { return typeof v === 'number' && Number.isFinite(v); }
+/**
+ * Routes are ranked by how close they bring their walker to the build site, nearest first, so the
+ * loop that creates tension is the one that gets a body on it. Hoisted to module scope because
+ * `_assignRoutes` sorts with it and a comparator literal inside an update path is an allocation.
+ */
+function byPlotApproach(a, b) {
+  const x = isNum(a?.nearestPlotApproach) ? a.nearestPlotApproach : 1e9;
+  const y = isNum(b?.nearestPlotApproach) ? b.nearestPlotApproach : 1e9;
+  return x - y;
+}
 
 // =================================================================================================
 // CamperAgent — one person. Everything mutable about them lives here; nothing here allocates
@@ -504,6 +536,13 @@ export class CamperAgent {
     this.routeLeg = 0;
     this.dwell = 0;
 
+    // Plot vigil (see CAMPER_TUNING.plotWatch*). Still `Idle` — this IS patrolling, so senses,
+    // hearing and the FSM all behave exactly as they do on a route.
+    this.vigil = new THREE.Vector3();
+    this.vigilActive = false;
+    this.vigilHold = 0;
+    this.vigilT = 0;
+
     // Report
     this.report = null;           // { kind:'short'|'long', t, target, met, pos }
     this.interceptT = 0;
@@ -592,6 +631,7 @@ export class CamperAgent {
     this.state = 'Idle'; this.stateT = 0; this.scripted = null;
     this.route = null; this.pathLen = 0; this.pathIdx = 0; this.hasGoal = false;
     this.stumbleT = 0; this.proneT = 0; this.buddy = null;
+    this.vigilActive = false; this.vigilHold = 0; this.vigilT = 0;
     this.notice = Object.create(null);
     this.noticingFeature = null;
   }
@@ -652,6 +692,11 @@ export class Campers {
     this._lumAt = -1e3;
     this._lum = 0.06;
     this._routeAt = -1e3;
+    this._plotWatchAt = -1e3;
+    this._plotWatchLast = -1e3;
+    /** Diagnostic, public: the roster's closest approach to the plot, and the best live route's. */
+    this.nearestToPlot = Infinity;
+    this.nearestRouteToPlot = Infinity;
     this._shareAt = -1e3;
     this._pairAt = -1e3;
     this._flashPrev = 0;
@@ -837,7 +882,24 @@ export class Campers {
     const nav = this._navmesh;
     const anchors = ['camp', 'firepit', 'cabins', 'mess', 'dock', 'woodpile', 'office'];
     let p = null;
-    if (nav?.anchor) {
+
+    // Start people ON their own loop rather than stacked around the fire. A roster that begins in
+    // one huddle spends the first minutes of every night walking out of it, and those are minutes
+    // in which nothing can happen to the player. Night 1 is exempt: §12.2 puts `dale` alone and
+    // far away on purpose, and that theatre is load-bearing for the tutorial.
+    if (night >= CAMPER_TUNING.plotWatchMinNight && Array.isArray(nav?.patrolRoutes)) {
+      const routes = nav.patrolRoutes;
+      for (let i = 0; i < routes.length; i++) {
+        const r = routes[i];
+        if (!r || r.enabled === false || !r.points?.length) continue;
+        if (night < (r.minNight ?? 1) || night > (r.maxNight ?? 7)) continue;
+        if (!Array.isArray(r.preferred) || r.preferred.indexOf(a.id) < 0) continue;
+        p = r.points[(a.index + night) % r.points.length];
+        break;
+      }
+    }
+
+    if (!p && nav?.anchor) {
       // Deterministic per (id, night) so a reloaded night looks the same (§18.5).
       const pick = anchors[(a.index * 3 + night * 5) % anchors.length];
       p = nav.anchor(pick) ?? nav.anchor('camp');
@@ -938,6 +1000,7 @@ export class Campers {
     this._updateIllumination(now, ppos);
     this._updateFlash(now, ppos);
     if (now - this._routeAt > 1.0) { this._routeAt = now; this._assignRoutes(); }
+    this._tickPlotWatch(now);
     if (now - this._pairAt > 4.0) { this._pairAt = now; this._pairUp(); }
 
     // --- senses -------------------------------------------------------------------------------
@@ -1943,6 +2006,31 @@ export class Campers {
    * Marg gets the dock, Teddy gets the firewood run, and Bev walks her own perimeter.
    */
   _patrol(a, dt, now) {
+    // The vigil outranks the route and the dwell, and only ever runs while Idle, so a noise hit
+    // still takes this person straight to Curious/Searching out of the middle of it.
+    if (a.vigilActive) {
+      a.vigilT += dt;
+      const d = Math.hypot(a.vigil.x - a.position.x, a.vigil.z - a.position.z);
+      if (a.vigilHold <= 0 && d > 2.4) {
+        if (a.vigilT > CAMPER_TUNING.plotWatchTimeout) { a.vigilActive = false; return; }
+        this._goTo(a, a.vigil, now);
+        this._idleScan(a, dt, now);
+        return;
+      }
+      a.vigilHold += dt;
+      a.speed = 0;
+      a.hasGoal = false;
+      const plot = this._plotCenter();
+      if (plot) this._lookAt(a, plot, dt, 1.1);
+      else this._idleScan(a, dt, now);
+      if (a.vigilHold >= CAMPER_TUNING.plotWatchHold) {
+        a.vigilActive = false;
+        a.pathLen = 0;
+        a.dwell = 0;
+      }
+      return;
+    }
+
     if (a.dwell > 0) {
       a.dwell -= dt;
       a.speed = 0;
@@ -2197,6 +2285,10 @@ export class Campers {
     const night = this.ctx?.state?.night ?? 1;
     const ton = this.ctx?.state?.timeOfNight ?? 0;
     const live = nav.routesFor(night, ton, _routeScratch);
+    // Nearest-to-the-plot first. Which route a camper walks is this file's decision, and the one
+    // that matters is the one that puts a person inside earshot of the thing the player is
+    // hammering. Sorted in place on Navmesh's reusable scratch array — no allocation.
+    live.sort(byPlotApproach);
 
     // Release slots whose route left its window, or whose holder is no longer patrolling.
     for (const [rid, holderId] of this._routeTaken) {
@@ -2237,6 +2329,120 @@ export class Campers {
   _recomputeDensity() {
     const raw = 2 + Math.floor(clamp01(this.suspicion) * 6);
     this.patrolDensity = clamp(raw, this.nightMinDensity, this.nightMaxDensity);
+  }
+
+  // ===============================================================================================
+  // THE PLOT VIGIL — the guarantee that somebody, sometimes, is close enough to hear the cabin
+  // ===============================================================================================
+
+  /** The build site, from whoever is willing to say where it is. */
+  _plotCenter() {
+    const a = this._navmesh?.anchor?.('plot');
+    if (a && isNum(a.x)) return a;
+    const cs = this._cabin;
+    const c = cs?.center ?? cs?.origin ?? this._terrain?.buildSiteCenter ?? null;
+    return (c && isNum(c.x)) ? c : null;
+  }
+
+  /**
+   * A standing point ~30 m from the plot, on walkable ground, on the side the camper is already
+   * on so the approach reads as a patrol arriving rather than a spawn. Rings inward because the
+   * ground immediately around the site may be blocked (foliage, the plot's own keep-out); the
+   * bearing sweep alternates either side of the camper's own direction for the same reason.
+   * @returns {boolean} false only if nobody can say where the plot is.
+   */
+  _plotApproachPoint(a, out) {
+    const plot = this._plotCenter();
+    if (!plot) return false;
+    const nav = this._navmesh;
+    const base = Math.atan2(a.position.x - plot.x, a.position.z - plot.z);
+    for (let ring = 0; ring < 4; ring++) {
+      const r = CAMPER_TUNING.plotWatchStandoff - ring * 4;      // 30, 26, 22, 18
+      for (let k = 0; k < 12; k++) {
+        const th = base + (k % 2 ? -1 : 1) * Math.ceil(k * 0.5) * (Math.PI / 6);
+        const x = plot.x + Math.sin(th) * r;
+        const z = plot.z + Math.cos(th) * r;
+        if (nav?.isWalkable && !nav.isWalkable(x, z)) continue;
+        out.set(x, this._groundAt(x, z), z);
+        return true;
+      }
+    }
+    // Nothing walkable anywhere near the site. Go anyway on the straight bearing — `_goTo` falls
+    // back to direct steering when `findPath` fails, and a camper who cannot reach the plot is
+    // exactly the failure this whole method exists to survive.
+    const x = plot.x + Math.sin(base) * CAMPER_TUNING.plotWatchStandoff;
+    const z = plot.z + Math.cos(base) * CAMPER_TUNING.plotWatchStandoff;
+    out.set(x, this._groundAt(x, z), z);
+    return true;
+  }
+
+  /**
+   * Once a second: measure how close the camp actually gets to the build site, and if the answer
+   * is "never", send one person. Published as `nearestToPlot` / `nearestRouteToPlot` so this is
+   * checkable from the console rather than argued about.
+   */
+  _tickPlotWatch(now) {
+    const T = CAMPER_TUNING;
+    if (now - this._plotWatchAt < 1.0) return;
+    this._plotWatchAt = now;
+
+    const plot = this._plotCenter();
+    if (!plot) { this.nearestToPlot = Infinity; this.nearestRouteToPlot = Infinity; return; }
+
+    let nearest = Infinity, routeNearest = Infinity, onVigil = null;
+    for (let i = 0; i < this.agents.length; i++) {
+      const a = this.agents[i];
+      if (!a.alive) continue;
+      const d = Math.hypot(a.position.x - plot.x, a.position.z - plot.z);
+      if (d < nearest) nearest = d;
+      const rn = a.route?.nearestPlotApproach;
+      if (isNum(rn) && rn < routeNearest) routeNearest = rn;
+      if (a.vigilActive) {
+        // A vigil PAUSES rather than ends when the camper reacts to something: `_patrol` only runs
+        // in Idle, so Noticing/Curious/Searching suspend it for free and it picks up where it left
+        // off. Cancelling here instead was measured stopping the walk dead at 47 m — the camper
+        // noticed the frame (§9.5), spent 4 s on it, went back to Idle, and then wandered off
+        // again having never got close enough for a creak to be audible. Only the states that make
+        // the errand moot end it.
+        if (a.scripted || a.vigilT > T.plotWatchTimeout
+          || a.state === 'Alerted' || a.state === 'Panic' || a.state === 'Reporting') {
+          a.vigilActive = false; a.vigilHold = 0;
+        } else onVigil = a;
+      }
+    }
+    this.nearestToPlot = nearest;
+    this.nearestRouteToPlot = routeNearest;
+    if (onVigil) return;
+
+    const night = this.ctx?.state?.night ?? 1;
+    if (night < T.plotWatchMinNight && !this.structureReported) return;
+
+    // Covered already: either somebody is inside earshot, or a route being walked comes close
+    // enough on its own. Navmesh doing its job is the good case and we stay out of it.
+    if (nearest <= T.plotWatchEarshot || routeNearest <= T.plotWatchRouteRange) {
+      this._plotWatchLast = now;
+      return;
+    }
+    if (now - this._plotWatchLast < T.plotWatchPeriod) return;
+
+    let pick = null, pickD = Infinity;
+    for (let i = 0; i < this.agents.length; i++) {
+      const a = this.agents[i];
+      if (!a.alive || a.scripted || a.state !== 'Idle') continue;
+      const d = Math.hypot(a.position.x - plot.x, a.position.z - plot.z);
+      if (d < pickD) { pickD = d; pick = a; }
+    }
+    if (!pick || !this._plotApproachPoint(pick, pick.vigil)) return;
+    pick.vigilActive = true;
+    pick.vigilHold = 0;
+    pick.vigilT = 0;
+    pick.dwell = 0;
+    pick.pathLen = 0;
+    this._plotWatchLast = now;
+    Log.once('campers:plotwatch',
+      `Campers: no live patrol route comes within ${T.plotWatchRouteRange} m of the build site`
+      + ` (best is ${routeNearest === Infinity ? 'none' : routeNearest.toFixed(0) + ' m'}),`
+      + ' so a camper is being walked out to it. Fix the route and this stops firing.');
   }
 
   // ===============================================================================================

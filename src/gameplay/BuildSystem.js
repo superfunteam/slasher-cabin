@@ -62,6 +62,7 @@
  *   pocket        toolBelt           shortfalls repairIntent  carryClass  carryMass
  *   carrySpeedMultiplier  carryTurnMultiplier  canCrouch  canSprint  blocksView
  *   footstepNoiseMultiplier  maskWindowRemaining  nextStrikeIn  maskLevel
+ *   plot          map                (the world frame — see MAP_DEF)
  *
  *   // verbs
  *   pickUp(partOrId)        dropHeld()          setDownHeld()      throwHeld(power = 1)
@@ -73,6 +74,9 @@
  *   // reads for other systems
  *   inspect(slotId) -> Diagnosis|null       visualStateFor(slotId) -> string
  *   joinsNear(x, z, r, out) -> count        shortfallInfo(toolId) -> object|null
+ *
+ *   // hooks Player calls into (Player.js probes for these by name)
+ *   dropPart(part, { silent }) -> bool      onDrop(part, silent, player) -> bool
  *   slotById(id) -> Slot|null               partById(id) -> Part|null
  *   featureHeights() -> { featureId: y }    isDeferred(slotId) -> bool
  *
@@ -332,13 +336,68 @@ export const NIGHT_TABLE = Object.freeze([
   { n: 7, title: 'SOME ASSEMBLY REQUIRED', slots: 8, stages: 1, seconds: Infinity, grammar: 'G7', rain: 0.05, wind: 0.10 },
 ]);
 
-/** §3.3 named locations, XZ. Used for pile and shortfall placement when Props is absent. */
-const MAP = Object.freeze({
-  plot: [0, 0], palletA: [4, 12], palletB: [-9, 16], apron: [11, 24], woodpile: [33, 32],
-  stump: [29, -5], ridge: [-58, 4], sinkProp: [-48, -35], canoeRack: [61, -58],
-  boathouse: [74, -61], dock: [86, -66], toolShed: [-22, 129], cabins: [18, 141],
-  truck: [37, 145], messHall: [79, 148], payphone: [84, 154], fallenLog: [-22, -23],
+/**
+ * §3.3's named locations. **EVERY ROW IS `[frame, x, z, propsAnchor?]` AND THE FRAME IS THE WHOLE
+ * POINT.** Read this before you touch a number.
+ *
+ * WHAT WENT WRONG BEFORE. This table used to be a flat `{ name: [x, z] }` copied straight out of
+ * §3.3 with `plot: [0, 0]`, and every consumer treated the pairs as world coordinates. The world
+ * does not put the plot at the origin: `Terrain.buildPad` is **(-140, 128)** and `CabinSite.center`
+ * agrees. So the pile spawned around world (0, 0) while the slot graph stood at (-140, 128), and
+ * the opening haul that §17 designs as **12 m** measured **163-199 m** in a real playtest.
+ *
+ * WHY IT IS NOT JUST "ADD THE PLOT TO EVERY ROW". §3.3 tabulates the *entire* map relative to the
+ * plot, camp included — the tool shed is listed at (-22, 129), 131 m out. The built world does not
+ * agree about the camp: `Terrain.camp` is **(124, -18)**, which is 302 m from the pad, not 142.
+ * Adding the plot to §3.3's camp rows would drop the mess hall in the lake. So the table is split
+ * by frame, and each frame is resolved at runtime against the system that actually owns that
+ * landmark (`_resolveMap()`), exactly as `Props.js` resolves `PART_SITE_DEFS` / `STORY_ANCHOR`:
+ *
+ *   'plot' — `Terrain.buildSiteCenter`, else `CabinSite.center`, else `PLOT_FALLBACK`.
+ *            These rows ARE §3.3's numbers verbatim and §3.3's distances hold exactly.
+ *   'camp' — `Props.anchors.get('camp')`, else `Terrain.campCenter`, else `CAMP_FALLBACK`.
+ *            Offsets are `Props`' own camp builders (mess hall camp+(15,-8), tool shed
+ *            camp+(30,-14), bus turnaround camp+(34,26), laundry-derived cabins camp+(-11,-2)),
+ *            NOT §3.3's plot-relative pairs.
+ *   'dock' — `Props.anchors.get('dock')`, else `Terrain.dock`, else `DOCK_FALLBACK`.
+ *            Offsets are `Props.STORY_ANCHOR.boathouse_door` (dock+(-13,5)) and
+ *            `Props.PART_SITE_DEFS['canoe-rack']` (dock+(7.5,8)).
+ *
+ * The optional 4th field is the name `Props._publishAnchors()` uses; when Props is in the build
+ * that published position wins outright and the offset is never used.
+ *
+ * Resolved world positions live on `this.map` (rebuilt once per `beginNight`). Nothing in this
+ * file may read `MAP_DEF` directly for a position.
+ */
+const MAP_DEF = Object.freeze({
+  // ---- plot frame (§3.3 verbatim). Tier 1 and Tier 2 — the build and scavenge ring.
+  plot: ['plot', 0, 0, 'plot'],
+  palletA: ['plot', 4, 12],            // 12 m — the tutorial haul. §17's opening shot.
+  palletB: ['plot', -9, 16],           // 18 m
+  apron: ['plot', 11, 24],             // 26 m
+  woodpile: ['plot', 33, 32],          // 46 m
+  stump: ['plot', 29, -5],             // 30 m
+  ridge: ['plot', -58, 4],             // 58 m
+  sinkProp: ['plot', -48, -35],        // 59 m
+  fallenLog: ['plot', -22, -23],       // 32 m — Night 1's shim, down the slope
+  // ---- dock frame. §3.3 calls these 84-108 m; in the world they hang off Terrain.dock.
+  dock: ['dock', 0, 0, 'dock'],
+  boathouse: ['dock', -13, 5],
+  canoeRack: ['dock', 7.5, 8, 'canoe-rack'],
+  // ---- camp frame. §3.3's Tier 3 cluster. Never plot-relative in the built world.
+  cabins: ['camp', -11, -2, 'cabins'],
+  messHall: ['camp', 15, -8, 'mess'],
+  toolShed: ['camp', 30, -14, 'toolshed'],
+  truck: ['camp', 34, 26, 'draw'],
+  // The payphone alcove is the one row with no authored structure to anchor to; it sits by the
+  // camp office, which Props places at camp+(20,-6). Approximate, and deliberately so.
+  payphone: ['camp', 22, -12],
 });
+
+/** Last-resort frame origins, from `Terrain.TERRAIN_TUNING`. Only used if Terrain is missing. */
+const PLOT_FALLBACK = Object.freeze({ x: -140, z: 128 });
+const CAMP_FALLBACK = Object.freeze({ x: 124, z: -18 });
+const DOCK_FALLBACK = Object.freeze({ x: 106, z: -72 });
 
 /** §6.9 — the missing-hardware comedy engine, per night. `toolId`s match `Script.beats` triggers. */
 const SHORTFALLS = Object.freeze({
@@ -658,6 +717,13 @@ export class BuildSystem {
     this.currentNight = 0;
     this.stageCount = 1;
     this.stage = 1;
+    /**
+     * The build site, in WORLD metres. Derived from Terrain/CabinSite in `_resolvePlot()`, never
+     * hardcoded — a second source of truth for this one number is what put the pile 180 m away.
+     */
+    this.plot = new THREE.Vector3(PLOT_FALLBACK.x, 0, PLOT_FALLBACK.z);
+    /** @type {Object<string, [number, number]>} MAP_DEF resolved to world XZ. Rebuilt per night. */
+    this.map = Object.create(null);
     /** @type {Map<string, object>} every slot of nights 1..currentNight — the cabin persists */
     this.slots = new Map();
     /** @type {Array} the current night's slots, in stage order */
@@ -680,6 +746,7 @@ export class BuildSystem {
 
     // --- placement
     this.targetSlot = null;
+    this.snapDistance = Infinity;   // m to the current snap target, for HUD/diagnostics
     this.ghostValid = false;
     this._carryYaw = 0;
     this._nearestCandidate = 0;
@@ -921,6 +988,11 @@ export class BuildSystem {
     const night = clamp(n | 0 || 1, 1, 7);
     this.currentNight = night;
 
+    // The world frame FIRST: everything below — the fallback slot graph, the pile, the shortfall
+    // hints — is positioned against it.
+    this._resolvePlot();
+    this._resolveMap();
+
     const def = this.script?.nightDef?.(night) ?? null;
     const row = NIGHT_TABLE[night - 1];
     this.stageCount = Math.max(1, (def?.stageCount | 0) || row.stages);
@@ -940,7 +1012,14 @@ export class BuildSystem {
           if (!list.length) list = null;
         }
       }
-      if (!list || !list.length) list = packStages(nightSlots(k), (this.script?.nightDef?.(k)?.stageCount | 0) || NIGHT_TABLE[k - 1].stages);
+      if (!list || !list.length) {
+        // The local graph is authored PLOT-RELATIVE (§6.3's 14 x 10 m footprint about 0,0).
+        // CabinSite's is already world (`CabinSite._buildSlotGraph` adds `center` itself), so
+        // only the fallback is lifted into the world frame — and it must be, or the pile lands
+        // 180 m from the slots.
+        list = packStages(nightSlots(k), (this.script?.nightDef?.(k)?.stageCount | 0) || NIGHT_TABLE[k - 1].stages);
+        this._toWorld(list);
+      }
       for (let i = 0; i < list.length; i++) {
         const s = this._normaliseSlot(list[i], k);
         this.slots.set(s.id, s);
@@ -981,6 +1060,78 @@ export class BuildSystem {
     this._rebuildInstalledVisuals();
     this._advanceStage(true);
   }
+
+  /**
+   * Where the cabin is being built, in world metres. `Terrain.buildSiteCenter` is the origin of
+   * record — `CabinSite.center` copies it, `Player`'s spawn offsets from it, and `Shots` poses
+   * 'buildSite' from it. CabinSite is the second choice for the same number, and only if both are
+   * gone do we fall back to the literal, which is `Terrain.TERRAIN_TUNING.buildPad`.
+   */
+  _resolvePlot() {
+    const t = this.ctx?.systems?.get?.('Terrain')?.buildSiteCenter;
+    const c = this.ctx?.systems?.get?.('CabinSite')?.center;
+    const src = (t && Number.isFinite(t.x) && Number.isFinite(t.z)) ? t
+      : (c && Number.isFinite(c.x) && Number.isFinite(c.z)) ? c : null;
+    const x = src ? src.x : PLOT_FALLBACK.x;
+    const z = src ? src.z : PLOT_FALLBACK.z;
+    let y = this._groundAt(x, z);
+    if (!Number.isFinite(y) || y === 0) y = Number.isFinite(src?.y) ? src.y : 0;
+    this.plot.set(x, y, z);
+    if (!src) {
+      Log.once('bs:plot', 'BuildSystem: no Terrain.buildSiteCenter and no CabinSite.center — '
+        + `using the literal build pad (${PLOT_FALLBACK.x}, ${PLOT_FALLBACK.z}).`);
+    }
+  }
+
+  /**
+   * Resolve `MAP_DEF` into world XZ on `this.map`. Props' published anchors win when they exist,
+   * because Props actually built the structure; otherwise frame origin + offset. See MAP_DEF's
+   * header for why the frames exist at all.
+   */
+  _resolveMap() {
+    const terr = this.ctx?.systems?.get?.('Terrain');
+    const props = this.ctx?.systems?.get?.('Props');
+    const anchors = props?.anchors instanceof Map ? props.anchors : null;
+
+    const origin = (name, terrainKey, fallback) => {
+      const a = anchors?.get(name);
+      if (a && Number.isFinite(a.x) && Number.isFinite(a.z)) return [a.x, a.z];
+      const v = terr?.[terrainKey];
+      if (v && Number.isFinite(v.x) && Number.isFinite(v.z)) return [v.x, v.z];
+      return [fallback.x, fallback.z];
+    };
+    const frames = {
+      plot: [this.plot.x, this.plot.z],
+      camp: origin('camp', 'campCenter', CAMP_FALLBACK),
+      dock: origin('dock', 'dock', DOCK_FALLBACK),
+    };
+
+    for (const name of Object.keys(MAP_DEF)) {
+      const [frame, ox, oz, propsName] = MAP_DEF[name];
+      const pub = propsName ? anchors?.get(propsName) : null;
+      if (pub && Number.isFinite(pub.x) && Number.isFinite(pub.z)) {
+        this.map[name] = [pub.x, pub.z];
+        continue;
+      }
+      const f = frames[frame] ?? frames.plot;
+      this.map[name] = [f[0] + ox, f[1] + oz];
+    }
+  }
+
+  /** Lift a plot-relative fallback slot list into the world frame. In place. */
+  _toWorld(list) {
+    const { x, y, z } = this.plot;
+    for (let i = 0; i < list.length; i++) {
+      const s = list[i];
+      if (!s) continue;
+      s.px += x; s.py += y; s.pz += z;
+      if (s.bounds?.isBox3) s.bounds.translate(this.plot);
+    }
+    return list;
+  }
+
+  /** Metres from the build site, on the ground plane. The number §3.3 tabulates. */
+  _distFromPlot(x, z) { return Math.hypot(x - this.plot.x, z - this.plot.z); }
 
   /** Accept a foreign Slot (CabinSite's) and fill in every field this file relies on. */
   _normaliseSlot(raw, night) {
@@ -1085,7 +1236,7 @@ export class BuildSystem {
       const spec = PART_TYPES[partId];
       if (!spec) continue;
       const hold = withheld.get(partId) || 0;
-      const anchor = spec.cls === 'D' || spec.cls === 'endLift' ? MAP.apron : MAP[anchors[ai++ % anchors.length]];
+      const anchor = spec.cls === 'D' || spec.cls === 'endLift' ? this.map.apron : this.map[anchors[ai++ % anchors.length]];
       for (let i = 0; i < count - hold; i++) {
         const a = rnd.range(0, TAU), r = rnd.range(0.6, 2.8);
         this._makePart(partId, anchor[0] + Math.cos(a) * r, anchor[1] + Math.sin(a) * r, rnd);
@@ -1100,7 +1251,7 @@ export class BuildSystem {
     this.pocket.boards = rnd.int(2, 3);          // sistering boards, for Recut
     for (let i = 0; i < rnd.int(4, 9); i++) {
       const a = rnd.range(0, TAU), r = rnd.range(4, 30);
-      this._makePart('FASTENER_BAG', MAP.palletB[0] + Math.cos(a) * r, MAP.palletB[1] + Math.sin(a) * r, rnd);
+      this._makePart('FASTENER_BAG', this.map.palletB[0] + Math.cos(a) * r, this.map.palletB[1] + Math.sin(a) * r, rnd);
     }
 
     // Night 3's ridge arrives 340 mm over-long and nothing is missing, which is worse.
@@ -1113,7 +1264,7 @@ export class BuildSystem {
     for (let i = 0; i < short.length; i++) {
       const sh = short[i];
       if (!sh.partId || !sh.at) continue;
-      const anchor = MAP[sh.at] || MAP.woodpile;
+      const anchor = this.map[sh.at] || this.map.woodpile;
       for (let c = 0; c < (sh.count || 1); c++) {
         const p = this._makePart(sh.partId, anchor[0] + rnd.range(-2, 2), anchor[1] + rnd.range(-2, 2), rnd);
         if (p) { p.shortfallOf = sh.toolId; p.isShortfall = true; }
@@ -1130,6 +1281,10 @@ export class BuildSystem {
     const part = {
       id, partId, type: spec.type, name: partId,
       mass: spec.mass, cls: spec.cls, length: spec.length,
+      // `carryClass` is the name PLAYER reads (`Player.classForMass(mass, hint)`); `cls` is the
+      // name this file reads. Same value, published under both so the 1.2 kg bracket does not
+      // fall out of class B into class A on Player's mass-only inference.
+      carryClass: spec.cls,
       radius: Math.max(0.04, Math.min(spec.dims[1], spec.dims[2]) * 0.5),
       dims: spec.dims, read: spec.read,
       state: 'pile', slotId: null, sawProgress: 0, sawPasses: 0,
@@ -1324,21 +1479,32 @@ export class BuildSystem {
     if (input.wasReleased?.('interact')) this._onInteractReleased();
     if (this._eHold > 0) this._onInteractHeld(this._eHold);
 
-    // Q — tap drops (instant, loud); hold 2.1 s sets down (silent). §10.3.
-    if (input.isDown?.('drop')) {
-      this._qHold += dt;
-      if (this._qHold >= TUNING.setDownSeconds && this.heldParts.length) { this.setDownHeld(); this._qHold = -1e9; }
-    } else {
-      if (this._qHold > 0 && this._qHold < TUNING.setDownSeconds) this.dropHeld();
+    // Q and G belong to Player once Player has the load: Player runs the same tap/hold
+    // discrimination and calls `dropPart()` back into this file, so polling them here as well
+    // would fire the verb twice and emit §9.8's drop noise twice. The two blocks below are the
+    // no-Player fallback. NOTE: guard, not an early return — rotate and place are ours in every
+    // configuration and must keep running while a part is in the hands.
+    const playerDrives = this._playerOwnsCarry();
+    if (playerDrives) {
       this._qHold = 0;
-    }
-
-    // G — throw. Holding charges it; releasing lets go. See conflict note 3.
-    if (input.isDown?.('throwPart')) {
-      this._gHold = Math.min(this._gHold + dt, 1.2);
-    } else if (this._gHold > 0) {
-      this.throwHeld(0.45 + 0.55 * clamp01(this._gHold / 1.2));
       this._gHold = 0;
+    } else {
+      // Q — tap drops (instant, loud); hold 2.1 s sets down (silent). §10.3.
+      if (input.isDown?.('drop')) {
+        this._qHold += dt;
+        if (this._qHold >= TUNING.setDownSeconds && this.heldParts.length) { this.setDownHeld(); this._qHold = -1e9; }
+      } else {
+        if (this._qHold > 0 && this._qHold < TUNING.setDownSeconds) this.dropHeld();
+        this._qHold = 0;
+      }
+
+      // G — throw. Holding charges it; releasing lets go. See conflict note 3.
+      if (input.isDown?.('throwPart')) {
+        this._gHold = Math.min(this._gHold + dt, 1.2);
+      } else if (this._gHold > 0) {
+        this.throwHeld(0.45 + 0.55 * clamp01(this._gHold / 1.2));
+        this._gHold = 0;
+      }
     }
 
     if (input.wasPressed?.('rotateCW')) this.rotateHeld(1);
@@ -1461,6 +1627,9 @@ export class BuildSystem {
    * NEAREST OF k CANDIDATES and the ghost renders IDENTICALLY for every one of them — a correct
    * candidate and an incorrect candidate look exactly the same. The only tell is the part: a
    * chamfer, a bolt pattern, a pencil mark, readable at 2.2 m under the lantern and not beyond.
+   *
+   * The 0.65 m is measured by `_snapDistance()`, NOT as a plain sphere about the hands. Read that
+   * method before changing this loop — the sphere is unsatisfiable for 54 of the 90 slots.
    */
   _updateSnap() {
     const part = this.heldPart;
@@ -1470,16 +1639,20 @@ export class BuildSystem {
     }
 
     const pos = part.object3D ? part.object3D.position : this._eye(_v3);
+    const eye = this._eye(_v1);
+    this._forward(_fwd);
     let best = null, bestD = TUNING.snapRadius;
     for (let i = 0; i < this.nightSlots.length; i++) {
       const s = this.nightSlots[i];
       if (this.joins.has(s.id) || s.kind === 'freeform') continue;
-      const dx = s.px - pos.x, dy = s.py - pos.y, dz = s.pz - pos.z;
-      const d = Math.sqrt(dx * dx + dy * dy + dz * dz);
+      const d = this._snapDistance(s, eye, _fwd, pos);
       if (d < bestD) { bestD = d; best = s; }
     }
     this.targetSlot = best;
-    if (!best) { this._showGhost(null, false); this._nearestCandidate = 0; return; }
+    this.snapDistance = best ? bestD : Infinity;
+    // Clear `ghostValid` too, or it stays true from the last slot the player walked away from and
+    // the force-place branch (`targetSlot && !ghostValid`) reads a ghost that is no longer there.
+    if (!best) { this.ghostValid = false; this._showGhost(null, false); this._nearestCandidate = 0; return; }
 
     const k = Math.max(1, best.yawCandidates | 0);
     const step = TAU / k;
@@ -1492,6 +1665,35 @@ export class BuildSystem {
     const cutOk = !best.requiresCut || (part.sawProgress ?? 0) >= 1;
     this.ghostValid = typeOk && depsOk && cutOk && !best.obstruction;
     this._showGhost(best, this.ghostValid);
+  }
+
+  /**
+   * How near the player is to PRESENTING this part at this slot, in metres, against §6.3's 0.65 m.
+   *
+   * The literal reading — sphere of 0.65 m about the carried part's origin — is unsatisfiable for
+   * most of the cabin, and measurably so. The hands are a rigid anchor on the camera at local
+   * (0.30, -0.44, -1.05), so with a 1.70 m eye the part rides at a FIXED +1.27 m above the pad.
+   * A pier centre sits at +0.20: measured 1.073 m below the part from every standing position,
+   * 0.42 m outside a radius the player owns no verb to close. Standing exactly on P-02 and
+   * pitching 88° down still measures 0.789 m. That is all six Night 1 piers, all six sills, and
+   * 54 of the 90 slots in the game — the ghost could never engage and the night could not start.
+   *
+   * So the tolerance is measured about the two axes the player DOES control, where they stand and
+   * where they look: `snapRadius` is the LATERAL deviation from the aim ray and `placeReach` is
+   * how far along it, the same reach `_bestSlot()` already interacts at. The original sphere is
+   * kept as an alternative and the nearer of the two wins, so nothing that snapped before stops.
+   */
+  _snapDistance(slot, eye, fwd, handPos) {
+    const dx = slot.px - eye.x, dy = slot.py - eye.y, dz = slot.pz - eye.z;
+    const along = dx * fwd.x + dy * fwd.y + dz * fwd.z;
+    let ray = Infinity;
+    if (along > 0 && along <= TUNING.placeReach) {
+      const lx = dx - fwd.x * along, ly = dy - fwd.y * along, lz = dz - fwd.z * along;
+      ray = Math.sqrt(lx * lx + ly * ly + lz * lz);
+    }
+    const hx = slot.px - handPos.x, hy = slot.py - handPos.y, hz = slot.pz - handPos.z;
+    const hand = Math.sqrt(hx * hx + hy * hy + hz * hz);
+    return ray < hand ? ray : hand;
   }
 
   _dependenciesMet(slot) {
@@ -1687,8 +1889,80 @@ export class BuildSystem {
     if (idx >= 0) this.available.splice(idx, 1);
     this._carryYaw = 0;
     this._physics()?.releaseCarried?.(part);
+    this._givePlayer(part);
     this._onPickup(part);
     return true;
+  }
+
+  /**
+   * Hand the part to `Player`. THIS IS THE WHOLE WEIGHT MODEL. `Player.setCarried()` is documented
+   * as "BuildSystem calls this on a successful pickup", and until it was actually called nothing
+   * in the game knew you were carrying anything: `Player.carrySpeedMul` stayed at 1.00, so a 62 kg
+   * sill and empty hands walked at the same 1.60 m/s; `Player._updateHandAnchor()` posed for class
+   * A, so the load never came up onto the shoulder; and stamina, footstep noise, crouch and sprint
+   * all read the empty-handed row. The playtest called it "no weight, no slowdown, nothing in your
+   * hands" and all three were the same missing call.
+   *
+   * Player then owns the pose (§4.3) and the spring sim; `_simulateCarried()` stands down for any
+   * part Player accepted so the two do not integrate the same spring twice per fixed step.
+   */
+  _givePlayer(part) {
+    const pl = this.ctx?.systems?.get?.('Player');
+    if (!pl || typeof pl.setCarried !== 'function') return false;
+    let ok = false;
+    try { ok = pl.setCarried(part) === true; }
+    catch (e) { Log.once('bs:setcarried', 'Player.setCarried threw; carrying locally.', e); }
+    if (!ok) {
+      Log.once('bs:carryfull', 'BuildSystem: Player refused the load (its 4 slots are full). '
+        + 'Carrying locally — the speed penalty will not apply to this part.');
+    }
+    part.playerHeld = ok;
+    return ok;
+  }
+
+  /** Take the part back off Player. Idempotent; safe when Player never had it. */
+  _takeBackFromPlayer(part) {
+    if (!part?.playerHeld) return;
+    part.playerHeld = false;
+    const pl = this.ctx?.systems?.get?.('Player');
+    if (!pl || typeof pl.removeCarried !== 'function') return;
+    try { pl.removeCarried(part); }
+    catch (e) { Log.once('bs:removecarried', 'Player.removeCarried threw.', e); }
+  }
+
+  /** True while Player is posing and simulating at least one thing in our hands. */
+  _playerOwnsCarry() {
+    for (let i = 0; i < this.heldParts.length; i++) if (this.heldParts[i].playerHeld) return true;
+    return false;
+  }
+
+  /**
+   * `Player._dropCarried()` hook. Player owns the `drop` / `throwPart` bindings and its own
+   * tap-vs-hold discrimination; when it fires it asks us first, and returning `true` tells it we
+   * have taken the state change AND the noise, so §9.8's drop is emitted exactly once.
+   * @returns {boolean} true if we handled it
+   */
+  dropPart(part, opts = null) {
+    const p = part && this.heldParts.includes(part) ? part : this.heldPart;
+    if (!p) return false;
+    this._release(p, !(opts?.silent));
+    return true;
+  }
+
+  /** The other shape Player probes for. Same verb. */
+  onDrop(part, silent, _player) { return this.dropPart(part, { silent }); }
+
+  /**
+   * `Player._onInteractPress()` hook. It deliberately DOES NOT ACT. BuildSystem polls the
+   * `interact` binding itself in `_pollInput()`, and Player updates earlier in the same tick, so
+   * doing the pickup here as well would consume one key press twice and take two parts off the
+   * pallet at once. All this does is CLAIM the press, which is what stops Player's
+   * `_localPickup()` fallback — documented as "used only when BuildSystem is absent" — from
+   * pulling one of our meshes into `Player.carried` where this file cannot see it.
+   * @returns {boolean} true when BuildSystem is live and will handle the press itself
+   */
+  onInteract(_target, _player) {
+    return !this._disposed && this.currentNight > 0 && !!this.ctx?.systems?.get?.('Input');
   }
 
   _onPickup(part) {
@@ -1734,6 +2008,7 @@ export class BuildSystem {
   _release(part, loud) {
     const idx = this.heldParts.indexOf(part);
     if (idx >= 0) this.heldParts.splice(idx, 1);
+    this._takeBackFromPlayer(part);
     part.state = 'dropped';
     this.available.push(part);
     const o = part.object3D;
@@ -1765,6 +2040,7 @@ export class BuildSystem {
 
     const idx = this.heldParts.indexOf(part);
     if (idx >= 0) this.heldParts.splice(idx, 1);
+    this._takeBackFromPlayer(part);
     part.state = 'thrown';
     this._physics()?.releaseCarried?.(part);
 
@@ -1823,28 +2099,41 @@ export class BuildSystem {
     this._carryYaw = ((this._carryYaw % TAU) + TAU) % TAU;
   }
 
-  /** Hands lag and swing and clatter into trees. Physics owns the sim; we own the hand anchor. */
+  /**
+   * Hands lag and swing and clatter into trees. Physics owns the sim; PLAYER owns the hand anchor
+   * whenever Player exists, and this used to write `anchor.rotation.y` straight onto it — which
+   * silently discarded the pitch Player had just composed into `handAnchor.quaternion`, because
+   * assigning to `.rotation` rebuilds the whole quaternion from the Euler. Never write to another
+   * system's transform. `_carryYaw` is applied to OUR part, after the sim, and it does not
+   * accumulate: `Physics.simulateCarried()` rewrites `o.quaternion` from its own integrator state
+   * every step, so this is a fresh post-multiply each time and not a compounding spin.
+   */
   _simulateCarried(fdt) {
     const phys = this._physics();
     if (!this.heldParts.length) return;
     const anchor = this._handAnchor;
+    const yaw = this._carryYaw;
+    if (yaw !== 0) _q2.setFromAxisAngle(_v4.set(0, 1, 0), yaw);
     for (let i = 0; i < this.heldParts.length; i++) {
       const part = this.heldParts[i];
       const o = part.object3D;
       if (!o) continue;
-      if (phys && anchor && typeof phys.simulateCarried === 'function') {
-        // Physics writes the resolved world transform onto the part's Object3D and emits the
-        // impact noises itself (radius 18, kind 'impact') — hauling IS the risk.
-        phys.simulateCarried(part, anchor, fdt);
-        o.rotation.y += 0;    // yaw offset is applied through the anchor, below
-      } else if (anchor) {
-        anchor.updateWorldMatrix(true, false);
-        anchor.getWorldPosition(_v1);
-        anchor.getWorldQuaternion(_q1);
-        o.position.lerp(_v1, Math.min(1, fdt * 12));
-        o.quaternion.slerp(_q1, Math.min(1, fdt * 10));
+      // Player already integrated this one in ITS fixedUpdate, against its own pose. Stepping the
+      // same spring twice per tick doubles the stiffness and makes a beam judder in the hands.
+      if (!part.playerHeld) {
+        if (phys && anchor && typeof phys.simulateCarried === 'function') {
+          // Physics writes the resolved world transform onto the part's Object3D and emits the
+          // impact noises itself (radius 18, kind 'impact') — hauling IS the risk.
+          phys.simulateCarried(part, anchor, fdt);
+        } else if (anchor) {
+          anchor.updateWorldMatrix(true, false);
+          anchor.getWorldPosition(_v1);
+          anchor.getWorldQuaternion(_q1);
+          o.position.lerp(_v1, Math.min(1, fdt * 12));
+          o.quaternion.slerp(_q1, Math.min(1, fdt * 10));
+        }
       }
-      if (i === 0 && anchor) anchor.rotation.y = this._carryYaw;
+      if (yaw !== 0) o.quaternion.premultiply(_q2);
     }
   }
 
@@ -1936,6 +2225,7 @@ export class BuildSystem {
     // Take it out of the hands and stand it in the slot.
     const idx = this.heldParts.indexOf(part);
     if (idx >= 0) this.heldParts.splice(idx, 1);
+    this._takeBackFromPlayer(part);
     part.state = 'placed';
     part.slotId = slot.id;
     this._physics()?.releaseCarried?.(part);
@@ -2735,12 +3025,14 @@ export class BuildSystem {
     const scripted = this.script?.nightDef?.(night)?.shortfallItems ?? null;
     for (let i = 0; i < defs.length; i++) {
       const d = defs[i];
-      const anchor = d.at ? MAP[d.at] : null;
+      const anchor = d.at ? this.map[d.at] : null;
       const meta = scripted?.find?.((s) => s.id === d.toolId) ?? null;
+      // §3.5's tier bands are distances FROM THE PLOT, not from the world origin.
+      const away = anchor ? this._distFromPlot(anchor[0], anchor[1]) : 0;
       const rec = {
         toolId: d.toolId,
         label: meta?.label ?? d.toolId,
-        tier: meta?.tier ?? (anchor ? (Math.hypot(anchor[0], anchor[1]) < 50 ? 1 : Math.hypot(anchor[0], anchor[1]) < 120 ? 2 : 3) : null),
+        tier: meta?.tier ?? (anchor ? (away < 50 ? 1 : away < 120 ? 2 : 3) : null),
         position: anchor ? new THREE.Vector3(anchor[0], this._groundAt(anchor[0], anchor[1]), anchor[1]) : null,
         material: d.material,          // drives §6.9's material-appropriate 1.8 s cue
         hintable: !!d.hintable,        // false = it is not in the world and never was
@@ -2946,6 +3238,7 @@ export class BuildSystem {
 
   _clearParts() {
     for (const p of this.parts.values()) {
+      this._takeBackFromPlayer(p);
       this._physics()?.disposeCarried?.(p);
       if (p.object3D) this._group?.remove(p.object3D);
     }
