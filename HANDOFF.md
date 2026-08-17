@@ -112,10 +112,20 @@ would push `site-close` out of spec, so this needs judgement rather than a tweak
 
 1. **Draw calls 352–358 vs a 220 budget.** Nobody has attributed them by owner yet.
 2. **The consequence chain is the last unverified pillar.** Build wrong → creak → noise → a camper
-   comes. The links exist individually; nobody has observed the whole chain complete.
-   **Structural obstacle:** camp is at (124, −18) and the plot at (−140, 128) — **302 m apart**,
-   where `GAME_DESIGN §3.3` budgets 142. If no patrol route closes that gap, encounters are
-   impossible by construction regardless of AI quality. Check `Navmesh.patrolRoutes` first.
+   comes. **Correction to an earlier note here: the "302 m structural blocker" is NOT open — it
+   was already solved and this document was stale.** Traced statically end to end:
+   `BuildSystem.js:2877` emits `build:creak` and `noise:emit` in a fixed order (§7.1); `NoiseSystem`
+   owns propagation; and `Campers` **polls** it (`this._noise`, line 782; hearing at 1359) rather
+   than subscribing — §9.8, *"hearing is NoiseSystem's number and only NoiseSystem's number"*, so
+   grepping for a `noise:emit` subscription in `Campers.js` finds nothing and proves nothing.
+   The distance problem has an explicit answer too: `Campers._tickPlotWatch()` (line 2384, called
+   from 1003) measures once a second how close the camp actually gets, publishes `nearestToPlot` /
+   `nearestRouteToPlot` so it is checkable from the console, and **if the answer is "never", sends
+   one person** — standing off at 30 m for 11 s, no earlier than Night 2, standing down the instant
+   a real route delivers the proximity.
+   **So what is actually missing is only the observation**: nobody has watched a bad join produce a
+   creak that produces a noise that a camper visibly reacts to, in one continuous run. That is a
+   playtest, not a repair. Do it before assuming anything is broken.
 3. **Two first-run traps.** P-01 — the first pier slot of the game — is the only obstructed slot
    in Night 1, its tuning comment literally reads *"Silent. No prompt."*, and holding LMB (the
    natural response to "it won't go in") triggers `_forcePlace`, which scores WRONG_PART. Also,
