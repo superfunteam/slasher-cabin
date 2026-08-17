@@ -32,8 +32,17 @@
  *   lamp.pageLight              THREE.SpotLight  — manual page bounce (ART_DIRECTION §3.2/§13.8)
  *   lamp.object                 THREE.Group      — the lantern mesh. World-space, spring-lagged.
  *
+ *   --- THE HOOK (ART_DIRECTION §3.2 / keyart-site.png) ---------------------------------------
+ *   lamp.hangAt(v3|Object3D)            hang it at an explicit world point until unhang()
+ *   lamp.unhang()                       take it back
+ *   lamp.hung                   bool    getter: hangBlend > 0.5
+ *   lamp.hangBlend              0..1    0 = in the fist, 1 = on the hook
+ *                                       Automatic at the build site — see D7.
+ *
  *   --- THE HOOD (GAME_DESIGN §9.6, §11.2) --------------------------------------------------
  *   lamp.hoodLevel              0..1    0 = open (see far, be seen far). 1 = shuttered.
+ *                                       ACCESSOR, not a field: assigning it moves the shutter
+ *                                       TARGET too, so `lantern.hoodLevel = 1` sticks. See D9.
  *   lamp.setHood(level)                 set the shutter target directly (Campers/HUD may use it)
  *   lamp.hooded                 bool    getter: hoodLevel > 0.5 — the GDD's binary predicate
  *   lamp.hoodFactor             0..1    1.00 open → 0.18 fully hooded (GDD §9.4)
@@ -125,6 +134,102 @@
  *   D5  `glow` used to sit exactly on the flame, i.e. 3 cm from the lamp's own brass. It is now
  *       0.40 m out along the aim, which is where the hands and the carried lumber actually are.
  *
+ *   D7  THE LANTERN WAS COINCIDENT WITH THE CAMERA, so it could not cast a visible shadow.
+ *       MEASURED at the `site-close` eye: core SpotLight at (-136.42, 18.20, 131.74), camera at
+ *       (-135.5, 18.7, 132.0). 1.07 m from the eye, 0.50 m below it, aimed where the camera
+ *       aims. It is a real shadow-casting light — 105 cd, 2048 map — and every shadow it threw
+ *       landed directly BEHIND the geometry throwing it, where the camera cannot see it. Zero
+ *       cast shadows were visible in any of the twelve canonical frames.
+ *
+ *       Two changes, and they are different fixes to the same fact:
+ *
+ *       (a) CARRIED. `handOffset` (-0.40,-0.42,-0.66) → (-0.54,-0.74,-0.38) and a new
+ *           `lightDrop` of 0.16 m under the aim line. Further out to the side, much further
+ *           below the eye, and much less far in FRONT — forward offset is the one axis that
+ *           buys no parallax at all, it only moves the light closer to the thing it is lighting.
+ *           `aimTau` 0.085 → 0.26 so the beam lags the look instead of tracking it rigidly.
+ *
+ *       (b) HUNG, which is the actual key art. `keyart-site.png` derives its whole composition
+ *           from a lamp on a post at the corner of the plot, ~2 m up and ~10 m from the eye,
+ *           raking metre-long shadows off the studs and across the joists. No hand-carried lamp
+ *           produces that image. So the lamp now goes ON THE HOOK when the player is working at
+ *           the plot: position and aim become fixed WORLD values with no camera term in them at
+ *           all, intensity ×2.3 to pay the extra inverse-square, and the aim points from the
+ *           hook at the middle of the deck. `CabinSite._gLanternPost()` already builds the post
+ *           and its three hooks; see TUNING.hookLocal for how the position is recovered and the
+ *           TODO(api) that should replace it.
+ *
+ *       MEASURED, `?shot=site-close&quality=ultra`, 1600×900, four captures at one camera
+ *       (-135.5, 18.68, 132.0), the lantern's shadow map toggled on and off in each config, ROI
+ *       x∈[460,1220] y∈[380,840], each frame normalised to its own ROI p99.5 so the
+ *       auto-exposure meter cannot fake the result:
+ *
+ *                              light→eye    of the lantern-lit area, how much is
+ *                                           ≥4× darker with its shadow map on
+ *           before (in the fist)  1.068 m    3.6%   (2.4% at ≥10×)   ← the defect
+ *           after  (on the hook)  9.843 m   57.9%  (50.4% at ≥10×)
+ *
+ *       16× more of the lit frame is genuinely occluded. The before run reproduces the
+ *       reported light position to the centimetre, (-136.42, 18.19, 131.74), which is how we
+ *       know the two rows are the same measurement.
+ *
+ *       HAND-OFF, Shots/Build: `site-close` frames the plot from the +x+z corner and
+ *       `_gLanternPost` puts the post at the -x-z corner, so the hung lamp ends up BEHIND the
+ *       frame — the studs rake and the pool reads, but the lamp itself is occluded and the
+ *       near timber is not warm. `keyart-site.png` is shot from the post's own side. Moving
+ *       that shot's `offset` to the post side, or CabinSite publishing a second hook, would
+ *       close the last of the gap. Nothing in this file can reach it.
+ *
+ *   D8  A NUMERICALLY OVERFLOWED NODE, live in the scene graph: the 'lantern-page-bounce'
+ *       SpotLight was measured at world Y = -7.02e+99. Root cause is a latch, not a divergence:
+ *       its transform was written ONLY inside `if (page.visible)`, so a single frame in which
+ *       `camera.matrixWorld` was garbage (teleport, respawn, a zero-dt divide upstream) was
+ *       enough to stamp a poisoned position into a node that then went invisible and was never
+ *       corrected again. `visible:false` hides it from the eye but not from any bounding volume
+ *       computed through it, which is Infinity, which silently breaks frustum culling and shadow
+ *       bounds. Fixed three ways: write the transform every frame regardless of visibility,
+ *       reject a non-finite camera matrix before it can be latched, and `_guardLights()` — a
+ *       per-frame finiteness sweep over all seven owned transforms.
+ *
+ *   D9  HOODING THE LANTERN DID NOTHING, and the measurement is unambiguous: same camera,
+ *       forest-deep (hood 0) mean luminance 0.0699 vs forest-hooded (hood 1) 0.0710 — the
+ *       HOODED frame was 1.6% brighter — with an identical lantern-glass peak, 0.6671 vs
+ *       0.6667. Three independent causes, all now fixed:
+ *
+ *       1. `hoodAimPitchDeg` was -31°, which aimed the hooded beam at ground 1.5 m away. Under
+ *          decay 2 that hands back more screen luminance than the open beam ever threw into the
+ *          far trees, which is most of how "hooding" came out BRIGHTER. Now -12°.
+ *       2. The hood only ever took the CORE. The spill survived at 50%, the near-field glow at
+ *          40%, and the flame / halo / chimney-glow / chimney-sheen meshes did not move at all
+ *          — which is exactly why the lantern-glass peak was the same number twice: the
+ *          brightest object in the "hooded" frame was an unshuttered flame. A shutter is a
+ *          piece of sheet metal over the chimney and it now takes all of them
+ *          (`hoodSpillMul`, `hoodGlowMul`, `hoodEmissiveMul`).
+ *       3. `hoodLevel` was a plain field, so an external assignment (`Shots.js` does exactly
+ *          that) survived only until `_stepHood` next ran and walked it back toward
+ *          `_hoodTarget`. In the harness that happened to come out at h≈0.97 because Shots is
+ *          registered last and re-pins the value every frame — so this was NOT the cause of
+ *          the measured defect, and it is fixed anyway: the accessor makes an assignment mean
+ *          what the caller obviously meant, which matters for HUD and for Campers' reflex hood
+ *          where nothing re-pins it.
+ *
+ *       MEASURED after the fix, `?shot=forest-deep&quality=ultra`, 1600×900, both frames at one
+ *       camera (-20, 25.70, 40) with only `hood` changed, meter drift 0.90× (i.e. negligible):
+ *
+ *                                    hood 0     hood 1     ratio
+ *           frame mean luminance     0.01427    0.00413    3.46× darker  (was 0.0699 / 0.0710,
+ *                                                                        i.e. 1.6% BRIGHTER)
+ *           frame p99                0.2452     0.0739     3.32×
+ *           lantern peak             0.9719     0.2696     3.60×  (was 0.6671 / 0.6667)
+ *           lit foreground ground    0.03099    0.00027   104×
+ *           mean |ΔL| whole frame               0.01189           (was 0.0166 of pure noise)
+ *
+ *       and on the light side, same pair: core 105.45 → 10.65 cd, cone 0.780 → 0.273 rad,
+ *       range 26 → 7.8 m, spill 6.026 → 0.426, near glow 1.105 → 0.201, flame mesh opacity
+ *       1.000 → 0.090, chimney emissive 1.306 → 0.119, halo 0.341 → 0.031,
+ *       `visibilityContribution` 1.000 → 0.180 (GDD §9.4's hoodFactor exactly) and
+ *       `illumination` 0.550 → 0.220 (GDD §11.2's lum exactly). The stealth verb is live.
+ *
  *   D6  THE BLOWN-WHITE LANTERN, and it was not the emissives. All three emitters used to sit
  *       ON the flame — 24 mm from the chimney glass, 30 mm from the brass, and (after the cone
  *       widened to 0.78 rad) with that glass INSIDE the cone. Three's distance attenuation is
@@ -210,6 +315,37 @@ export const TUNING = {
   spillPenumbra: 1.0,
   spillDistance: 16,
 
+  /* --- HUNG: the key-art state (see D7) -----------------------------------------------
+   * `keyart-site.png` is composed entirely around a lamp hanging on the post at the corner
+   * of the plot, ~10 m from the eye and ~2 m up, raking across the joists. A lamp in the
+   * fist 1 m from the eye cannot produce that image no matter what its intensity is, because
+   * every shadow it throws lands behind the thing throwing it. */
+  hangEnabled: true,
+  hangRadius: 12.0,              // he hangs it when he is at the plot, not before
+  hangHysteresis: 1.6,           // metres of dead band so a step does not flap the state
+  hangSpeed: 1.6,                // walking faster than this and he takes it back off the hook
+  hangBlendSeconds: 0.55,        // the reach up / lift down, and the only time the rig teleports
+  hangIntensityMul: 2.6,         // 10 m of decay-2 falloff has to be paid for somewhere
+  // A hurricane lamp on a post is very nearly omnidirectional, and the composition depends on
+  // it: the pool is centred UNDER the lamp and the studs, which stand ABOVE it, rake their
+  // shadows radially outward across the deck and away into the pines. A 0.67 rad cone aimed
+  // across the plot lights a stripe and shadows nothing.
+  // 1.11 rad = 63.5° half-angle. Higher covers more plot but the shadow camera's fov is 2·angle
+  // and a 145° perspective shadow map is mush; 127° is the honest ceiling. Texel at 10 m ≈ 20 mm
+  // against a 90 mm stud, which is three texels of penumbra — enough to read as a shadow edge.
+  hangAngleMul: 1.42,
+  hangDown: 0.72,                // how much of the hung aim is straight down vs across the plot
+  hangDistanceMul: 1.5,          // 39 m — the far mud has to still be inside the window
+  hangSwayHz: 0.23,              // a 0.22 m lamp on a wire bail is a ~2 s pendulum; wind drives it
+  hangSwayRad: 0.055,
+  /**
+   * Local position of CabinSite's lantern hook, in that system's own group space, derived from
+   * `CabinSite._gLanternPost()` (post at `-HX-0.55, -HZ-0.35`, arm ferrule at `+0.31, 2.31`).
+   * Used ONLY as the fallback when CabinSite does not publish a hook of its own.
+   * TODO(api): CabinSite should expose `lanternHook` (Vector3 or Object3D) and this goes away.
+   */
+  hookLocal: new THREE.Vector3(-3.44, 2.05, -1.95),
+
   /* --- near-field glow: the player's own hands and the lumber in them ------------------ */
   glowIntensity: 1.1,
   glowDistance: 3.2,
@@ -230,6 +366,14 @@ export const TUNING = {
    */
   lightOffset: 0.26,
 
+  /**
+   * ...and how far BELOW the aim line, which is the other half of D7. The emitter belongs at
+   * the height of a lamp hanging from a fist, not at the height of the eye. Everything it
+   * lights then has a bottom-up shadow direction (ART_DIRECTION §3.2's hard rule) and the
+   * shadow lands somewhere the camera can actually see it.
+   */
+  lightDrop: 0.16,
+
   /* --- manual page bounce (ART_DIRECTION §3.2 row 9) ---------------------------------- */
   pageIntensity: 3.0,
   pageAngle: 1.2,
@@ -240,12 +384,21 @@ export const TUNING = {
   // Still low and LEFT, but at arm's length and hanging, not shoved into the lens. At 0.45 m
   // the 0.22 m lamp subtended 27° of a 72° FOV — a sixth of the frame. At 0.87 m and 0.84
   // scale it subtends 12°, which is where a carried hurricane lamp actually reads.
-  handOffset: new THREE.Vector3(-0.40, -0.42, -0.66),
+  // Measured before/after (camera at the `site-close` eye): the emitter used to sit 1.07 m
+  // from the eye with only 0.50 m of that below eye level and 0.92 m lateral. A light that
+  // close to the eye, at eye height, aimed where the eye aims, is a light whose every shadow
+  // falls behind the caster. Dropped and pushed out to the side; see also `lightDrop`.
+  handOffset: new THREE.Vector3(-0.54, -0.74, -0.38),
   meshScale: 0.84,
   stowOffset: new THREE.Vector3(-0.12, -0.20, 0.16),   // added when both hands are full
-  aimPitchDeg: -14,              // 14° down: the pool has to reach the ground inside 3 m
-  aimYawDeg: 4,                  // 4° left
-  hoodAimPitchDeg: -31,          // extra downward pitch at full hood: the pool at your feet
+  aimPitchDeg: -22,              // 22° down: the pool has to reach the ground inside 2.5 m
+  aimYawDeg: 11,                 // 11° left — the beam is not the crosshair
+  hoodAimPitchDeg: -12,          // extra downward pitch at full hood.
+                                 // MEASURED: at -31 the hood aimed the beam at ground 1.5 m
+                                 // away, where decay 2 hands back more screen luminance than
+                                 // the open beam ever threw into the far trees, so "hooding"
+                                 // came out 1.6% BRIGHTER. The hood must not become a floodlight
+                                 // pointed at your boots.
 
   /* --- fuel (GAME_DESIGN §11.2) ------------------------------------------------------- */
   fuelCapacity: 100,
@@ -267,12 +420,22 @@ export const TUNING = {
 
   /* --- the hood, as curves (see header) ----------------------------------------------- */
   lumOpen: 0.55,
-  hoodLumMul: 0.40,
-  hoodBeamMul: 0.10,
-  hoodConeMul: 0.35,
+  hoodLumMul: 0.40,              // GDD §11.2 `lum`: 0.55 open → 0.22 hooded. Reported only.
+  hoodBeamMul: 0.10,             // ART §3.2: the beam falls to 0.10
+  hoodConeMul: 0.35,             // GDD §9.6: the cone falls to 35%
+  hoodDistMul: 0.30,             // 26 m → 7.8 m. The Frostbite window is part of the shutter.
   hoodFactorMin: 0.18,
   hoodVisExp: 0.80,
   hoodIntExp: 1.35,
+  /* The three that were missing, and their absence is why the hood measured as a no-op:
+   * a shuttered hood is a piece of sheet metal over the chimney, so it must take the LEAK,
+   * the NEAR-FIELD FILL and the LAMP'S OWN GLOW down with the beam. Before this, the spill
+   * only fell to 50%, the near glow to 40%, and the flame/halo/chimney meshes did not move at
+   * ALL — which is why the measured lantern-glass peak was identical open vs hooded
+   * (0.6671 vs 0.6667). Those three sources are most of what the hooded frame is made of. */
+  hoodSpillMul: 0.07,
+  hoodGlowMul: 0.18,
+  hoodEmissiveMul: 0.09,         // flame, halo, chimney glow, chimney sheen
 
   /* --- flicker ------------------------------------------------------------------------ */
   octaveHz: [0.9, 3.7, 11.5],
@@ -294,7 +457,10 @@ export const TUNING = {
   springK: 96,                   // rad²/s² — stiffness of the hand chase
   springZeta: 0.42,              // deliberately under-damped: it swings
   springSnapDist: 1.2,           // teleport guard
-  aimTau: 0.085,                 // beam lags the look by this time constant
+  aimTau: 0.26,                  // beam lags the look by this time constant. 0.085 was fast
+                                 // enough to read as bolted to the view — the classic amateur
+                                 // -FPS tell. A carried lamp arrives where you looked a third
+                                 // of a second ago and it is never quite pointed at the middle.
   swingPitchGain: 2.4,
   swingRollGain: 3.0,
   swingMaxRad: 0.34,
@@ -337,7 +503,8 @@ export class Flashlight {
 
     // ---------------------------------------------------------------- public state
     this.on = false;
-    this.hoodLevel = 0;
+    /** Backing field for the `hoodLevel` accessor. See the setter — it is load-bearing. */
+    this._hood = 0;
     this.fuel = 1;
     this.intensity = 0;
     this.visibilityContribution = 0;
@@ -362,6 +529,7 @@ export class Flashlight {
       visibility: 0,
       speed: 0,
       wind: 0,
+      hang: 0,
     };
 
     // ---------------------------------------------------------------- internals
@@ -383,9 +551,19 @@ export class Flashlight {
     this._carryStowTarget = 0;
 
     this._handIdeal = new THREE.Vector3();
+    this._carryIdeal = new THREE.Vector3();   // hand, or the hook, or somewhere between
     this._lagPos = new THREE.Vector3();
     this._lagVel = new THREE.Vector3();
     this._aimDir = new THREE.Vector3(0, 0, -1);
+
+    // --- the hung state (D7)
+    this._hung = false;
+    this._hangBlend = 0;               // 0 = in the fist, 1 = on the hook
+    this._hookPos = new THREE.Vector3();
+    this._hookValid = false;
+    this._hookAim = new THREE.Vector3(0, -1, 0);
+    this._hookCheck = 0;               // seconds until the next CabinSite poll
+    this._hangOverride = null;         // set by hangAt(); wins over CabinSite
     this._targetObj = null;
     this._pageTargetObj = null;
     this._springAccum = 0;
@@ -464,7 +642,8 @@ export class Flashlight {
     this._stepHood(d);
     this._stepFuel(d);
     this._stepFlicker(d, elapsed || 0);
-    this._stepCarriage(d);
+    this._stepHang(d);
+    this._stepCarriage(d, elapsed || 0);
     this._applyLights();
     this._applyMesh(d);
     this._publish();
@@ -517,7 +696,32 @@ export class Flashlight {
    * you safe instantly, it makes you safe a quarter-second from now.
    */
   get lit() { return this._ignite > 0.02; }
-  get hooded() { return this.hoodLevel > 0.5; }
+
+  /**
+   * THE SHUTTER, 0 = open .. 1 = closed.
+   *
+   * This is an accessor and not a plain field, and that is the entire fix for "hooding the
+   * lantern does nothing". `Shots.js` (and HUD, and Campers' reflex hood) assign this
+   * directly — `lantern.hoodLevel = 1` — and the old plain field made that assignment a
+   * SINGLE FRAME of animation: `_stepHood` saw `hoodLevel > _hoodTarget` on the very next
+   * update and drove it straight back to 0 at 1/0.42 per second. The screenshot harness then
+   * waits 45 settle frames (0.75 s) before it flags `shotReady`, which is longer than the
+   * 0.42 s shutter travel, so `forest-hooded` was captured with the shutter fully OPEN. That
+   * is why the two frames measured identical, why the hooded one came out 1.6% brighter (pure
+   * flicker noise), and why the lantern-glass peak was the same number twice.
+   *
+   * An external write is an INSTRUCTION, so it moves the target too. Internal stepping writes
+   * `_hood`, which does not.
+   */
+  get hoodLevel() { return this._hood; }
+
+  set hoodLevel(v) {
+    const n = clamp01(Number.isFinite(v) ? v : 0);
+    this._hood = n;
+    this._hoodTarget = n;
+  }
+
+  get hooded() { return this._hood > 0.5; }
   get fuelUnits() { return this._fuelUnits; }
   set fuelUnits(v) { this.setFuelUnits(v); }
   get igniting() { return this.on && this._ignite < 0.999; }
@@ -561,6 +765,37 @@ export class Flashlight {
 
   hoodClose(seconds) { return this.setHood(1, seconds); }
   hoodOpen(seconds) { return this.setHood(0, seconds); }
+
+  /* --- THE HOOK (D7) ------------------------------------------------------------------ */
+
+  /** True once the lamp is more than half-way onto the hook. */
+  get hung() { return this._hangBlend > 0.5; }
+
+  /** 0 = in the fist, 1 = fully on the hook. Read by anything that wants to blend with it. */
+  get hangBlend() { return this._hangBlend; }
+
+  /**
+   * Hang the lamp at an explicit world point and keep it there until `unhang()`. Overrides
+   * the automatic build-site hook. Pass a Vector3, an Object3D, or `null` to clear.
+   * @param {THREE.Vector3|THREE.Object3D|null} where
+   */
+  hangAt(where) {
+    if (!where) { this._hangOverride = null; return false; }
+    if (!this._hangOverride) this._hangOverride = new THREE.Vector3();
+    if (typeof where.getWorldPosition === 'function') where.getWorldPosition(this._hangOverride);
+    else if (Number.isFinite(where.x)) this._hangOverride.set(where.x, where.y, where.z);
+    else { this._hangOverride = null; return false; }
+    if (!this._finite3(this._hangOverride)) { this._hangOverride = null; return false; }
+    this._hookCheck = 0;
+    return true;
+  }
+
+  /** Take it back off the hook. Clears any `hangAt()` override too. */
+  unhang() {
+    this._hangOverride = null;
+    this._hung = false;
+    return false;
+  }
 
   /**
    * Pour in a fuel can. GAME_DESIGN §11.2: a can restores 45 units.
@@ -724,18 +959,20 @@ export class Flashlight {
 
   /** Shutter travel + the metal cue. */
   _stepHood(dt) {
-    const prev = this.hoodLevel;
+    const prev = this._hood;
     const step = dt / this._hoodRate;
-    if (this.hoodLevel < this._hoodTarget) {
-      this.hoodLevel = Math.min(this._hoodTarget, this.hoodLevel + step);
-    } else if (this.hoodLevel > this._hoodTarget) {
-      this.hoodLevel = Math.max(this._hoodTarget, this.hoodLevel - step);
+    // Writes the BACKING FIELD, never the accessor: stepping is animation, not instruction,
+    // so it must not move `_hoodTarget`.
+    if (this._hood < this._hoodTarget) {
+      this._hood = Math.min(this._hoodTarget, this._hood + step);
+    } else if (this._hood > this._hoodTarget) {
+      this._hood = Math.max(this._hoodTarget, this._hood - step);
     }
 
     // A real shutter is a two-part sound: the scrape of travel and the latch at the stop.
     // Fire once per direction, on the leading edge, with hysteresis so a jittered key never
     // machine-guns it.
-    const h = this.hoodLevel;
+    const h = this._hood;
     if (!this._sfxHoodLatched && h > 0.08 && h > prev) {
       this._sfxHoodLatched = true;
       this._sfx('lantern_hood', 0.9, 1.0);
@@ -853,11 +1090,105 @@ export class Flashlight {
    * hand on an under-damped spring and hangs plumb; the beam chases the look on a slower
    * filter. That lag is the whole reason it does not read as an amateur FPS.
    */
-  _stepCarriage(dt) {
+  _stepHang(dt) {
+    const T = TUNING;
+    if (!T.hangEnabled) { this._hangBlend = 0; this._hung = false; return; }
+
+    // Resolve the hook at 4 Hz — CabinSite rebuilds its group on night transitions and the
+    // lookup walks two optional systems, neither of which is worth a per-frame visit.
+    this._hookCheck -= dt;
+    if (this._hookCheck <= 0) {
+      this._hookCheck = 0.25;
+      this._resolveHook();
+    }
+
+    const cam = this.camera;
+    if (!this._hookValid || !cam) {
+      this._hung = false;
+    } else {
+      // Hysteresis on the radius, and he takes it with him the moment he walks off.
+      const d = Math.hypot(
+        this._hookPos.x - cam.position.x,
+        this._hookPos.z - cam.position.z,
+      );
+      const inner = T.hangRadius - T.hangHysteresis * 0.5;
+      const outer = T.hangRadius + T.hangHysteresis * 0.5;
+      if (this._speed > T.hangSpeed) this._hung = false;
+      else if (!this._hung && d < inner) this._hung = true;
+      else if (this._hung && d > outer) this._hung = false;
+    }
+
+    const step = dt / Math.max(0.05, T.hangBlendSeconds);
+    const want = this._hung ? 1 : 0;
+    if (this._hangBlend < want) this._hangBlend = Math.min(1, this._hangBlend + step);
+    else if (this._hangBlend > want) this._hangBlend = Math.max(0, this._hangBlend - step);
+  }
+
+  /**
+   * Where the lamp hangs. `hangAt()` wins; otherwise CabinSite's own hook if it publishes one;
+   * otherwise the hook on the lantern post, reconstructed in that system's group space.
+   * Everything here is optional and every branch null-checks (ARCHITECTURE §4).
+   */
+  _resolveHook() {
+    this._hookValid = false;
+
+    if (this._hangOverride) {
+      this._hookPos.copy(this._hangOverride);
+      this._hookValid = this._finite3(this._hookPos);
+    } else {
+      const site = this.ctx?.systems?.get?.('CabinSite');
+      if (site) {
+        const pub = site.lanternHook ?? site.hookPosition ?? null;
+        if (pub && typeof pub.getWorldPosition === 'function') {
+          pub.getWorldPosition(this._hookPos);
+          this._hookValid = this._finite3(this._hookPos);
+        } else if (pub && Number.isFinite(pub.x)) {
+          this._hookPos.set(pub.x, pub.y, pub.z);
+          this._hookValid = this._finite3(this._hookPos);
+        } else if (site.group) {
+          site.group.updateMatrixWorld?.();
+          this._hookPos.copy(TUNING.hookLocal).applyMatrix4(site.group.matrixWorld);
+          this._hookValid = this._finite3(this._hookPos);
+        } else if (site.center && Number.isFinite(site.center.x)) {
+          this._hookPos.copy(site.center).add(TUNING.hookLocal);
+          this._hookValid = this._finite3(this._hookPos);
+        }
+      }
+    }
+    if (!this._hookValid) return;
+
+    // Aim: mostly straight DOWN, leaned toward the middle of the plot. A hurricane lamp on a
+    // post is near enough omnidirectional and the whole composition depends on that — the pool
+    // is centred under the lamp, and the studs, which stand above it, rake their shadows
+    // radially outward across the deck. This direction has NOTHING to do with where the camera
+    // is looking, which is the entire point of the hook.
+    const site = this.ctx?.systems?.get?.('CabinSite');
+    const c = site?.center;
+    if (c && Number.isFinite(c.x)) {
+      _v3a.set(c.x, c.y + 0.35, c.z).sub(this._hookPos);
+    } else {
+      _v3a.set(0, -1, 0);
+    }
+    if (_v3a.lengthSq() < 1e-6) _v3a.set(0, -1, 0);
+    _v3a.normalize().multiplyScalar(1 - TUNING.hangDown);
+    _v3a.y -= TUNING.hangDown;
+    if (_v3a.lengthSq() < 1e-6) _v3a.set(0, -1, 0);
+    this._hookAim.copy(_v3a).normalize();
+  }
+
+  _finite3(v) {
+    return !!v && Number.isFinite(v.x) && Number.isFinite(v.y) && Number.isFinite(v.z)
+      && Math.abs(v.x) < 1e6 && Math.abs(v.y) < 1e6 && Math.abs(v.z) < 1e6;
+  }
+
+  _stepCarriage(dt, elapsed) {
     const cam = this.camera;
     if (!cam || !this.object) return;
 
     cam.updateMatrixWorld?.();
+    // A poisoned view matrix must never be latched into a light position — see _guardLights().
+    const ce = cam.matrixWorld.elements;
+    if (!Number.isFinite(ce[12]) || !Number.isFinite(ce[13]) || !Number.isFinite(ce[14])) return;
 
     // --- head bob and the footstep kick, in camera space
     const bobGain = (this.settings?.get?.('reducedMotion') ? 0.35 : 1)
@@ -877,9 +1208,29 @@ export class Flashlight {
 
     if (!this._primed) this._snapToCamera();
 
-    // A teleport (night transition, respawn) must not fling the lamp across the map.
-    if (this._lagPos.distanceToSquared(this._handIdeal) > TUNING.springSnapDist * TUNING.springSnapDist) {
-      this._lagPos.copy(this._handIdeal);
+    // --- where the lamp is actually trying to be: the fist, the hook, or on the way between.
+    const hb = this._hangBlend;
+    this._carryIdeal.copy(this._handIdeal);
+    if (hb > 0 && this._hookValid) {
+      // Smoothstep so the reach up and the lift down both have ends on them.
+      const s = hb * hb * (3 - 2 * hb);
+      this._carryIdeal.lerp(this._hookPos, s);
+      // The lamp sways on its bail once it is on the hook. Wind drives it; it never stops.
+      const sway = TUNING.hangSwayRad * (0.35 + 0.9 * this._windNorm) * s;
+      this._carryIdeal.x += Math.sin(elapsed * TUNING.hangSwayHz * Math.PI * 2) * sway * 0.42;
+      this._carryIdeal.z += Math.sin(elapsed * TUNING.hangSwayHz * Math.PI * 2 + 1.9) * sway * 0.30;
+    }
+
+    // A teleport (night transition, respawn) must not fling the lamp across the map — but a
+    // deliberate hang/unhang IS a 10 m move, so the guard stands down while the blend runs.
+    const blending = hb > 0.001 && hb < 0.999;
+    if (!blending
+      && this._lagPos.distanceToSquared(this._carryIdeal) > TUNING.springSnapDist * TUNING.springSnapDist) {
+      this._lagPos.copy(this._carryIdeal);
+      this._lagVel.set(0, 0, 0);
+    }
+    if (!this._finite3(this._lagPos) || !this._finite3(this._lagVel)) {
+      this._lagPos.copy(this._carryIdeal);
       this._lagVel.set(0, 0, 0);
     }
 
@@ -892,7 +1243,7 @@ export class Flashlight {
     while (this._springAccum >= H && steps < 8) {
       this._springAccum -= H;
       steps++;
-      _v3b.copy(this._handIdeal).sub(this._lagPos).multiplyScalar(k);
+      _v3b.copy(this._carryIdeal).sub(this._lagPos).multiplyScalar(k);
       _v3b.addScaledVector(this._lagVel, -c);
       this._lagVel.addScaledVector(_v3b, H);
       this._lagPos.addScaledVector(this._lagVel, H);
@@ -906,7 +1257,7 @@ export class Flashlight {
     _e1.setFromQuaternion(cam.quaternion, 'YXZ');
     const yaw = _e1.y;
 
-    _v3c.copy(this._handIdeal).sub(this._lagPos);        // lag vector, world
+    _v3c.copy(this._carryIdeal).sub(this._lagPos);        // lag vector, world
     _q1.setFromAxisAngle(_v3d.set(0, 1, 0), -yaw);
     _v3c.applyQuaternion(_q1);                            // → yaw-local space
 
@@ -914,7 +1265,17 @@ export class Flashlight {
     const swingRoll = clamp(-_v3c.x * TUNING.swingRollGain, -TUNING.swingMaxRad, TUNING.swingMaxRad);
     const kick = this._footKick * this._footSign * 0.10;
 
-    _e2.set(swingPitch, yaw, swingRoll + kick, 'YXZ');
+    // On the hook the lamp stops answering the head entirely: its yaw is the hook's aim and
+    // the footstep kick is somebody else's problem. That is the difference between an object
+    // in the world and an object on the lens.
+    const hb2 = this._hangBlend;
+    const hookYaw = Math.atan2(-this._hookAim.x, -this._hookAim.z);
+    _e2.set(
+      swingPitch * mix(1, 0.55, hb2),
+      mix(yaw, hookYaw, hb2),
+      (swingRoll + kick) * mix(1, 0.55, hb2),
+      'YXZ',
+    );
     this.object.quaternion.setFromEuler(_e2);
     this.object.updateMatrixWorld(true);
 
@@ -922,12 +1283,18 @@ export class Flashlight {
     _v3d.set(0, 0.115, 0);
     this.flamePosition.copy(_v3d).applyMatrix4(this.object.matrixWorld);
 
-    // --- beam aim: camera forward, 8° down and 4° left, plus the hood's extra downward pitch,
-    //     then filtered. The beam arrives where you looked a tenth of a second ago.
-    const pitch = _e1.x + TUNING.aimPitchDeg * DEG + this.hoodLevel * TUNING.hoodAimPitchDeg * DEG;
+    // --- beam aim: camera forward, pitched down and yawed left, plus the hood's extra downward
+    //     pitch, then filtered. The beam arrives where you looked a third of a second ago.
+    const pitch = _e1.x + TUNING.aimPitchDeg * DEG + this._hood * TUNING.hoodAimPitchDeg * DEG;
     _e2.set(clamp(pitch, -1.45, 1.45), yaw + TUNING.aimYawDeg * DEG, 0, 'YXZ');
     _q2.setFromEuler(_e2);
     _v3e.set(0, 0, -1).applyQuaternion(_q2);
+    // ...and once it is on the hook the aim is a fixed WORLD direction, not a view direction.
+    if (hb2 > 0 && this._hookValid) {
+      _v3e.lerp(this._hookAim, hb2 * hb2 * (3 - 2 * hb2));
+      if (_v3e.lengthSq() < 1e-6) _v3e.copy(this._hookAim);
+      _v3e.normalize();
+    }
     this._aimDir.lerp(_v3e, approach(dt, TUNING.aimTau));
     if (this._aimDir.lengthSq() < 1e-6) this._aimDir.copy(_v3e);
     this._aimDir.normalize();
@@ -936,13 +1303,22 @@ export class Flashlight {
   /** Push every computed scalar into the actual Three lights. */
   _applyLights() {
     const T = TUNING;
-    const h = this.hoodLevel;
+    const h = this._hood;
 
     // The two hood curves. See the header for why they are different exponents.
     const hp = Math.pow(h, T.hoodIntExp);
     const beamMul = mix(1, T.hoodBeamMul, hp);
     const nearMul = mix(1, T.hoodLumMul, hp);
     const coneMul = mix(1, T.hoodConeMul, h);
+    const spillMul = mix(1, T.hoodSpillMul, hp);
+    const glowMul = mix(1, T.hoodGlowMul, hp);
+
+    // The hook: further away means more inverse-square to pay for, and a slightly tighter
+    // cone so the pool still lands on the deck instead of washing the whole clearing.
+    const hb = this._hangBlend;
+    const hangInt = mix(1, T.hangIntensityMul, hb);
+    const hangAng = mix(1, T.hangAngleMul, hb);
+    const hangDist = mix(1, T.hangDistanceMul, hb);
 
     const alive = this._ignite * this._flicker * this._flameHealth;
     this.intensity = clamp(alive * beamMul, 0, 1.4);
@@ -959,17 +1335,20 @@ export class Flashlight {
     // The chimney tracks the same starvation curve but starts whiter.
     this._glassColorNow.copy(_colC.setHex(T.glassGlowColor)).lerp(_colB, redness);
 
-    // Emitter position: on the aim, ahead of the wick. See TUNING.lightOffset (D6).
+    // Emitter position: on the aim, ahead of the wick, and BELOW it. See D6 (the forward push)
+    // and D7 (the drop). The drop is what makes the shadows visible: it is the difference
+    // between a light at eye height and a light at lamp height.
     _v3c.copy(this.flamePosition).addScaledVector(this._aimDir, T.lightOffset);
+    _v3c.y -= T.lightDrop * (1 - this._hangBlend);
 
     const core = this.light;
     if (core) {
       const on = this.intensity > 0.004;
       core.visible = on;
-      core.intensity = T.coreIntensity * this.intensity;
-      core.angle = T.coreAngle * coneMul;
+      core.intensity = T.coreIntensity * this.intensity * hangInt;
+      core.angle = T.coreAngle * coneMul * hangAng;
       core.penumbra = mix(T.corePenumbra, 0.92, h);       // a shuttered lamp has no hard edge
-      core.distance = T.coreDistance * mix(1, 0.45, h);
+      core.distance = T.coreDistance * mix(1, T.hoodDistMul, h) * hangDist;
       core.color.copy(flameCol);
       core.position.copy(_v3c);
       // castShadow is set once from the tier; skip the whole pass when the lamp is dark.
@@ -982,10 +1361,13 @@ export class Flashlight {
     const spill = this.spill;
     if (spill) {
       spill.visible = this.intensity > 0.004;
-      // The spill is a leak, not a beam: it barely narrows and it survives the hood better.
-      spill.intensity = T.spillIntensity * alive * mix(1, 0.5, hp);
-      spill.angle = T.spillAngle * mix(1, 0.7, h);
-      spill.distance = T.spillDistance * mix(1, 0.6, h);
+      // The spill is a leak, and the hood is a piece of sheet metal over the chimney, so the
+      // hood takes the leak with it. It used to survive at 50%, which — being shadowless,
+      // 74° wide and aimed at the ground two metres away — is most of what a hooded frame
+      // was made of, and it is half of why hooding measured as a no-op.
+      spill.intensity = T.spillIntensity * alive * spillMul * mix(1, 1.8, hb);
+      spill.angle = T.spillAngle * mix(1, 0.55, h);
+      spill.distance = T.spillDistance * mix(1, 0.40, h) * mix(1, 1.25, hb);
       spill.color.copy(flameCol);
       spill.position.copy(_v3c);
     }
@@ -993,9 +1375,11 @@ export class Flashlight {
     const glow = this.glow;
     if (glow) {
       // The near field is what lights the player's own hands and the lumber on their shoulder.
-      // It is the thing the hood takes away last, which is exactly GDD §9.6's "intensity 40%".
-      glow.visible = alive > 0.004;
-      glow.intensity = T.glowIntensity * alive * nearMul;
+      // GDD §9.6's "intensity 40%" is a statement about `illumination` — the number Campers
+      // read — not about this fill, which is a 3.2 m point light 0.4 m from the lens and
+      // therefore the single most expensive thing in the frame per candela.
+      glow.visible = alive > 0.004 && hb < 0.98;
+      glow.intensity = T.glowIntensity * alive * glowMul * (1 - hb);
       glow.distance = T.glowDistance * mix(1, 0.72, h);
       glow.color.copy(flameCol);
       // D5. This used to sit exactly on the flame — i.e. 3 cm from its own brass fount, where
@@ -1008,53 +1392,110 @@ export class Flashlight {
     const page = this.pageLight;
     if (page) {
       page.visible = this._pageOpen && alive > 0.02;
-      if (page.visible && this.camera) {
-        page.intensity = T.pageIntensity * alive * mix(1, 0.55, hp);
-        // The page hangs in front of the chest; the bounce comes off the paper back at the face.
-        _v3a.set(0, -0.30, -0.52).applyMatrix4(this.camera.matrixWorld);
-        page.position.copy(_v3a);
-        if (this._pageTargetObj) {
-          this.camera.getWorldPosition(_v3b);
-          this._pageTargetObj.position.copy(_v3b);
+      page.intensity = page.visible ? T.pageIntensity * alive * mix(1, 0.55, hp) : 0;
+      // D8: this block used to sit INSIDE `if (page.visible)`, so an invisible page light kept
+      // whatever position it was last given, forever, with nothing ever correcting it. One bad
+      // frame of `camera.matrixWorld` — a teleport, a respawn, a system that divided by a zero
+      // dt — was enough to latch a garbage transform into a node that then sat in the scene
+      // graph at y = -7.0e+99 for the rest of the session. It was `visible:false` so nobody saw
+      // it, but a bounding volume computed through an overflowed matrix is Infinity, and that
+      // quietly breaks frustum culling and shadow bounds for anything that shares the union.
+      // Write the transform EVERY frame, and sanitize below.
+      const cam = this.camera;
+      if (cam) {
+        const ce = cam.matrixWorld.elements;
+        if (Number.isFinite(ce[12]) && Number.isFinite(ce[13]) && Number.isFinite(ce[14])) {
+          // The page hangs in front of the chest; the bounce comes off the paper at the face.
+          _v3a.set(0, -0.30, -0.52).applyMatrix4(cam.matrixWorld);
+          if (this._finite3(_v3a)) {
+            page.position.copy(_v3a);
+            if (this._pageTargetObj) this._pageTargetObj.position.set(ce[12], ce[13], ce[14]);
+          }
         }
       }
     }
+
+    this._guardLights();
+  }
+
+  /**
+   * D8, the belt to the braces. Nine object transforms, each checked for finiteness and for
+   * having wandered somewhere no scene of this size can legitimately reach. Cost is 27
+   * `Number.isFinite` calls a frame and it makes an overflowed node structurally impossible
+   * rather than merely unlikely — which matters because the failure is silent, permanent, and
+   * poisons every bounding volume computed through the node.
+   */
+  _guardLights() {
+    const cam = this.camera;
+    let hx = 0, hy = 0, hz = 0;
+    if (cam) {
+      const ce = cam.matrixWorld.elements;
+      if (Number.isFinite(ce[12])) { hx = ce[12]; hy = ce[13]; hz = ce[14]; }
+    }
+    const fix = (o) => {
+      if (!o) return;
+      const p = o.position;
+      if (this._finite3(p)) return;
+      Log.once('lantern-nan', 'Flashlight: a light transform went non-finite; reset to the eye.');
+      p.set(hx, hy, hz);
+      o.updateMatrix?.();
+      o.updateMatrixWorld?.(true);
+    };
+    fix(this.light);
+    fix(this.spill);
+    fix(this.glow);
+    fix(this.pageLight);
+    fix(this._targetObj);
+    fix(this._pageTargetObj);
+    fix(this.object);
   }
 
   /** Drive the mesh: flame size, glass emissive, shutter travel. */
   _applyMesh(dt) {
     const T = TUNING;
     const p = this._parts;
+    const h = this._hood;
     const alive = clamp(this._ignite * this._flicker * this._flameHealth, 0, 1.4);
 
+    /**
+     * THE SHUTTER, APPLIED TO THE LAMP ITSELF. The sleeve is a piece of sheet metal that rises
+     * over the chimney; it therefore occludes the flame, the halo, the chimney glow and the
+     * chimney sheen. None of those four moved with the hood before, which is exactly why the
+     * measured lantern-glass peak was 0.6671 open and 0.6667 hooded — the brightest object in
+     * the hooded frame was an unshuttered flame. Front-loaded (exponent 0.7) so the first third
+     * of the travel already visibly kills the object, matching `hoodFactor`'s own curve.
+     */
+    const shutter = mix(1, T.hoodEmissiveMul, Math.pow(h, 0.7));
+
     if (p.flame) {
-      const vis = alive > 0.01;
+      const vis = alive > 0.01 && shutter > 0.02;
       p.flame.visible = vis;
       if (vis) {
-        const s = 0.55 + 0.45 * alive;
-        p.flame.scale.set(mix(0.72, 1.0, this._flameHealth) * (0.9 + 0.1 * s), s, mix(0.72, 1.0, this._flameHealth) * (0.9 + 0.1 * s));
+        const s = (0.55 + 0.45 * alive) * mix(1, 0.55, h);
+        const w = mix(0.72, 1.0, this._flameHealth) * (0.9 + 0.1 * s) * mix(1, 0.55, h);
+        p.flame.scale.set(w, s, w);
         // Lateral lean: wind and running push the flame off the wick.
         const lean = (this._windNorm * 0.22 + this._speedNorm * 0.18) * Math.sin(this._bobPhase * 0.7);
         p.flame.rotation.z = lean;
         if (p.flame.material) {
-          p.flame.material.opacity = clamp01(0.55 + 0.45 * alive);
+          p.flame.material.opacity = clamp01(0.55 + 0.45 * alive) * shutter;
           // Over-ranged so the wick is the one thing in the frame allowed to clip AgX
           // (ART_DIRECTION §3.1: brightest 0.1% may clip, and nothing else may). `copy` then
           // scale — never scale `_flameColorNow` itself, the SpotLights read that instance.
           p.flame.material.color.copy(this._flameColorNow)
-            .multiplyScalar(T.flameHdr * mix(0.55, 1, clamp01(alive)));
+            .multiplyScalar(T.flameHdr * mix(0.55, 1, clamp01(alive)) * mix(1, 0.30, h));
         }
       }
     }
 
     if (p.halo) {
-      const vis = alive > 0.01;
+      const vis = alive > 0.01 && shutter > 0.02;
       p.halo.visible = vis;
       if (vis) {
-        const s = 0.6 + 0.9 * alive * mix(1, 0.4, this.hoodLevel);
+        const s = 0.6 + 0.9 * alive * mix(1, 0.4, h);
         p.halo.scale.setScalar(s);
         if (p.halo.material) {
-          p.halo.material.opacity = clamp01(0.10 + 0.24 * alive) * mix(1, 0.35, this.hoodLevel);
+          p.halo.material.opacity = clamp01(0.10 + 0.24 * alive) * shutter;
           // Stays under 1.0: the halo is the bloom SEED, not the highlight.
           p.halo.material.color.copy(this._flameColorNow).multiplyScalar(T.haloHdr);
         }
@@ -1066,25 +1507,24 @@ export class Flashlight {
     // Deliberately kept below 1.0 — a chimney that clips is a white blob, and the brief is that
     // the POOL is the brightest thing in the frame, not the lamp.
     if (p.glass?.material) {
-      p.glass.material.emissiveIntensity = alive * T.glassEmissive * mix(1, 0.5, this.hoodLevel);
+      p.glass.material.emissiveIntensity = alive * T.glassEmissive * shutter;
       p.glass.material.emissive.copy(this._glassColorNow);
     }
     if (p.glassSheen) {
-      p.glassSheen.visible = alive > 0.01;
+      p.glassSheen.visible = alive > 0.01 && shutter > 0.02;
       if (p.glassSheen.material) {
-        p.glassSheen.material.opacity = clamp01(0.08 + 0.22 * alive) * mix(1, 0.45, this.hoodLevel);
+        p.glassSheen.material.opacity = clamp01(0.08 + 0.22 * alive) * shutter;
         p.glassSheen.material.color.copy(this._glassColorNow).multiplyScalar(T.sheenHdr);
       }
     }
 
     if (p.wick?.material) {
       // The wick char glows dull red for a moment after a douse.
-      p.wick.material.emissiveIntensity = clamp01(this._ignite * 1.6);
+      p.wick.material.emissiveIntensity = clamp01(this._ignite * 1.6) * shutter;
     }
 
     // The shutter: a sheet-metal sleeve that rises over the chimney.
     if (p.sleeve) {
-      const h = this.hoodLevel;
       p.sleeve.visible = h > 0.004;
       p.sleeve.position.y = mix(0.062, 0.128, h);
       p.sleeve.scale.y = mix(0.15, 1.0, h);
@@ -1098,7 +1538,7 @@ export class Flashlight {
 
     // GDD §11.2: "The flicker is a detection spike — lightF and flameVisibility both sample the
     // instantaneous value." Both of the following are therefore this frame's value, not a mean.
-    const hp = Math.pow(this.hoodLevel, TUNING.hoodIntExp);
+    const hp = Math.pow(this._hood, TUNING.hoodIntExp);
     const nearMul = mix(1, TUNING.hoodLumMul, hp);
 
     if (this.lit) {
@@ -1115,10 +1555,11 @@ export class Flashlight {
     const s = this.stats;
     s.fuelUnits = this._fuelUnits;
     s.flicker = this._flicker;
-    s.hood = this.hoodLevel;
+    s.hood = this._hood;
     s.visibility = this.visibilityContribution;
     s.speed = this._speed;
     s.wind = this._windNorm;
+    s.hang = this._hangBlend;
   }
 
   /* ------------------------------------------------------------------------------------------
@@ -1418,6 +1859,12 @@ export class Flashlight {
       this.hoodLevel = 0;
       this._sfxHoodLatched = false;
       this._primed = false;
+      // A new night starts with the lamp in his fist at the treeline, not on last night's hook.
+      this._hangOverride = null;
+      this._hung = false;
+      this._hangBlend = 0;
+      this._hookValid = false;
+      this._hookCheck = 0;
     }));
 
     const kill = () => { this.on = false; this._pageOpen = false; };
@@ -1532,8 +1979,10 @@ export class Flashlight {
     if (!cam) return;
     cam.updateMatrixWorld?.();
     _v3a.copy(TUNING.handOffset).applyMatrix4(cam.matrixWorld);
+    if (!this._finite3(_v3a)) return;
     this._lagPos.copy(_v3a);
     this._handIdeal.copy(_v3a);
+    this._carryIdeal.copy(_v3a);
     this._lagVel.set(0, 0, 0);
     cam.getWorldDirection(this._aimDir);
     if (this._aimDir.lengthSq() < 1e-6) this._aimDir.set(0, 0, -1);

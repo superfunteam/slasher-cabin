@@ -40,6 +40,16 @@
  *   game. Sky claims it only if it is still null at init(), so VolumetricFog can take it
  *   instead simply by setting it first; dispose() hands it back.
  *
+ *   VERIFIED AT RUNTIME (2026-08-17): Sky owns it. `scene.fog.name === 'sc-sky-fog'`,
+ *   `sky._ownsFog === true`, and VolumetricFog — which is present and real, `render()` is a
+ *   function — never assigns scene.fog at all. It integrates its froxel volume into its own
+ *   target and Postprocessing composites that separately. The two are NOT fighting: they are
+ *   two independent terms, this one analytic and per-material, that one volumetric and
+ *   screen-space. The only thing they share is `this.moonDirection`.
+ *
+ *   `scene.fog.color` is LINEAR RADIANCE, and `scene.fog.density` IS ART §5.1's D0. See
+ *   `radiance()` and FOG_D0_CLEAR below — both were wrong, and the colour one by 6.7x.
+ *
  * Coupling to Postprocessing
  * --------------------------
  *   Postprocessing owns the output transform (renderer.toneMapping = NoToneMapping, AgX once
@@ -75,7 +85,8 @@ const HEX = {
   auroraLo:    0x3fce97,   // hue ~155deg — outside the forbidden [100,150] grass band
   auroraHi:    0x9fe6d8,
   lightning:   0xc9d6ee,
-  fogNear:     0x2a3a44,   // fog.near — scene.fog colour
+  fogNear:     0x2a3a44,   // fog.near, ART §5.1 'Clear' — scene.fog colour
+  fogWhite:    0x4a5d6c,   // fog.near, ART §5.1 'Whiteout' — where haze 1.0 lands
 };
 
 /**
@@ -100,6 +111,15 @@ const GAIN = {
   milkyWay: 0.022,
   aurora: 0.055,
   lightning: 0.75,
+  /**
+   * scene.fog.color. See `radiance()` for WHY this is linear and not display.
+   *
+   * 1.0 would be the ART §5.1 swatch at its exact linear radiance, which measured out at
+   * display (0.058, 0.123, 0.213) against keyart-lake's distant-conifer (0.053, 0.107,
+   * 0.149) — hue and saturation on the nose (0.73 vs 0.726) but a touch hot. 0.90 is that
+   * trim, and it is the ONLY fudge factor in the fog path; everything else is the table.
+   */
+  fog: 0.90,
 };
 
 /** Moon geometry. The real moon is 0.53deg; we run it ~3x for cinematic read. */
@@ -129,20 +149,45 @@ const smoothstepJS = (e0, e1, x) => {
 function lin(hex) { return new THREE.Color(hex); }
 
 /**
- * sRGB hex -> a Color whose stored channels ARE the sRGB display fractions.
+ * sRGB hex -> LINEAR RADIANCE, for `scene.fog.color`.
  *
- * `scene.fog.color` is one of the few colours Three consumes in DISPLAY space: the
- * `fog_fragment` chunk runs after `colorspace_fragment`, so the encode has already
- * happened by the time fogColor is mixed in. Feeding it a linear colour is why fog so
- * often comes out three stops too dark.
+ * THIS FILE USED TO DO THE OPPOSITE, AND IT WAS THE SINGLE BIGGEST COLOUR DEFECT IN THE GAME.
+ * The old helper stored the sRGB DISPLAY fractions of the hex (0x2a3a44 -> 0.165, 0.227,
+ * 0.267) on the reasoning that Three composites fog after `colorspace_fragment`, so fogColor
+ * is consumed in display space. That reasoning is correct for a default renderer drawing
+ * straight to an 8-bit sRGB canvas. It is FALSE here, and here is the whole chain:
+ *
+ *   Postprocessing renders the scene into an RGBA16F MRT whose texture colorSpace is
+ *   LinearSRGBColorSpace, with renderer.toneMapping = NoToneMapping. For a linear target
+ *   `linearToOutputTexel` is the IDENTITY, so `colorspace_fragment` is a no-op and the fog
+ *   mix that follows it happens in LINEAR RADIANCE, not in display code values. AgX then
+ *   runs once, later, in the composite pass — and AgX lifts shadows hard.
+ *
+ * So the display fractions were being fed in as radiance and then tone mapped a second time.
+ * MEASURED, at exposure 0.62, on shot `site-close`: stored fog colour (0.155, 0.216, 0.257)
+ * rendered the mid-distance band at display (0.263, 0.327, 0.402) — #435367, saturation 0.35.
+ * Feeding the SAME hex as linear radiance (0.023, 0.042, 0.058) rendered it at display
+ * (0.058, 0.123, 0.213), saturation 0.73. The first is the "grey wash" ART_DIRECTION §19
+ * Trap A1 names; the second is keyart-lake.
+ *
+ * Every other colour in this file already goes through `lin()` for exactly this reason. Fog
+ * was the one exception, and the exception was wrong.
  */
-function display(hex) { return new THREE.Color().setHex(hex, THREE.LinearSRGBColorSpace); }
+function radiance(hex) { return lin(hex).multiplyScalar(GAIN.fog); }
 
 /** Preallocated so update() never touches the allocator. */
 const MOON_KEY_LIN = lin(HEX.moonKey);
-const FOG_NEAR_DSP = display(HEX.fogNear);
-const FOG_HORIZON_DSP = display(HEX.skyHorizon);
+const FOG_NEAR_LIN = radiance(HEX.fogNear);
+const FOG_WHITE_LIN = radiance(HEX.fogWhite);
 const WHITE = new THREE.Color(1, 1, 1);
+
+/**
+ * scene.fog.density IS the `D0` of ART_DIRECTION §5.1 — Materials.js reads `fogDensity`
+ * straight into its height-fog D0 under FOG_EXP2. The table there runs 0.014 (clear) to
+ * 0.078 (whiteout), and `this._haze` is exactly that axis, so these are the endpoints.
+ */
+const FOG_D0_CLEAR = 0.014;
+const FOG_D0_WHITEOUT = 0.078;
 
 /* ======================================================================================
  * GLSL — shared noise library. Identical maths is mirrored in JS further down so that
@@ -704,7 +749,7 @@ export class Sky {
     this.starGain = 1.0;
     this.haloGain = 1.0;
     this.milkyWayGain = 1.0;
-    this.moonBaseIntensity = 0.06;
+    this.moonBaseIntensity = 0.065;
 
     // ---- internals -------------------------------------------------------------------
     this.dome = null;
@@ -1002,8 +1047,8 @@ export class Sky {
     const scene = this.scene;
     if (!scene) return;
     if (scene.fog) return;                    // somebody else owns it — leave it alone
-    const fog = new THREE.FogExp2(0x000000, 0.0125);
-    fog.color.copy(FOG_NEAR_DSP);
+    const fog = new THREE.FogExp2(0x000000, FOG_D0_CLEAR);
+    fog.color.copy(FOG_NEAR_LIN);
     fog.name = 'sc-sky-fog';
     scene.fog = fog;
     this._ownsFog = true;
@@ -1016,7 +1061,7 @@ export class Sky {
       if (!vfReal && typeof mats?.setFogParams === 'function') {
         const terrain = this.ctx.systems?.get?.('Terrain');
         const y0 = Number.isFinite(terrain?.waterLevel) ? terrain.waterLevel : 0;
-        mats.setFogParams({ D0: 0.0125, y0, H: 34, scatterScale: 1.0, g: 0.66, inscatter: 1.0 });
+        mats.setFogParams({ D0: FOG_D0_CLEAR, y0, H: 4.2, scatterScale: 1.0, g: 0.55, inscatter: 1.0 });
       }
     } catch (e) {
       Log.debug('Sky: could not hand fog params to Materials —', e?.message ?? e);
@@ -1029,8 +1074,10 @@ export class Sky {
     const n = Math.max(1, Math.min(7, Number.isFinite(night) ? night : 1));
     const t = (n - 1) / 6;
 
-    // ART §3.2: the moon rises with the cabin. 0.06 on night 1, 0.09 on night 7.
-    this.moonBaseIntensity = lerp(0.06, 0.09, t);
+    // ART §3.2: the moon rises with the cabin. ARCHITECTURE §10 wants ~0.06 DELIVERED on a
+    // night-1 clear sky; 0.065 authored is what lands there once the (now much gentler)
+    // haze/cloud terms in _updateMoonLight have taken their cut. 0.098 by night 7.
+    this.moonBaseIntensity = lerp(0.065, 0.098, t);
     // Waxing gibbous -> nearly full. Phase angle 64deg -> 20deg.
     const pa = THREE.MathUtils.degToRad(lerp(64, 20, t));
     this.moonPhase = (1 + Math.cos(pa)) * 0.5;
@@ -1203,12 +1250,20 @@ export class Sky {
     }
 
     // ---- scene fog: colour and density track weather and dawn
+    //
+    // Density is ART §5.1's D0 axis, clear -> whiteout, and the colour walks the SAME axis
+    // between the two 'Near colour' swatches in that table (#2a3a44 -> #4a5d6c). The old code
+    // walked toward skyHorizon by a coefficient that DECREASED with haze, i.e. thicker
+    // weather made the fog cooler and more sky-like when ART says a whiteout is the one time
+    // the fog goes pale and flat. Both quantities are now the table, read left to right.
     if (this._ownsFog && this.scene?.fog) {
       const f = this.scene.fog;
-      f.density = lerp(0.0105, 0.048, this._haze);
-      _col.copy(FOG_NEAR_DSP)
-        .lerp(FOG_HORIZON_DSP, 0.30 - this._haze * 0.25)
-        .multiplyScalar((0.72 + 0.55 * this._haze) * (1 + smoothstepJS(0.86, 1.0, ton) * 1.1));
+      const haze = this._haze;
+      f.density = lerp(FOG_D0_CLEAR, FOG_D0_WHITEOUT, haze);
+      // LINEAR radiance out — see radiance(). Dawn lifts it; nothing else touches it.
+      _col.copy(FOG_NEAR_LIN)
+        .lerp(FOG_WHITE_LIN, haze)
+        .multiplyScalar(1 + smoothstepJS(0.86, 1.0, ton) * 1.6);
       f.color.copy(_col);
     }
   }
@@ -1334,12 +1389,24 @@ export class Sky {
     const light = this.moonLight;
     if (!light) return;
 
+    // ARCHITECTURE §10 specifies the moon key at ~0.06. That is the DELIVERED intensity, not
+    // an author-time number to then attenuate away: measured on shot `camp-tents` the old
+    // chain shipped 0.0243, well under half spec, and the forest went to mud.
+    //
+    // Two of the three attenuations were wrong, not just strong:
+    //   haze 0.45  -> 0.15. ART §3.1.1: 'a foggy night is a BRIGHTER, flatter night, and that
+    //                is physically true'. Haze scatters the key, it does not eat it. The
+    //                flattening is the hemi lift below, which already happens.
+    //   cloud 0.80 -> 0.62. A cloud crossing the moon must still be a darkness event, but at
+    //                0.80 a routine overcast (measured occlusion 0.60) halved the key on its
+    //                own, so 'the moon went behind a cloud' had no headroom left to read as
+    //                an event. Full occlusion now leaves 38% of the key, not 20%.
     const above = smoothstepJS(-0.04, 0.10, this.moonDirection.y);
     const ton = clamp01(this.ctx.state?.timeOfNight ?? 0);
     light.intensity = this.moonBaseIntensity
       * above
-      * (1 - 0.80 * this.moonOcclusion)
-      * (1 - this._haze * 0.45)
+      * (1 - 0.62 * this.moonOcclusion)
+      * (1 - this._haze * 0.15)
       * (1 - smoothstepJS(0.88, 1.0, ton) * 0.35);
     light.color.copy(MOON_KEY_LIN);
 

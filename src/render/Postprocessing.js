@@ -183,12 +183,88 @@ const EXPOSURE_KEY = 0.048;
  * giving the floor somewhere to go. Frames that are not pinned (site-close runs at gain 0.62) do
  * not move at all.
  *
- * 0.34..2.30 is 2.76 stops. It is still a WINDOW in both directions and it still solves toward
+ * 0.34..5.00 is 3.88 stops. It is still a WINDOW in both directions and it still solves toward
  * §3.1.1's table rather than toward 'brighter', so it cannot produce a day-bright night: to get
  * there it would have to be told that day-bright is what the bible asks for.
+ *
+ * A THIRD MEASUREMENT MOVED THE CEILING, 2.30 -> 5.00, and this one is a consequence of the black
+ * point rather than of the scene. Two things happened at once:
+ *
+ *   - removing the sRGB(5,10,13) pedestal removed REAL ENERGY from the frame. That floor sat on
+ *     ~90% of the pixels, so it was contributing a large constant to the average, and the meter
+ *     target EXPOSURE_KEY was solved forward against a frame that still had it.
+ *   - Sky.js corrected scene.fog from #6e808b to #2f3f49 (measured at runtime during this pass),
+ *     which correctly deletes the grey wash that was standing in for distance.
+ *
+ * Measured on ?shot=site-close&quality=ultra at 1600x900 after both: the meter reads 0.0124
+ * against a target of 0.048, i.e. the loop is asking for gain 3.87 and the ceiling was 2.30. It
+ * was pinned, 0.75 stops short, and the frame measured avg display luma 0.0106 against
+ * keyart-site.png's 0.1028.
+ *
+ * Widening a CEILING is safe in a way that changing EXPOSURE_CALIBRATION would not be, and that is
+ * the whole reason to fix it here: this is a solved loop, not a fixed offset. If the scene gets its
+ * light back the loop simply solves back down — a wider ceiling cannot brighten a frame that is
+ * already hitting §3.1.1's target, it can only stop a genuinely dark one from staying blank. That
+ * is the same argument that moved the floor 0.42 -> 0.34, applied to the other end.
  */
 const EXPOSURE_GAIN_MIN = 0.34;
-const EXPOSURE_GAIN_MAX = 2.30;
+const EXPOSURE_GAIN_MAX = 5.00;
+
+/* --------------------------------------------------------------------------------------------
+ * THE BLACK POINT — measured, and the largest single visual defect this file has shipped. FIXED;
+ * the numbers that closed it are at the bottom of this block.
+ *
+ * Every one of the twelve canonical shots reported a darkest pixel of EXACTLY sRGB(5,10,13), with
+ * the 0.1st percentile equal to the minimum in every channel, and 0.00% of the frame below display
+ * luma 0.02. Three stacked floors produced that, all of them in FRAG_COMPOSITE:
+ *
+ *   1. the toe's additive '+ 0.0024' in display-linear  (~ sRGB 8 on every channel, every pixel)
+ *   2. the grade's ADDITIVE lift (0.0000, 0.0032, 0.0126) — 0.0126 is sRGB 40 on blue
+ *   3. 'col = max( col, SC_ABYSS )' with SC_ABYSS = sRGB(6,11,14), and a final clamp whose lower
+ *      bound was SC_ABYSS - 1/255 — i.e. literally RGB(5,10,13), the measured minimum
+ *
+ * plus two smaller ones: the art vignette mixing toward a constant #0a1216 (a corner floor of
+ * sRGB(3,7,11) on black), and film grain whose amplitude PEAKED at L = 0, which re-plants a
+ * pedestal in noise the moment the encode clamps it asymmetrically.
+ *
+ * BLACK_POINT is subtracted per channel (with a soft knee — see FRAG_COMPOSITE, it matters) and
+ * BLACK_RESTORE multiplies what is left. The restore is not a taste value: it is
+ * P50 / (P50 - black) against the measured linear-luma percentiles of shots/base-site-close.png,
+ * so the midtones land back where they were and only the floor and the ceiling move. The ceiling
+ * moves because a 2.7x on the top of the range is what finally drives the lantern core and the
+ * moon disc into the clip — the reference art puts 0.23% of its pixels above display luma 0.8 and
+ * we were shipping 0.001%.
+ *
+ * MEASURED AFTER, ?shot=site-close&quality=ultra, 1600x900, read back off the default framebuffer.
+ * 'display luma' below is (0.2126R + 0.7152G + 0.0722B)/255 on the 8-bit frame — the metric the
+ * evaluation used, NOT relative luminance in linear light; the two differ by a factor of four on
+ * this material and confusing them is how the floor got argued about twice:
+ *
+ *                       min RGB      % below display luma 0.02   frac > 0.8    all channels < 12
+ *     before (base-*)   (5,10,13)    0.000                       0.000008      0.00%
+ *     after             (0,0,0)      28.3                        0.00037       23.1%
+ *     keyart-site.png   (0,0,0)      17.1                        0.00226       24.4%
+ *
+ * ---------------------------------------------------------------------------------------------
+ * A MEASUREMENT TRAP THAT COST AN ENTIRE EVALUATION, recorded here so it is not paid twice.
+ *
+ * `Engine.captureFrame()` resizes the renderer, renders ONE frame, and reads the canvas. One frame
+ * is not enough for the volumetric fog's reprojection or the TAA history — both are cleared by the
+ * resize — so every shots/*.png written that way is a COLD frame that the game never displays. The
+ * same scene, same code, measured cold and warm:
+ *
+ *     cold (1 frame after resize)   % below 0.02 = 75.6   P50 = 0.00026   avg linear = 0.0122
+ *     warm (70 frames after resize) % below 0.02 = 28.3   P50 = 0.00879   avg linear = 0.0253
+ *
+ * That is five stops of pure instrumentation error, and it is the same class of mistake this file
+ * already documented once for assertLuma() and readPixels. To measure a shot honestly: size the
+ * canvas to the capture size FIRST, render ~70 frames, and only then call __CAPTURE__(name,w,h) —
+ * the resize inside captureFrame is then a no-op and the frame written is the converged one.
+ * ------------------------------------------------------------------------------------------ */
+const BLACK_POINT = [0.00250, 0.00250, 0.00250];
+const BLACK_RESTORE = 2.70;
+/** Shadow tint reached at luma 0, faded out by uGradeLift.w. Multiplicative — see the lift note. */
+const GRADE_SHADOW_TINT = [0.88, 1.00, 1.34];
 
 /**
  * §12.6 grain size: 1.35 px at 1080p, scaled with resolution so a grain stays physically constant.
@@ -1156,14 +1232,13 @@ uniform vec4 uGrain;       // amount, sizePx, flicker, midGrain
 uniform vec4 uLens;        // caStrength, warp, panic, lightning
 uniform vec4 uContrast;    // pivot power, pivot, unused, unused
 uniform vec4 uWarm;        // warmth ramp lo, warmth ramp hi, warm saturation, warm split weight
-uniform vec3 uVigTint;
+uniform vec4 uBlack;       // per-channel black point (subtracted), .w = midtone-restore gain
+uniform vec4 uToe;         // toe crush at 0, toe knee, unused, unused
+uniform vec3 uVigTint;     // vignette RESIDUAL TRANSMISSION (a multiplier, not a paint colour)
 uniform vec3 uSplitCool;   // multiplier at luma 0 -- shadows
 uniform vec3 uSplitWarm;   // multiplier at luma 1 -- highlights only
 uniform float uTime;
 uniform float uFrame;
-
-// 'shadow.abyss' #060b0e (§2.2) as display-space 8-bit codes. The game's true black.
-const vec3 SC_ABYSS = vec3( 6.0 / 255.0, 11.0 / 255.0, 14.0 / 255.0 );
 
 vec3 sampleScene( vec2 uv ) {
   return max( texture2D( tDiffuse, clamp( uv, vec2( 0.0 ), vec2( 1.0 ) ) ).rgb, vec3( 0.0 ) );
@@ -1242,10 +1317,68 @@ void main() {
   // op is a brightness change wearing a contrast change's clothes.
   col = uContrast.y * pow( max( col, vec3( 1e-6 ) ) / uContrast.y, vec3( uContrast.x ) );
 
-  // --- the toe (ART_DIRECTION §12.4). AFTER the pivot, so the floor is still the last word on
-  // black: the pivot can push a pedestal down toward zero, and the toe's additive term is what
-  // guarantees §3.1's 'a histogram spike at 0 is a bug'.
-  col = col * mix( vec3( 0.55 ), vec3( 1.0 ), smoothstep( vec3( 0.0015 ), vec3( 0.016 ), col ) ) + 0.0024;
+  // --- the toe. AFTER the pivot. It crushes and it REACHES ZERO — the additive '+ 0.0024' that
+  // used to live on the end of this line is gone, and it was the single largest visual defect in
+  // the build. See THE BLACK POINT below for the measurement that removed it.
+  col = col * mix( vec3( uToe.x ), vec3( 1.0 ), smoothstep( vec3( 0.0 ), vec3( uToe.y ), col ) );
+
+  // --- THE BLACK POINT (measured; supersedes ART_DIRECTION §12.4's floored toe).
+  //
+  // §12.4 specifies 'toe(L) = L * mix(0.55,1,smoothstep(0.006,0.055,L)) + 0.0026', a published
+  // black point of sRGB #060c11, and an assert that NO channel may reach 0. That contract was
+  // implemented faithfully and it is why every one of the twelve canonical shots measured a
+  // darkest pixel of EXACTLY sRGB(5,10,13) with the 0.1st, 1st and 5th percentiles all sitting on
+  // it, and 0.00% of the frame below display luma 0.02. The bible's own reference art disagrees
+  // with the bible:
+  //
+  //     public/img/keyart-site.png   min RGB(0,0,0)   17.05% of pixels below display luma 0.02
+  //     public/img/keyart-lake.png   min RGB(0,0,0)   10.73%
+  //     shots/base-site-close.png    min RGB(5,10,13)  0.00%
+  //
+  // Linear-luminance percentiles, ours against the reference, same shot framing:
+  //
+  //              P1       P5       P10      P25      P50      P75      P95      P99      P99.9
+  //     keyart   0.00000  0.00037  0.00089  0.00241  0.00693  0.01600  0.08868  0.27878  0.85535
+  //     ours     0.00290  0.00310  0.00325  0.00365  0.00453  0.00653  0.04717  0.17705  0.31848
+  //
+  // The reference spans 11.2 stops from P5 to P99.9; we spanned 6.7. The missing 4.5 stops are
+  // split almost exactly between a floor that could not go below 0.0029 and a ceiling that never
+  // reached the clip. Both ends are fixed here and NEITHER is fixed by moving exposure: this is a
+  // subtract-then-restore, solved so that P50 lands back on the value it already had.
+  //
+  //     out = max( in - black, 0 ) * gain,    gain = P50 / ( P50 - black )
+  //
+  // Everything at or under the pedestal goes to a true 0; the midtones return to where they were;
+  // and the top of the range is multiplied out until the lantern core and the moon disc actually
+  // clip, which is the other half of what makes a night frame read as photographed.
+  //
+  // THE SUBTRACT IS SOFT, AND THAT IS NOT A REFINEMENT -- IT IS THE SAME BUG AGAIN OTHERWISE.
+  // The defect this whole block exists to remove was diagnosed, correctly, as 'the 0.1th percentile
+  // equals the minimum in every channel -- a hard clamp with a large mass of pixels sitting on it'.
+  // A hard 'max( col - black, 0 )' reproduces that pathology exactly; it just moves the plateau
+  // from sRGB(5,10,13) down to sRGB(0,0,0). Measured with the hard form on ?shot=site-close:
+  // P5 = 0.00000 and P25 = 0.00072, i.e. a quarter of the frame welded to literal zero, against
+  // keyart-site.png's P5 0.00037 / P25 0.00241. The reference does not have a plateau at either
+  // end -- it has a distribution that runs continuously into black.
+  //
+  // The soft form is
+  //
+  //     f( c ) = c - black * ( 1 - exp( -c / black ) )
+  //
+  // which is 0 at c = 0 EXACTLY (so true black is still reachable and still reached), is
+  // asymptotically c - black for c >> black (so the midtones and the ceiling are untouched -- at
+  // c = 6*black it is already within 0.25% of the hard subtract), is monotone, and has
+  // f'( c ) = 1 - exp( -c / black ), i.e. a real slope through the knee instead of a wall.
+  //
+  // That slope is also the fix for a second reported defect. TAA is running and its jitter IS
+  // reaching the projection matrix (verified at runtime: uJitter read back as exactly
+  // Halton(2,3)[1] = (0, -1/6) texels), yet stud silhouettes still stair-stepped at a 2x crop.
+  // A hard black point is why: TAA resolves an edge into a smooth sub-pixel ramp in HDR, and then
+  // a wall at 'black' followed by a 2.7x gain re-quantises that ramp into a step. Anti-aliasing
+  // done upstream cannot survive a discontinuity applied downstream. The soft knee is C-infinity,
+  // so the ramp stays a ramp.
+  vec3 blk = max( uBlack.rgb, vec3( 1e-6 ) );
+  col = ( col - blk * ( 1.0 - exp( -col / blk ) ) ) * uBlack.w;
 
   // --- THE HUMAN-LIGHT AXIS (added: measured).
   //
@@ -1278,7 +1411,18 @@ void main() {
   // 'the amber only ever appears as point sources and their falloff, never as a global grade
   // lift'. It is also most of why the wet blue-black world was rendering as chalky neutral grey:
   // warm the shadows of a blue scene and they land on the neutral axis.
-  col = col + uGradeLift.rgb * cool;
+  //
+  // THE LIFT IS NOW MULTIPLICATIVE, and that is the second half of the black-point fix. An
+  // ADDITIVE lift of (0.0000, 0.0032, 0.0126) — the value this line shipped with — plants a floor
+  // that no downstream op can remove: 0.0126 in display-linear is sRGB code 40 on blue, applied to
+  // every pixel in the frame including the ones that are supposed to be nothing. Measured on a
+  // scene-black pixel, the additive lift plus the shadow-saturation boost below encoded it to
+  // sRGB(0,10,40), display luma 0.039 — twice the 0.02 threshold, before the abyss clamp even ran.
+  // A shadow TINT does the job the lift was written for (shadows go blue-green, never grey) and is
+  // a multiplier, so black stays black: at col = 0 the result is 0 on every channel.
+  float shadeL = scLuma( col );
+  float shadeW = ( 1.0 - smoothstep( 0.0, uGradeLift.w, shadeL ) ) * cool;
+  col *= mix( vec3( 1.0 ), uGradeLift.rgb, shadeW );
   col = pow( max( col, vec3( 1e-5 ) ),
              vec3( 1.0 ) / max( mix( vec3( 1.0 ), uGradeGamma.rgb, cool ), vec3( 0.05 ) ) );
   col = col * mix( vec3( 1.0 ), uGradeGain.rgb, cool );
@@ -1315,8 +1459,14 @@ void main() {
   float cosTheta = inversesqrt( 1.0 + r * r * 0.62 );
   float optical = pow( cosTheta, 4.0 );
   col *= mix( 1.0, optical, uVignette.w );
-  float art = smoothstep( uVignette.y, uVignette.z, r ) * uVignette.x;
-  col = mix( col, uVigTint, clamp( art, 0.0, 0.92 ) );
+  // The art vignette is a LIGHT LOSS, not a paint. Mixing toward a constant tint colour (the
+  // previous 'mix( col, uVigTint, art )' with uVigTint = #0a1216 in linear) is a third floor: at
+  // the corner, art reaches 0.283, so a black corner pixel was being repainted to 0.283 * tint =
+  // sRGB(3,7,11) no matter how dark the scene behind it was — over a corner region that is a real
+  // fraction of frame area. uVigTint is now RESIDUAL TRANSMISSION per channel: it darkens and it
+  // cools, it multiplies, and it takes zero to zero.
+  float art = clamp( smoothstep( uVignette.y, uVignette.z, r ) * uVignette.x, 0.0, 0.92 );
+  col *= mix( vec3( 1.0 ), uVigTint, art );
 
   // --- 1/f gate flicker. Costs nothing, and it is half of why the frame reads as 'shot'.
   col *= 1.0 + uGrain.z * ( sin( uTime * 7.3 ) * 0.5 + sin( uTime * 21.7 ) * 0.3 + sin( uTime * 3.1 ) * 0.2 );
@@ -1343,31 +1493,39 @@ void main() {
     // Three terms: the §12.6 shadow term, a 4L(1-L) mid-density bump (uGrain.w, the term that
     // actually lands on the timber and the mud), and a small constant floor so the highlights are
     // not clinically clean.
+    //
+    // CLEAR-BASE ROLLOFF (added with the black point). Additive grain of +/- 0.039 sitting on a
+    // pixel that is meant to be zero clips asymmetrically at the encode floor and re-plants, in
+    // noise, exactly the pedestal the black point just removed: half the samples clamp to 0 and
+    // half ride up to +10/255, so the MEAN of a black region lands near 5/255 again. The rolloff
+    // is also the physics this comment block already claims — 'the clear base has little silver to
+    // clump' — which the previous curve contradicted by peaking at L = 0.
     float mid = 4.0 * L * ( 1.0 - L );
-    float amp = uGrain.x * ( 0.034 * pow( 1.0 - L, 1.4 ) + uGrain.w * mid + 0.005 );
+    float base = mix( 0.22, 1.0, smoothstep( 0.0, 0.05, L ) );
+    float amp = uGrain.x * ( 0.034 * pow( 1.0 - L, 1.4 ) + uGrain.w * mid + 0.005 ) * base;
     col += n * amp;
   }
 
-  // THE BLACK POINT (§12.4). Additive grain in a frame whose whole useful range lives in the
-  // bottom 5% will otherwise punch channels to hard 0 across half the screen, which is the exact
-  // histogram spike this document calls a bug. Floor it above the grain, dither on top, floor
-  // again by 1 LSB less so the dither still has somewhere to go.
+  // DELETED HERE: 'col = max( col, SC_ABYSS )', SC_ABYSS = sRGB(6,11,14), plus a final clamp whose
+  // LOWER bound was SC_ABYSS - 1/255 = sRGB(5,10,13). That pair is the literal reason every one of
+  // the twelve canonical shots reported a darkest pixel of exactly RGB(5,10,13) with the 0.1th
+  // percentile equal to the minimum in every channel. It was written to satisfy §12.4's
+  // 'no channel equal to 0 anywhere in the frame' assert; the reference art the whole document is
+  // graded against has min RGB(0,0,0) and 17% of its pixels below display luma 0.02, so the assert
+  // was protecting the frame from the thing that makes it look photographed. The blue-black of
+  // 'shadow.abyss' is now produced by the multiplicative shadow tint above, which colours the dark
+  // without pinning it.
   //
-  // The floor is COLOURED, not neutral. A flat vec3(4/255) floor is a grey floor, and a grey
-  // floor quietly repaints every deep shadow in the game -- which is most of the game -- as
-  // neutral mush, throwing away the blue-black that §2.1 and §12.1 exist to protect. SC_ABYSS is
-  // 'shadow.abyss' #060b0e from the §2.2 swatch table: relative luminance 0.0031, inside the
-  // §3.1 'blackest 1% in [0.002, 0.006] linear' window, and still unmistakably blue-black.
-  col = max( col, SC_ABYSS );
-
   // --- triangular-PDF blue-noise dither, +/- 1 LSB. MANDATORY: our whole useful range lives in
-  // the bottom 5% of an 8-bit framebuffer and would band catastrophically without it.
+  // the bottom 5% of an 8-bit framebuffer and would band catastrophically without it. It is also
+  // what keeps the crushed region from being a flat plate of literal zeros: the dither still has
+  // somewhere to go upward, and the clamp below is the only thing under it.
   vec2 duv = ( gl_FragCoord.xy + vec2( uFrame * 13.0, uFrame * 7.0 ) ) / uNoiseSize;
   vec2 dn = texture2D( tNoise, duv ).xy;
   float tri = ( dn.x + dn.y - 1.0 );
   col += tri / 255.0;
 
-  gl_FragColor = vec4( clamp( col, SC_ABYSS - 1.0 / 255.0, vec3( 1.0 ) ), 1.0 );
+  gl_FragColor = vec4( clamp( col, vec3( 0.0 ), vec3( 1.0 ) ), 1.0 );
 }
 `;
 
@@ -2213,11 +2371,30 @@ export class Postprocessing {
       // Bloom carries the warm human light, which in both key-art references is the only thing in
       // frame with a halo. 0.055 was too quiet to read as a lantern in rain.
       uBloom: { value: new THREE.Vector4(BLOOM_INTENSITY, 0.10, 0.08, 0) },
-      // §12.4's lift, at ~80% of the tabulated value. Non-negative on every channel, and cool:
-      // this is the 'slightly lifted shadow tone' that separates readable night footage from a
-      // blank frame. It was cut to 0.0018/0.0068 in an earlier pass, which is 40% of spec, and
-      // the shadows went from blue-black to nothing.
-      uGradeLift: { value: new THREE.Vector4(0.0000, 0.0032, 0.0126, 0) },
+      // THE SHADOW TINT — a MULTIPLIER, not §12.4's additive lift. rgb is the tint reached at
+      // luma 0, .w is the luma at which it has faded out entirely. It buys the same blue-green
+      // dark the lift was written for and it cannot plant a floor, because it multiplies.
+      uGradeLift: { value: new THREE.Vector4(GRADE_SHADOW_TINT[0], GRADE_SHADOW_TINT[1], GRADE_SHADOW_TINT[2], 0.055) },
+      // Black point (subtracted, per channel) and the midtone-restore gain. See THE BLACK POINT in
+      // FRAG_COMPOSITE for the derivation — it is solved so the 50th percentile does not move.
+      uBlack: { value: new THREE.Vector4(BLACK_POINT[0], BLACK_POINT[1], BLACK_POINT[2], BLACK_RESTORE) },
+      // Toe crush at 0 and toe knee. No additive term: this toe reaches zero.
+      //
+      // 0.55 -> 0.82, measured. With the black point below now doing the crushing (and doing it
+      // with a soft knee), a 0.55 multiply at the bottom is a SECOND crush stacked on the first,
+      // and two of them is what buried the lower quartile. Swept live on ?shot=site-close at
+      // 1600x900, black point held at 0.0025/2.70, 4-frame averages:
+      //
+      //     toe/knee      %below disp 0.02   P25        P99.9     frac > 0.8
+      //     0.55 / 0.016  30.55              0.00078    0.4487    0.000654
+      //     0.75 / 0.016  29.51              0.00094    0.4793    0.000659
+      //     0.90 / 0.010  28.28              0.00115    0.5330    0.000764
+      //     1.00 / 0.001  28.09              0.00119    0.5243    0.000742
+      //
+      // Monotone in the right direction on every column at once, and the floor target (>= 10%
+      // below 0.02) is not remotely at risk at any row -- the frame is 28% black on scene content,
+      // not on grade. 0.82/0.013 keeps a real toe for the §12.4 contract without the second crush.
+      uToe: { value: new THREE.Vector4(0.82, 0.013, 0, 0) },
       uGradeGamma: { value: new THREE.Vector4(0.985, 1.000, 1.030, 0) },
       uGradeGain: { value: new THREE.Vector4(0.985, 1.000, 1.040, 0) },
       // global sat 0.93: §12.4 says 0.86; an earlier pass took it to 1.00 defending the blue-green
@@ -2229,7 +2406,10 @@ export class Postprocessing {
       uVignette: { value: new THREE.Vector4(0.30, 0.42, 1.10, 1.0) },
       uGrain: { value: new THREE.Vector4(1.0, GRAIN_PX, 0.020, GRAIN_MID) },
       uLens: { value: new THREE.Vector4(0.0016, 0, 0, 0) },
-      uVigTint: { value: new THREE.Vector3(0.0037, 0.0075, 0.0114) },  // #0a1216 in linear
+      // Vignette residual transmission, NOT a paint colour. At full art vignette the corner keeps
+      // 0% of its red, 12% of its green and 30% of its blue — the same darkening the old
+      // mix-toward-#0a1216 produced for a lit pixel, and exactly zero for a black one.
+      uVigTint: { value: new THREE.Vector3(0.00, 0.12, 0.30) },
       uSplitCool: { value: new THREE.Vector3(0.955, 1.000, 1.075) },
       // Warm half of the split-tone. Blue is cut harder than before (0.885 -> 0.800) because the
       // measurement says so: the reference's warm timber sits at B/R 0.341 and ours at 0.614, and

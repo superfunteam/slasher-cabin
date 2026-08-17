@@ -1348,6 +1348,47 @@ export class Terrain {
 
     this.texDetail = texDetail;
     this.texNormal = texNormal;
+
+    this._bindGroundSets();
+  }
+
+  /**
+   * The REAL baked PBR ground sets, from the shared bakery (`src/render/Textures.js`).
+   *
+   * Why they are uniforms and not `material.map` / `.normalMap` / `.roughnessMap`: the splat in
+   * _patchFragment() replaces `<map_fragment>`, `<roughnessmap_fragment>` and the normal write
+   * wholesale, so anything bound to those slots is sampled by chunks that no longer exist — the
+   * material would carry three textures it never reads. Binding them as uniforms the splat
+   * samples per family is the same bake, the same GPU memory, one owner, and it is the only way
+   * to have BOTH a five-way surface splat AND real photographed-looking ground detail.
+   *
+   * These textures belong to Textures.js. They are NOT pushed to `_disposables` — disposing
+   * another system's shared render target would black out every bracket and tree trunk too.
+   */
+  _bindGroundSets() {
+    this._groundSets = null;
+    const TX = this.ctx?.systems?.get?.('Textures');
+    if (!TX || typeof TX.get !== 'function') {
+      Log.once('terrain:tex-none', 'Terrain: no Textures system — ground detail is procedural only.');
+      return;
+    }
+    try {
+      const pick = (n) => ((typeof TX.has !== 'function' || TX.has(n)) ? TX.get(n) : null);
+      const needles = pick('ground-needles');   // -> pine-needles, tile 1.60 m
+      const mud = pick('ground-mud');           // -> wet-earth,    tile 2.00 m
+      const moss = pick('ground-moss');         // -> moss,         tile 0.80 m
+      const granite = pick('granite');          // -> granite,      tile 1.40 m
+      if (needles?.map && mud?.map && moss?.map && granite?.map) {
+        this._groundSets = { needles, mud, moss, granite };
+        Log.debug('Terrain: ground bound to Textures sets '
+          + `${needles.name}/${mud.name}/${moss.name}/${granite.name} `
+          + `(${needles.resolution ?? '?'}px, tiles ${needles.tile}/${mud.tile}/${moss.tile}/${granite.tile} m).`);
+      } else {
+        Log.once('terrain:tex-partial', 'Terrain: Textures returned an incomplete ground set — procedural detail only.');
+      }
+    } catch (e) {
+      Log.once('terrain:tex', 'Terrain: Textures.get() threw — ground falls back to procedural detail.', e);
+    }
   }
 
   // ===========================================================================================
@@ -1419,9 +1460,35 @@ export class Terrain {
     if (ref) Log.debug(`Terrain: ground constants from Materials '${ref.name}'.`);
 
     const g = this._globalUniforms();
+    const G = this._groundSets;
+    // Samplers must always be bound to something real — an unbound sampler2D is a black texture
+    // and a driver warning. When Textures is absent the splat sees uTexMix 0 and never reads
+    // them, but they still have to point somewhere, so they point at our own detail map.
+    const fbC = this.texDetail, fbN = this.texNormal;
     const U = {
       tDetail: { value: this.texDetail },
       tNrm: { value: this.texNormal },
+
+      // ---- the real ground bakes (see _bindGroundSets) --------------------------------------
+      tGrndN: { value: G ? G.needles.map : fbC },
+      tGrndM: { value: G ? G.mud.map : fbC },
+      tGrndMo: { value: G ? G.moss.map : fbC },
+      tGrndG: { value: G ? G.granite.map : fbC },
+      // wet-earth is the dominant ground family and the only one authored at `hero` resolution,
+      // so its normal (height in .a) and its ORM carry the relief and the micro-occlusion for
+      // every family. Four normal maps and four ORMs would be eight more taps for detail that
+      // mips away by 8 m.
+      tGrndNrm: { value: G ? G.mud.normalMap : fbN },
+      tGrndOrm: { value: G ? G.mud.ormMap : fbC },
+      // repeats per metre = 1 / the set's authored physical tile size
+      uGrndRate: {
+        value: new THREE.Vector4(
+          G ? 1 / G.needles.tile : 1, G ? 1 / G.mud.tile : 1,
+          G ? 1 / G.moss.tile : 1, G ? 1 / G.granite.tile : 1,
+        ),
+      },
+      uTexMix: { value: G ? 1 : 0 },
+
       uRain: g?.uRain ?? { value: 0.15 },
       uTime: g?.uTime ?? { value: 0 },
       // Share the library's wetness integrator when it exists, so the ground is exactly as wet
@@ -1443,7 +1510,7 @@ export class Terrain {
       shader.vertexShader = this._patchVertex(shader.vertexShader);
       shader.fragmentShader = this._patchFragment(shader.fragmentShader);
     };
-    mat.customProgramCacheKey = () => 'terrain-splat-v1';
+    mat.customProgramCacheKey = () => (this._groundSets ? 'terrain-splat-v2-tex' : 'terrain-splat-v2');
 
     this.material = mat;
     this._disposables.push(mat);
@@ -1502,6 +1569,14 @@ vWNrm = normalize( mat3( modelMatrix ) * objectNormal );`;
     const common = /* glsl */`
 uniform sampler2D tDetail;
 uniform sampler2D tNrm;
+uniform sampler2D tGrndN;
+uniform sampler2D tGrndM;
+uniform sampler2D tGrndMo;
+uniform sampler2D tGrndG;
+uniform sampler2D tGrndNrm;
+uniform sampler2D tGrndOrm;
+uniform vec4 uGrndRate;
+uniform float uTexMix;
 uniform float uRain;
 uniform float uWet;
 uniform float uHeightFog;
@@ -1524,6 +1599,26 @@ vec3 gNrmW = vec3( 0.0, 1.0, 0.0 );
 
 vec3 tSrgb( vec3 c ) {
   return mix( pow( ( c + 0.055 ) / 1.055, vec3( 2.4 ) ), c / 12.92, step( c, vec3( 0.04045 ) ) );
+}
+
+/**
+ * Detail from a baked albedo set, normalised against its OWN average.
+ *
+ * The fine tap divided by a very-coarse-mip tap of the same texture is the tile's spatial
+ * detail with its mean divided out — it averages to 1.0 per channel. Multiplying an authored
+ * palette colour by it therefore keeps the ART_DIRECTION 2.2 / 6.2 value AND hue exactly where
+ * they were authored, and lets the bake own only what it should own: grain, clumps, flecks,
+ * cavities. Handing the raw bake straight to 'diffuseColor' instead would let a procedural
+ * texture silently re-author the palette, which is how ground ends up reading as pale sand.
+ *
+ * The mean tap is a LOD BIAS, not an absolute LOD, so it costs nothing at distance (both taps
+ * converge on the same coarse mip, the ratio goes to 1, and the detail correctly fades out).
+ */
+vec3 tVar( sampler2D t, vec2 uv, float amt ) {
+  vec3 fine = texture2D( t, uv ).rgb;
+  vec3 mean = texture2D( t, uv, 6.0 ).rgb;
+  vec3 g = clamp( fine / max( mean, vec3( 0.004 ) ), vec3( 0.30 ), vec3( 2.60 ) );
+  return mix( vec3( 1.0 ), g, amt );
 }
 
 vec4 tTri( sampler2D t, vec3 p, float sc, vec3 an, float w, vec4 planar ) {
@@ -1557,6 +1652,27 @@ vec4 tTri( sampler2D t, vec3 p, float sc, vec3 an, float w, vec4 planar ) {
   vec4 nMesoP = texture2D( tNrm, wp.xz * 0.455 );
   vec3 nMeso = tTri( tNrm, wp, 0.455, an, triW, nMesoP ).xyz * 2.0 - 1.0;
   vec3 nMicro = texture2D( tNrm, wp.xz * 1.82 + off ).xyz * 2.0 - 1.0;
+
+  // ---- REAL baked ground detail (Textures.js sets, bound as uniforms — see _bindGroundSets) --
+  // Sampled at each set's AUTHORED physical tile rate, so a needle is needle-sized and a granite
+  // fleck is fleck-sized. This is the layer that gives the ground surface at 1 m; the procedural
+  // dMacro/dMeso above are what keep it alive at 20 m, where a 1.6 m tile has mipped to nothing.
+  vec3 vN = vec3( 1.0 ), vM = vec3( 1.0 ), vMo = vec3( 1.0 ), vGr = vec3( 1.0 );
+  vec3 texNrm = vec3( 0.0, 0.0, 1.0 );
+  float texAO = 1.0, texRough = 0.5, texH = 0.5;
+  if ( uTexMix > 0.001 ) {
+    // 'off' is the macro domain warp — reusing it stops the four sets tiling in lockstep.
+    vN  = tVar( tGrndN,  wp.xz * uGrndRate.x + off * 0.35, uTexMix );
+    vM  = tVar( tGrndM,  wp.xz * uGrndRate.y + off * 0.20, uTexMix );
+    vMo = tVar( tGrndMo, wp.xz * uGrndRate.z + off * 0.55, uTexMix );
+    vGr = tVar( tGrndG,  wp.xz * uGrndRate.w + off * 0.15, uTexMix );
+    vec4 gn4 = texture2D( tGrndNrm, wp.xz * uGrndRate.y + off * 0.20 );
+    texNrm = gn4.xyz * 2.0 - 1.0;
+    texH = gn4.a;                                   // height, per the set's heightInNormalAlpha
+    vec4 orm = texture2D( tGrndOrm, wp.xz * uGrndRate.y + off * 0.20 );
+    texAO = orm.r;                                  // ORM values are ABSOLUTE — never re-scaled
+    texRough = orm.g;
+  }
 
   // ---- height-based splat blend (never a linear lerp — ART_DIRECTION trap 15) ----
   float tot = vSplat.x + vSplat.y + vSplat.z + vSplat.w + vMisc.x;
@@ -1606,8 +1722,19 @@ vec4 tTri( sampler2D t, vec3 p, float sc, vec3 an, float w, vec4 planar ) {
   vec3 cGrav = mix( tSrgb( vec3( 0.196, 0.227, 0.243 ) ), tSrgb( vec3( 0.318, 0.348, 0.366 ) ), peb );
   cGrav *= 0.85 + 0.30 * dMicro.r;
 
+  // The bake supplies the detail, the palette above supplies the level and the hue.
+  cNeedle *= vN;
+  cMud *= vM;
+  cMoss *= vMo;
+  cGran *= vGr;
+  cGrav *= mix( vGr, vM, 0.45 );                         // gravel has no set: granite over mud
+
   vec3 albedo = cNeedle * wN + cMud * wM + cMoss * wMo + cGran * wG + cGrav * wGr;
-  albedo *= 0.90 + 0.20 * dMacro.g;                      // 10 m scale breakup
+  albedo *= 0.90 + 0.20 * dMacro.g;                      // 10 m scale breakup (procedural)
+  // One MACRO octave of the wet-earth bake at ~12 m per tile. Everything above is either
+  // sub-metre (mips to flat by 8 m) or noise; this is the only real-texture term that is still
+  // there at 20-40 m, and it is what stops open ground reading as one poured sheet at distance.
+  albedo *= tVar( tGrndM, wp.xz * uGrndRate.y * 0.17, uTexMix * 0.60 );
 
   // Roughness per the ART_DIRECTION 6.2 material table: wet earth/duff 0.30, mud 0.16, moss 0.72,
   // granite 0.55, gravel 0.78. The duff term used to be 0.90 - a chalk-matte lambertian sheet that
@@ -1616,11 +1743,22 @@ vec4 tTri( sampler2D t, vec3 p, float sc, vec3 an, float w, vec4 planar ) {
   // highlights on the ground.
   float rough = 0.34 * wN + 0.16 * wM + 0.72 * wMo + 0.55 * wG + 0.78 * wGr;
   float poro  = 1.00 * wN + 1.00 * wM + 0.85 * wMo + 0.55 * wG + 0.70 * wGr;
+  // The set's ORM.g breaks the specular up at 1 m so the lantern pool is not one flat lobe. It
+  // MODULATES the table value rather than replacing it — 6.2 owns the per-family number, the
+  // bake owns the variation around it.
+  rough *= mix( 1.0, 0.72 + 0.56 * texRough, uTexMix * 0.75 );
 
   // ---- dirt in crevices ----
+  // The bake's own height (normalMap.a) is the physically-correct cavity term at 1 m — it knows
+  // where the pits between the clods actually are, which noise can only approximate. Blended in
+  // rather than replacing, because it mips flat past ~8 m and the noise still has to carry there.
   float cav = 1.0 - dMeso.a;
+  cav = mix( cav, clamp( cav * 0.62 + ( 1.0 - texH ) * 0.55, 0.0, 1.0 ), uTexMix * 0.55 );
   float cavMicro = 1.0 - dMicro.a;
   albedo *= mix( 1.0, 0.58, cav * 0.55 + cavMicro * 0.25 );
+  // NOTE: the set's ORM.r is NOT applied to albedo. Ambient occlusion occludes INDIRECT light,
+  // it is not a pigment; folding it into diffuse colour here and into gAO below would darken the
+  // ground twice for one physical effect. It goes into gAO only, at the bottom of this block.
 
   // ---- the four-part wetness model (ART_DIRECTION 6.1) ----
   // 6.1 opens with 'The world is damp every night', so W carries a floor. uWet is the Materials
@@ -1657,7 +1795,8 @@ vec4 tTri( sampler2D t, vec3 p, float sc, vec3 an, float w, vec4 planar ) {
 
   // ---- normal: two-scale, distance-faded into roughness (Toksvig-ish, trap 7) ----
   float nStr = mix( 1.0, 0.18, dfade );
-  vec3 nTS = normalize( vec3( ( nMeso.xy * 1.15 + nMicro.xy * 0.85 ) * nStr, 1.0 ) );
+  vec3 nTS = normalize( vec3(
+    ( nMeso.xy * 1.15 + nMicro.xy * 0.85 + texNrm.xy * ( 1.35 * uTexMix ) ) * nStr, 1.0 ) );
   nTS = normalize( mix( nTS, vec3( 0.0, 0.0, 1.0 ), max( W * cav * 0.75, pud * 0.90 ) ) );
   rough = clamp( max( mix( rough, rough + 0.18, dfade ), sfade * 0.40 ), 0.030, 1.0 );
 
@@ -1674,7 +1813,8 @@ vec4 tTri( sampler2D t, vec3 p, float sc, vec3 an, float w, vec4 planar ) {
   // view factor (vMisc.z, which already accounts for canopy density) as well as by terrain
   // horizon AO is what stops a clearing ringed by 30 m pines reading as an open field.
   float skyView = mix( 0.10, 1.0, vMisc.z * vMisc.z );
-  gAO = clamp( vMisc.w * skyView * ( 1.0 - 0.35 * cav ) * ( 1.0 - 0.20 * cavMicro ), 0.0, 1.0 );
+  gAO = clamp( vMisc.w * skyView * ( 1.0 - 0.35 * cav ) * ( 1.0 - 0.20 * cavMicro )
+             * mix( 1.0, texAO, 0.70 * uTexMix ), 0.0, 1.0 );
 }
 diffuseColor.rgb *= gAlbedo;`;
     if (f.includes('#include <map_fragment>')) f = f.replace('#include <map_fragment>', surface);
@@ -1810,7 +1950,17 @@ if ( uHeightFog > 0.001 ) {
           mesh.updateMatrix();
           mesh.frustumCulled = false;              // we cull ourselves, hierarchically
           mesh.visible = false;
-          mesh.receiveShadow = lv > 0;             // the 128 m level lives outside the cascade
+          // EVERY level receives. The old rule was `lv > 0`, on the theory that level 0 (the
+          // 128 m super-chunks) always sits outside the shadow cascades. It does not: a level-0
+          // node is drawn whenever the camera is >= 80 m from its AABB (lodRadii[0]), and
+          // ART_DIRECTION 3.2 lands cascade 2 at 130 m — so the whole 80-130 m band was drawn on
+          // shadow-rejecting geometry while the 64 m tiles beside it accepted shadows, which is
+          // a hard, moving line across the ground exactly where the treeline shadows fall. The
+          // ground is also the ONLY surface a lantern shadow can land on, and a flag that is
+          // wrong on any level is a flag that will be wrong on the level the player is standing
+          // on the next time the LOD radii are retuned. It costs a shadow-map fetch on terrain
+          // that is already the cheapest fragment in the frame.
+          mesh.receiveShadow = true;
           mesh.castShadow = false;                 // ART_DIRECTION §3.3 caster ledger
           mesh.renderOrder = 0;
           this.group.add(mesh);
@@ -2695,6 +2845,9 @@ diffuseColor.rgb = mix( diffuseColor.rgb, vec3( 0.070, 0.062, 0.036 ), smoothste
     this._expo = this._flow = this._rock = this._path = this._flat = this._ao = null;
     this.material = this.waterMaterial = null;
     this.water = this.puddleMesh = this.reeds = this.logMesh = null;
+    // Textures.js owns these render targets — drop the references, never dispose them.
+    this._groundSets = null;
+    this.texDetail = this.texNormal = null;
     this.group = null;
     this.ready = false;
   }

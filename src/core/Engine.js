@@ -352,26 +352,59 @@ export class Engine {
   // ------------------------------------------------------------- harness
 
   /**
-   * Deterministic single frame at an exact size — used by the visual-critic
-   * screenshot harness. Returns a data URL.
+   * Capture a frame at an exact size for the visual-review harness.
+   *
+   * MUST render a WARM frame, and this is not a detail — it invalidated an entire night of
+   * visual evaluation. Resizing clears TAA history and the volumetric fog's temporal
+   * reprojection, so a single render after a resize produces an image the game never actually
+   * displays. Measured on the same scene, same code: a cold frame reported 75.6% of pixels
+   * below luminance 0.02 where the warm frame reports 28.3% — five stops of pure instrumentation
+   * error, and every agent judging those PNGs was judging an artefact.
+   *
+   * So: resize, then converge, then read. `warmFrames` must exceed the longest temporal
+   * accumulation in the stack (TAA ~16, volumetric reprojection ~8 with a 0.9 blend).
    */
-  async captureFrame({ width, height, dpr = 1 } = {}) {
+  async captureFrame({ width, height, dpr = 1, warmFrames = 70 } = {}) {
     const prev = { w: this.ctx.width, h: this.ctx.height, d: this.ctx.dpr };
-    if (width && height) {
+    const resized = !!(width && height)
+      && (width !== prev.w || height !== prev.h || dpr !== prev.d);
+
+    if (resized) {
       this.ctx.renderer.setPixelRatio(dpr);
       this.ctx.renderer.setSize(width, height, false);
+      this.ctx.width = width;
+      this.ctx.height = height;
+      this.ctx.dpr = dpr;
       this.ctx.camera.aspect = width / height;
       this.ctx.camera.updateProjectionMatrix();
-      for (const sys of this.systems.values()) sys.resize?.(width, height);
+      for (const sys of this.systems.values()) {
+        try { sys.resize?.(width, height); }
+        catch (e) { Log.once(`capture:resize:${sys.__name}`, `resize threw in ${sys.__name}`, e); }
+      }
     }
-    this._render();
+
+    // Converge. Yielding to the event loop lets any per-frame timers and async work settle
+    // the same way they would during normal play.
+    const warm = resized ? warmFrames : Math.min(warmFrames, 24);
+    for (let i = 0; i < warm; i++) {
+      this._render();
+      if ((i & 7) === 7) await new Promise((r) => setTimeout(r, 0));
+    }
+
     const url = this.ctx.canvas.toDataURL('image/png');
-    if (width && height) {
+
+    if (resized) {
       this.ctx.renderer.setPixelRatio(prev.d);
       this.ctx.renderer.setSize(prev.w, prev.h, false);
+      this.ctx.width = prev.w;
+      this.ctx.height = prev.h;
+      this.ctx.dpr = prev.d;
       this.ctx.camera.aspect = prev.w / prev.h;
       this.ctx.camera.updateProjectionMatrix();
-      for (const sys of this.systems.values()) sys.resize?.(prev.w, prev.h);
+      for (const sys of this.systems.values()) {
+        try { sys.resize?.(prev.w, prev.h); }
+        catch (e) { Log.once(`capture:restore:${sys.__name}`, `resize threw in ${sys.__name}`, e); }
+      }
     }
     return url;
   }
