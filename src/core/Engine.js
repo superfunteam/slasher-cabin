@@ -231,8 +231,14 @@ export class Engine {
     if (steps >= MAX_FIXED_STEPS) this._accumulator = 0;   // shed the backlog
 
     // --- variable-step update
+    //
+    // Input is SKIPPED here: it is driven explicitly above (and endFrame'd below) so that every
+    // system sees the same frame-coherent snapshot. Letting the generic loop reach it called
+    // update() a second time, which republished an already-drained accumulator as lookDelta —
+    // so lookDelta was always zero by the time Player read it and THE PLAYER COULD NOT TURN
+    // THEIR HEAD. Found by a playtester, not by any static check.
     for (const sys of this.systems.values()) {
-      if (sys.__failed || typeof sys.update !== 'function') continue;
+      if (sys === input || sys.__failed || typeof sys.update !== 'function') continue;
       try { sys.update(dt, this._elapsed); }
       catch (e) { this._systemThrew(sys, 'update', e); }
     }
