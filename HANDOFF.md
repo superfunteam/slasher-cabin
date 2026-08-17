@@ -19,7 +19,7 @@ torque 1.0, and `build:stage-complete {stage:1}` fired.
 | Draw calls | **352–358 — over the 220 budget in ARCHITECTURE §10.** Unresolved. |
 | Visual, honest | ~5/10 mean over 13 shots; `site-close`/`opening` reach 7; lightning now lands |
 | Assets | 14 generated images, 33 audio beds/SFX/score, 90 VO lines |
-| First load | `dist` **22 MB** (from 59); real cold transfer **6.7 MB**. 17 MB of the 22 is audio. |
+| First load | `dist` **22 MB** on disk (from 59). **On the wire, the title screen fetches ~20 KB of audio, not 17 MB** — audio is on-demand. |
 | Docs | ~12,400 lines across five binding documents |
 
 **The interface is the strongest part** — title screen, the wordless in-engine manual, and the
@@ -155,8 +155,19 @@ would push `site-close` out of spec, so this needs judgement rather than a tweak
    anything (`icons-tools`, `icons-parts`, `mascot-sheet`, `hardware-plate`, two decals) and are
    deliberately left in the build rather than stripped — excluding an image that works in dev and
    404s in production the moment someone wires it is the worst kind of trap.
-   **What is left here is `audio/`, still 17 MB and the largest single item in `dist`** — all 33
-   beds/SFX ship up front. Lazy-loading them behind the preloader is the next obvious win.
+   **Do NOT repeat my mistake about `audio/`.** This entry used to say audio "still ships all 33
+   beds up front", and I dispatched work against it. **False** — and the third stale claim in this
+   file to send an agent after a non-problem. Audio was **already fully on-demand**: all six fetch
+   sites in `src/audio/` are lazy, `index.html` has zero preload links, and the measured audio on
+   the wire at the title screen was **985,683 B, not 14.6 MB.** `dist/audio` weighing 17 MB **on
+   disk** is not 17 MB **on the wire**, and I conflated the two.
+   The real defect there was narrow: `mayFetchGenerated()` gated tier 0 on `started`, which means
+   "the AudioContext is running", **not** "a human touched the page" — so `music-title.mp3`
+   (960,515 B) hit the wire at 6,491 ms against a reveal at 9,230 ms, competing with the splash
+   art for the exact 2.7 s window the preloader exists to protect. Pre-reveal audio is now
+   20,196 B. See §"measurement has lied" — the fix for that first landed WITH a regression
+   (requiring a gesture made the title score never play at all), caught only by an adversarial
+   verifier with an A/B control.
 
 ---
 
