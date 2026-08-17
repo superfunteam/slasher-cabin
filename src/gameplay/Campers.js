@@ -231,43 +231,50 @@ const IDENTITY = {
     archetype: 'counselor', hearing: 0.08, essentialUntil: 7,
     height: 1.71, build: 0.86, head: 'pony', limbs: 'pockets',
     garment: 0xc4643a, skin: 0x8a6a52, hair: 0x1a1512, pants: 0x2e3a44,
-    stepHz: 1.31, armSwingDeg: 15, bob: 0.030, stopsOften: true,
+    coat: 0x232b33, capCol: 0x232b33, legs: 'pants', sock: 0x2e3a44,
+    stepHz: 1.31, armSwingDeg: 16, bob: 0.030, stopsOften: true,
   },
   dale: {
     archetype: 'counselor', hearing: 0.11, essentialUntil: 4,
     height: 1.75, build: 1.16, head: 'cap', limbs: 'down',
     garment: 0x9c5433, skin: 0x6b5148, hair: 0x3a2a1e, pants: 0x39332b,
-    stepHz: 1.05, armSwingDeg: 12, bob: 0.028, stopsOften: false,
+    coat: 0x2b2b26, capCol: 0x353a30, legs: 'pants', sock: 0x39332b,
+    stepHz: 1.05, armSwingDeg: 15, bob: 0.028, stopsOften: false,
   },
   marg: {
     archetype: 'counselor', hearing: 0.11, essentialUntil: 4,
     height: 1.72, build: 1.04, head: 'capback', limbs: 'wide',
     garment: 0xb8552f, skin: 0x8a6a52, hair: 0x5a4430, pants: 0x2b3c46,
+    coat: 0x21303a, capCol: 0x2b3c46, legs: 'shorts', sock: 0x8a6a52,
     stepHz: 1.62, armSwingDeg: 22, bob: 0.034, stopsOften: false,
   },
   coop: {
     archetype: 'counselor', hearing: 0.13, essentialUntil: 4,
     height: 1.68, build: 1.22, head: 'volume', limbs: 'balance',
     garment: 0xc9704a, skin: 0x6b5148, hair: 0x1a1512, pants: 0x4a4436,
+    coat: 0x3a352a, capCol: 0x3a352a, legs: 'shorts', sock: 0x6b5148,
     stepHz: 1.55, armSwingDeg: 19, bob: 0.044, stopsOften: false,
   },
   teddy: {
     archetype: 'kid', hearing: 0.18, essentialUntil: 4,
     height: 1.55, build: 0.80, head: 'bun', limbs: 'across',
     garment: 0xc4643a, skin: 0x4a3830, hair: 0x1a1512, pants: 0x39424a,
-    stepHz: 1.74, armSwingDeg: 10, bob: 0.026, stopsOften: true,
+    coat: 0x2a333a, capCol: 0x2a333a, legs: 'shorts', sock: 0xc4643a,
+    stepHz: 1.74, armSwingDeg: 17, bob: 0.026, stopsOften: true,
   },
   bev: {
     archetype: 'head counselor', hearing: 0.09, essentialUntil: 6,
     height: 1.64, build: 1.34, head: 'hood', limbs: 'torchhigh',
     garment: 0xa85333, skin: 0x8a6a52, hair: 0x7a6448, pants: 0x2f3330,
-    stepHz: 1.18, armSwingDeg: 9, bob: 0.024, stopsOften: true,
+    coat: 0x262a27, capCol: 0x262a27, legs: 'pants', sock: 0x2f3330,
+    stepHz: 1.18, armSwingDeg: 14, bob: 0.024, stopsOften: true,
   },
   ranger: {
     archetype: 'ranger', hearing: 0.08, essentialUntil: 0,
     height: 1.80, build: 1.20, head: 'cap', limbs: 'down',
     garment: 0x7a5a34, skin: 0x6b5148, hair: 0x3a2a1e, pants: 0x2a3028,
-    stepHz: 1.22, armSwingDeg: 13, bob: 0.030, stopsOften: false,
+    coat: 0x232720, capCol: 0x2a3028, legs: 'pants', sock: 0x2a3028,
+    stepHz: 1.22, armSwingDeg: 15, bob: 0.030, stopsOften: false,
   },
 };
 
@@ -396,7 +403,13 @@ export class CamperAgent {
     this.skinColor = ident.skin;
     this.hairColor = ident.hair;
     this.pantsColor = ident.pants;
+    this.coatColor = ident.coat ?? ident.pants;
+    this.capColor = ident.capCol ?? ident.coat ?? ident.pants;
+    this.sockColor = ident.sock ?? ident.skin;
+    this.legStyle = ident.legs === 'shorts' ? 'shorts' : 'pants';
     this.torchTint = def?.torchTint ?? '#ffe6bb';
+    /** Assigned by _applyPalette once the roster exists. -1 until then. */
+    this.visualSlot = -1;
 
     // Transform
     this.position = new THREE.Vector3();
@@ -487,6 +500,11 @@ export class CamperAgent {
     this.torchTargetYaw = 0;
     this.torchAimed = false;
     this.lightSlot = -1;
+    /** Sweep anchor. Frozen while Searching so the arc does not chase its own head. */
+    this.torchAnchorYaw = 0;
+    /** Signed rad/s of the beam this frame — the number `readable` means. Public, for debug. */
+    this.torchRate = 0;
+    this._torchPrevYaw = 0;
 
     // Animation
     this.animPhase = rand.range(0, 1);
@@ -495,6 +513,12 @@ export class CamperAgent {
     this.crouchT = 0;
     this.idleShiftT = rand.range(0, 6);
     this.idleShift = 0;
+    this.idleShiftFrom = 0;
+    this.idleShiftTo = 0;
+    this.idleShiftBlend = 1;      // 0..1 across the 1.1 s transfer (ART §8.7)
+    this.breathT = rand.range(0, 3.1);
+    this.breath = 0;
+    this.cadence = 0;             // gait cycles per second, published for the animator + debug
     this.gazeT = 0;
     this.gazeYaw = 0;
     this.visible = false;
@@ -593,8 +617,12 @@ export class Campers {
     this._player = null; this._physics = null; this._navmesh = null; this._noise = null;
     this._terrain = null; this._props = null; this._lamp = null; this._hud = null;
     this._voice = null; this._audio = null; this._weather = null; this._sky = null;
-    this._cabin = null; this._build = null;
+    this._cabin = null; this._build = null; this._manual = null;
     this._resolveRetry = 0;
+
+    // ---- published illumination breakdown (§9.3 `lum`), so a balance pass can see the terms ----
+    this.lum = 0.06;
+    this.lumParts = { moon: 0.06, lantern: 0, manual: 0, camp: 0, sky: 0 };
 
     // ---- scheduling --------------------------------------------------------------------------
     this._t = 0;
@@ -654,6 +682,22 @@ export class Campers {
     }
 
     this._buildRoster();
+
+    // ORDER IS LOAD-BEARING. _applyPalette() walks `roster` to hand every camper a visual slot,
+    // so it MUST run after _buildRoster(). It used to be called from the tail of _buildBodies(),
+    // which runs first — so it walked an empty Map, every agent kept `visualSlot === -1`, and
+    // _updateVisual() skipped all of them. The entire cast was invisible for the whole game.
+    // If this ever throws, the campers go invisible again, so it is logged loud, never swallowed.
+    try { this._applyPalette(); } catch (e) {
+      Log.error('Campers: palette/slot assignment failed — the cast will be INVISIBLE.', e);
+      Log.error('Campers palette stack:', e?.stack ?? '(no stack)');
+    }
+    let slotted = 0;
+    for (const a of this.roster.values()) if (a.visualSlot >= 0) slotted++;
+    if (this._meshes && slotted === 0) {
+      Log.error(`Campers: ${this.roster.size} in the cast and ZERO visual slots assigned.`);
+    }
+
     this.spawnRoster(this.ctx?.state?.night ?? 1);
     this._bindEvents();
 
@@ -675,7 +719,12 @@ export class Campers {
     this._lamp = s.get('Flashlight') ?? null;
     this._hud = s.get('HUD') ?? null;
     this._voice = s.get('VoiceBank') ?? null;
-    this._audio = s.get('AudioEngine') ?? null;
+    // main.js registers the audio graph as 'Audio'; ARCHITECTURE §9 names the file AudioEngine.js.
+    // Ask for both rather than silently holding null forever.
+    this._audio = s.get('AudioEngine') ?? s.get('Audio') ?? null;
+    // The open manual is a light source pointed at the player's own face (ART §13.8). It is a
+    // `lum` contributor exactly like the lantern, and it is the whole point of §9.4.
+    this._manual = s.get('BlueprintUI') ?? null;
     this._weather = s.get('Weather') ?? null;
     this._sky = s.get('Sky') ?? null;
     this._cabin = s.get('CabinSite') ?? null;
@@ -919,7 +968,8 @@ export class Campers {
   _updateIllumination(now, ppos) {
     if (now - this._lumAt < 1 / CAMPER_TUNING.lumHz) return;
     this._lumAt = now;
-    if (!ppos) { this._lum = 0.06; return; }
+    const parts = this.lumParts;
+    if (!ppos) { this._lum = 0.06; this.lum = 0.06; return; }
 
     // Moonlight. §9.3's "unlit" baseline is 0.06 and that is the moon at full sky.
     let lum = 0.06;
@@ -936,13 +986,33 @@ export class Campers {
       if (isNum(e)) lum *= lerp(0.55, 1.15, clamp01(e));
     }
 
+    parts.moon = lum;
+
     // The player's own lamp. §11.2 / §9.4: 0.55 open, 0.22 hooded.
     const lamp = this._lamp;
+    let lampC = 0;
     if (lamp && (lamp.lit ?? lamp.on)) {
-      const contrib = isNum(lamp.illumination) ? lamp.illumination
+      lampC = isNum(lamp.illumination) ? lamp.illumination
         : (lamp.hooded ? 0.22 : 0.55);
-      lum += contrib;
+      lum += lampC;
     }
+    parts.lantern = lampC;
+
+    // THE OPEN MANUAL (ART §13.8, GAME_DESIGN §9.3). A bone-white sheet held 40 cm from the face
+    // with the lantern on it is a second bounce aimed at the one part of the player a camper can
+    // recognise. BlueprintUI mounts a real SpotLight for it and publishes the same number as
+    // `lumBonus` (0.26 at full open, its own derivation). Without this line, reading the
+    // instructions in the middle of their camp cost NOTHING in stealth terms, and the joke the
+    // whole game is built on — the manual is the antagonist — had no mechanical teeth.
+    // Null-checked because BlueprintUI is a UI system and may not be registered at all.
+    const manual = this._manual;
+    let manC = 0;
+    if (manual) {
+      const b = manual.lumBonus;
+      if (isNum(b) && b > 0) manC = clamp01(b);
+    }
+    lum += manC;
+    parts.manual = manC;
 
     // Camp lights. Props publishes them; a point light 6 m away is a very different night.
     const lights = this._props?.lights;
@@ -975,7 +1045,11 @@ export class Campers {
     if (w && w.lightning > 0) lum += clamp01(w.lightning) * 0.45;
 
     this._lum = clamp01(lum);
+    this.lum = this._lum;
   }
+
+  /** §9.3 `lightF` for the current illumination. Published so the tuning can be measured, not argued. */
+  get lightF() { return CAMPER_TUNING.lightA + CAMPER_TUNING.lightB * this._lum; }
 
   /**
    * §9.4 — on a flash, every camper with an unoccluded line to the player inside their cone is

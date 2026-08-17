@@ -122,6 +122,11 @@ const G = {
   noiseLife: 0.62,           // s
   noiseMaxMetres: 90,        // the Night Three saw. Maps to the screen edge exactly.
   promptFadeMs: 130,
+  // --- wayfinding (see the WAYFINDING section). Its own inset so it can never be confused with,
+  // or overlap, the detection ellipse or the thunder ring.
+  wayInset: 62,              // px in from the viewport edge
+  wayNear: 26,               // m — closer than this and the mark is gone entirely
+  wayFar: 110,               // m — at or beyond this the trail is at full length
 };
 
 /** `GAME_DESIGN.md` §9.3's published thresholds. Do not re-tune here; re-tune there. */
@@ -650,9 +655,21 @@ export class HUD {
     this._camperProbe = 0;
     this._detectKey = '';
 
-    // --- noise rings
+    // --- noise rings. `_ringRX/_ringRY` are the terminal radii — the detection ellipse — and are
+    //     written by resize(). They were missing entirely for a while and every ring was NaN.
     this._rings = [];
     this._noiseGate = 0;
+    this._ringRX = 1;
+    this._ringRY = 1;
+
+    // --- wayfinding (the build site, when you are a long way from it)
+    this._siteP = new THREE.Vector3();
+    this._siteKnown = false;
+    this._siteProbe = 0;
+    this._wayA = 0;            // smoothed opacity
+    this._wayBearing = NaN;    // smoothed screen bearing, degrees
+    this._wayLen = 0;          // smoothed trail length, px
+    this._wayRX = 1; this._wayRY = 1;
 
     // --- mask window
     this._maskRemaining = 0;
@@ -741,12 +758,18 @@ export class HUD {
     this._arcs = [];
     for (let i = 0; i < 3; i++) {
       const g = svg('g');
+      // The contact stroke. A wider, near-black arc UNDER the warm one, exactly the technique
+      // ART §13.8 already blesses for the reticle dot ("1 px #14181a outline"). Without it the
+      // `forming` stage — 1.6 px at 10% warm white — is invisible against moonlit fog, which
+      // means the one warning the player is owed does not arrive. This is not a glow: it is
+      // darker than the frame, never lighter, and it is the same shape as the mark it carries.
+      const shade = svg('ellipse', { 'pathLength': '1000' });
       const outer = svg('ellipse', { 'pathLength': '1000' });
       const inner = svg('ellipse', { 'pathLength': '1000' });
       const notch = svg('line', {});
-      g.appendChild(outer); g.appendChild(inner); g.appendChild(notch);
+      g.appendChild(shade); g.appendChild(outer); g.appendChild(inner); g.appendChild(notch);
       edge.appendChild(g);
-      this._arcs.push({ g, outer, inner, notch });
+      this._arcs.push({ g, shade, outer, inner, notch });
       styleNum(g, 'opacity', 0);
     }
 
@@ -760,21 +783,56 @@ export class HUD {
     for (let i = 0; i < 8; i++) {
       const c = svg('ellipse', { 'fill': 'none' });
       edge.appendChild(c);
-      const ring = { node: c, live: false, t: 0, dur: 1, r0: 0, r1: 0, alpha: 0, seq: 0 };
+      const ring = { node: c, live: false, t: 0, dur: 1, rx0: 0, ry0: 0, rx1: 0, ry1: 0, alpha: 0, bearing: NaN };
       styleNum(c, 'opacity', 0);
       this._rings.push(ring);
     }
+
+    // --- the wayfinding mark. See the WAYFINDING section for why it is shaped like this.
+    // Local space: apex at the origin, the mark runs down +Y, so a rotate() aims the apex
+    // OUTWARD along the site's bearing. Geometry is fixed; only the group transform and two
+    // opacities ever change, so a standing player writes nothing.
+    this._wayG = svg('g', { class: 'way' });
+    this._wayChev = svg('path', {
+      d: 'M-5.6 7.4 L0 0 L5.6 7.4', fill: 'none',
+      stroke: `rgba(${C.warm},1)`, 'stroke-width': W.thin,
+      'stroke-linecap': 'butt', 'stroke-linejoin': 'miter', 'stroke-miterlimit': '4',
+    });
+    this._wayChevShade = svg('path', {
+      d: 'M-5.6 7.4 L0 0 L5.6 7.4', fill: 'none',
+      stroke: 'rgba(8,11,14,.55)', 'stroke-width': W.thin + 1.5,
+      'stroke-linecap': 'butt', 'stroke-linejoin': 'miter', 'stroke-miterlimit': '4',
+    });
+    // The ghost trail (§13.4's dashed "where it came from"). Drawn at unit length and stretched
+    // by the group's Y scale, so distance is a LENGTH, never a number and never a colour.
+    this._wayTrail = svg('path', {
+      d: 'M0 10 V 40', fill: 'none', stroke: `rgba(${C.warm},1)`, 'stroke-width': W.hair,
+      'stroke-dasharray': '2.6 3.4', 'stroke-linecap': 'butt',
+    });
+    this._wayTrailG = svg('g');
+    this._wayTrailG.appendChild(this._wayTrail);
+    this._wayG.appendChild(this._wayTrailG);
+    this._wayG.appendChild(this._wayChevShade);
+    this._wayG.appendChild(this._wayChev);
+    edge.appendChild(this._wayG);
+    styleNum(this._wayG, 'opacity', 0);
+
     root.appendChild(edge);
 
     // --- 2. the reticle -------------------------------------------------------------------------
     const ret = svg('svg', { class: 'ret', viewBox: `0 0 ${G.reticleBox} ${G.reticleBox}` });
     this._ret = ret;
 
-    // The idle state, verbatim from ART §13.8: a single 2 px dot at 55% opacity, 1 px ink outline.
+    // The idle state, ART §13.8: "a single 2 px dot at 55% opacity with a 1 px #14181a outline."
+    // The outline has to sit OUTSIDE the dot to be an outline. The first build drew a r=1.7 ink
+    // ring and then a r=1 warm disc on top of it, so the ink was almost entirely covered and the
+    // remaining 0.7 px of #16181a at 55% over a #1a2530 night sky had a measured contrast ratio of
+    // 1.03:1 — the aim point was, in practice, not on screen. Ring first at r=2.5, disc at r=1.5.
     this._retDotRing = svg('circle', {
-      cx: 22, cy: 22, r: 1.7, fill: 'none', stroke: C.ink, 'stroke-width': 1, 'stroke-opacity': 0.55,
+      cx: 22, cy: 22, r: 2.5, fill: 'none', stroke: 'rgb(10,13,16)', 'stroke-width': 1.6,
+      'stroke-opacity': 0.5,
     });
-    this._retDot = svg('circle', { cx: 22, cy: 22, r: 1, fill: `rgba(${C.warm},.55)`, stroke: 'none' });
+    this._retDot = svg('circle', { cx: 22, cy: 22, r: 1.5, fill: `rgba(${C.warm},.72)`, stroke: 'none' });
     ret.appendChild(this._retDotRing);
     ret.appendChild(this._retDot);
 
@@ -1155,6 +1213,7 @@ export class HUD {
       this._updateDetection(d);
       this._updateNoise(d);
       this._updateMask(d);
+      this._updateWayfind(d);
       this._updateReticle(d);
       this._updatePrompt(d);
       this._updateCarry(d);
@@ -1178,6 +1237,8 @@ export class HUD {
 
     attrStr(this._edge, 'viewBox', `0 0 ${this._w} ${this._h}`);
     for (const a of this._arcs) {
+      attrNum(a.shade, 'cx', cx, 10); attrNum(a.shade, 'cy', cy, 10);
+      attrNum(a.shade, 'rx', rx, 10); attrNum(a.shade, 'ry', ry, 10);
       attrNum(a.outer, 'cx', cx, 10); attrNum(a.outer, 'cy', cy, 10);
       attrNum(a.outer, 'rx', rx, 10); attrNum(a.outer, 'ry', ry, 10);
       attrNum(a.inner, 'cx', cx, 10); attrNum(a.inner, 'cy', cy, 10);
@@ -1187,7 +1248,16 @@ export class HUD {
     attrNum(this._maskRing, 'cy', cy, 10);
     attrNum(this._maskRing, 'rx', rx - G.maskInset, 10);
     attrNum(this._maskRing, 'ry', ry - G.maskInset, 10);
-    for (const r of this._rings) { attrNum(r.node, 'cx', cx, 10); attrNum(r.node, 'cy', cy, 10); }
+    // Noise rings terminate ON the detection ellipse — that is the whole mapping, so a ring that
+    // fills the frame means "as far as the saw carried on Night Three" and nothing else.
+    this._ringRX = rx; this._ringRY = ry;
+    for (const r of this._rings) {
+      attrNum(r.node, 'cx', cx, 10); attrNum(r.node, 'cy', cy, 10);
+      r.live = false;
+      styleNum(r.node, 'opacity', 0);
+    }
+    this._wayRX = Math.max(20, cx - G.wayInset);
+    this._wayRY = Math.max(20, cy - G.wayInset);
   }
 
   /**
@@ -1693,6 +1763,13 @@ export class HUD {
 
       styleNum(a.g, 'opacity', 1);
       const centre = omni ? 0 : s.smoothBearing;
+      // The contact stroke, first, underneath: 2.6 px wider and near-black. It is what makes the
+      // 10%-alpha `forming` arc survive being drawn across a moonlit sky instead of across the
+      // treeline. It scales with the mark and it is never brighter than the frame.
+      attrNum(a.shade, 'stroke-width', stroke + 2.6, 10);
+      attrStr(a.shade, 'stroke', 'rgb(8,11,14)');
+      styleNum(a.shade, 'opacity', clamp(alpha * 1.5, 0, 0.5), 200);
+      this._setArcE(a.shade, centre, width);
       attrNum(a.outer, 'stroke-width', stroke, 10);
       attrStr(a.outer, 'stroke', `rgb(${rgb})`);
       styleNum(a.outer, 'opacity', alpha, 200);
@@ -1805,20 +1882,31 @@ export class HUD {
     const frac = clamp(metres / G.noiseMaxMetres, 0, 1.7);
     slot.live = true;
     slot.t = 0;
-    slot.r0 = this._ringR * 0.05;
-    slot.r1 = this._ringR * (0.10 + 0.92 * frac);
+    // The ring is an ELLIPSE, matched to the frame, so both radii scale by the same factor and a
+    // full-frame ring is a full-frame ring at any aspect. `r` is not a thing on an <ellipse>: the
+    // first build animated `r` off an undefined `_ringR`, so every ring in the game's history was
+    // `r="NaN"` on an element that ignores `r`, i.e. no noise feedback ever reached a player.
+    const f0 = 0.05, f1 = 0.10 + 0.92 * frac;
+    slot.rx0 = this._ringRX * f0; slot.ry0 = this._ringRY * f0;
+    slot.rx1 = this._ringRX * f1; slot.ry1 = this._ringRY * f1;
     slot.dur = G.noiseLife * (0.72 + 0.5 * clamp01(frac));
-    slot.alpha = clamp(0.14 + 0.24 * intensity, 0.12, 0.40) * (masked ? 0.55 : 1);
+    slot.alpha = clamp(0.16 + 0.28 * intensity, 0.14, 0.46) * (masked ? 0.55 : 1);
     slot.bearing = bearing;
-    styleStr(slot.node, 'strokeDasharray', masked ? '5 7' : 'none');
-    attrNum(slot.node, 'stroke-width', masked ? 1.0 : 1.5, 10);
+    attrNum(slot.node, 'stroke-width', masked ? 1.1 : 1.7, 10);
     attrStr(slot.node, 'stroke', `rgba(${C.warm},1)`);
+    attrStr(slot.node, 'pathLength', '1000');
     if (Number.isFinite(bearing)) {
-      attrStr(slot.node, 'pathLength', '1000');
-      setArc(slot.node, this._wrapDeg(bearing * 180 / Math.PI), 84);
-    } else if (!masked) {
-      slot.node.style.strokeDasharray = 'none';
-      const m = slot.node.__hud; if (m) { m.arcLen = undefined; m.arcOff = undefined; }
+      // A camper-made noise: an 84° cap on the ellipse at the source's bearing. `_setArcE` and not
+      // `setArc` — 12 o'clock is only three-quarters of the way round a CIRCLE.
+      this._setArcE(slot.node, this._wrapDeg(bearing * 180 / Math.PI), 84);
+    } else {
+      // The player's own noise: the whole ring, because it went everywhere. Under masking it is
+      // dashed, so the storm visibly eats it. Written straight past the memo, and the memo is
+      // invalidated so the next directional use of this pooled node still repaints.
+      slot.node.style.strokeDasharray = masked ? '5 7' : 'none';
+      slot.node.style.strokeDashoffset = '0';
+      const m = slot.node.__hud || (slot.node.__hud = {});
+      m.arcLen = -1; m.arcOff = -1;
     }
   }
 
@@ -1832,9 +1920,9 @@ export class HUD {
       if (t >= 1) { r.live = false; styleNum(r.node, 'opacity', 0); continue; }
       // easeOutCubic: the ring leaves fast and dies slow, the shape of a real transient.
       const e = rm ? 1 : 1 - Math.pow(1 - t, 3);
-      const rr = r.r0 + (r.r1 - r.r0) * e;
       const fade = rm ? (1 - t) : (1 - t) * (1 - t);
-      attrNum(r.node, 'r', rr, 4);
+      attrNum(r.node, 'rx', r.rx0 + (r.rx1 - r.rx0) * e, 4);
+      attrNum(r.node, 'ry', r.ry0 + (r.ry1 - r.ry0) * e, 4);
       styleNum(r.node, 'opacity', (this._stripped || this._paused) ? 0 : r.alpha * fade, 200);
     }
   }
@@ -1882,9 +1970,9 @@ export class HUD {
         this._caption(`[thunder — ${Math.max(1, Math.round(this._maskRemaining))} seconds]`);
       }
       const frac = clamp01(this._maskRemaining / Math.max(this._maskSpan, 0.5));
-      attrNum(ring, 'stroke-width', 2.2, 10);
+      attrNum(ring, 'stroke-width', 2.6, 10);
       this._setArcE(ring, 0, G.maskArcMax * frac);
-      let a = 0.30;
+      let a = 0.40;
       // The last quarter of the window blinks — the only urgent thing this file ever does, and it
       // is urgent because the alternative is hammering into silence.
       if (!this._reducedMotion && frac < 0.28) a *= 0.70 + 0.30 * Math.sin(this._t * TAU * 2.4);
@@ -1896,14 +1984,160 @@ export class HUD {
     if (!this._maskWasIncoming) { this._maskWasIncoming = true; this._maskWasOpen = false; }
     const t = 1 - clamp01(this._maskIncoming / 12);
     attrNum(ring, 'stroke-width', 1.1, 10);
-    setArc(ring, 0, G.maskArcMax * 0.62 * t);
-    styleNum(ring, 'opacity', 0.09 + 0.09 * t, 200);
+    // `_setArcE`, not `setArc`: this node is an ellipse and 12 o'clock is not at 750/1000 of its
+    // perimeter. With the circle helper the incoming arc drew on the wrong side of the frame.
+    this._setArcE(ring, 0, G.maskArcMax * 0.62 * t);
+    styleNum(ring, 'opacity', 0.12 + 0.12 * t, 200);
 
     if (this._maskIncoming < 3.2 && !this._maskIncomingCaptioned) {
       this._maskIncomingCaptioned = true;
       this._caption(`[thunder — ${Math.max(1, Math.round(this._maskIncoming))} seconds]`);
     }
     if (this._maskIncoming > 4) this._maskIncomingCaptioned = false;
+  }
+
+  // ===============================================================================================
+  // WAYFINDING — where the work is
+  //
+  // The playtest note is blunt: the player does not know where to go. The plot is at world
+  // (-140, 128) and the spawn is not, so the honest first experience of Night One is a man with a
+  // lantern in an identical forest in every direction. §13.8 forbids an objective marker and it is
+  // right to: a floating diamond over the site would end the game's whole proposition.
+  //
+  // So this is not a marker. It is the manual's GHOST TRAIL (§13.4 — the dashed line that shows
+  // where a part came from), aimed at the plot, drawn on its own inset ellipse well inboard of the
+  // detection ring so the two can never be confused or overlap:
+  //
+  //   an open chevron, hairline, apex pointing OUTWARD along the site's bearing
+  //   a dashed trail behind it whose LENGTH is the distance
+  //
+  // Nothing about it is a number, a name or a hue. It is the same mark the manual uses to say
+  // "this came from over there", pointed at the only place in the world the manual is about.
+  //
+  // FOUR THINGS IT WILL NOT DO
+  //   1. It does not appear when you are on the plot. Below 26 m it is gone; it fades in across
+  //      26→45 m so arriving is a fade, not a pop.
+  //   2. It does not compete with the detection meter. Above `critical` it fades out entirely —
+  //      when something has you, navigation is not the thing you need to be reading.
+  //   3. It does not survive `setStripped()`. §12.8's Night Seven means Night Seven.
+  //   4. It does not point at parts, tools, campers or the exit. Only the plot, only ever.
+  // ===============================================================================================
+
+  /** Where the plot is. Probed at 0.5 Hz — `CabinSite.center` is set once, in its init(). */
+  _pollSite(dt) {
+    this._siteProbe -= dt;
+    if (this._siteProbe > 0) return;
+    this._siteProbe = 2.0;
+
+    const cs = this._sys('CabinSite');
+    let p = null;
+    try { p = cs?.center ?? cs?.origin ?? cs?.plotCenter ?? null; } catch { p = null; }
+    if (p && Number.isFinite(p.x) && Number.isFinite(p.z)) {
+      this._siteP.set(p.x, p.y || 0, p.z);
+      this._siteKnown = true;
+      return;
+    }
+
+    // Fallback: the centroid of tonight's slots. A stubbed CabinSite must not cost the player
+    // their bearings. Runs at 0.5 Hz over <= 128 entries and allocates nothing.
+    const bs = this._sys('BuildSystem');
+    let list = null;
+    try { list = bs?.nightSlots; } catch { list = null; }
+    if (list && list.length) {
+      let sx = 0, sy = 0, sz = 0, n = 0;
+      const m = Math.min(list.length, 128);
+      for (let i = 0; i < m; i++) {
+        const s = list[i];
+        if (!s || !Number.isFinite(s.px)) continue;
+        sx += s.px; sy += s.py; sz += s.pz; n++;
+      }
+      if (n > 0) { this._siteP.set(sx / n, sy / n, sz / n); this._siteKnown = true; return; }
+    }
+    this._siteKnown = false;
+  }
+
+  _updateWayfind(dt) {
+    this._pollSite(dt);
+    const g = this._wayG;
+    if (!g) return;
+
+    const eye = this._siteKnown ? this._eye(_v1) : null;
+    let want = 0, dist = 0, bearingDeg = NaN;
+
+    const phaseOk = this._phase === 'build' || this._phase === 'chase' || this._phase === 'briefing';
+    const gateOk = !this._stripped && !this._paused && !this._hidden && !this._blueprintOpen && phaseOk;
+
+    if (eye && gateOk) {
+      const dx = this._siteP.x - eye.x, dz = this._siteP.z - eye.z;
+      dist = Math.sqrt(dx * dx + dz * dz);
+      if (dist > 1e-3) {
+        const worldYaw = Math.atan2(dx, -dz);
+        bearingDeg = this._wrapDeg((worldYaw - this._cameraYaw()) * 180 / Math.PI);
+      }
+      // Distance ramp. Nothing at all inside 26 m; full weight past 45 m.
+      want = clamp01((dist - G.wayNear) / 19) * 0.17;
+      // Yield to the detection meter. `critical` and above owns the frame.
+      let peak = 0;
+      for (let i = 0; i < this._sources.length; i++) {
+        const s = this._sources[i];
+        if (s.active && s.level > peak) peak = s.level;
+      }
+      if (peak > DETECT.building) want *= 1 - clamp01((peak - DETECT.building) / (DETECT.critical - DETECT.building));
+    }
+
+    // Ease in and out over ~0.9 s so it never blinks on at a doorway.
+    const k = this._reducedMotion ? Math.min(1, dt * 12) : Math.min(1, dt * 3.2);
+    this._wayA += (want - this._wayA) * k;
+    if (this._wayA < 0.004) { styleNum(g, 'opacity', 0); this._wayA = 0; return; }
+    styleNum(g, 'opacity', this._wayA, 400);
+
+    if (!Number.isFinite(bearingDeg)) return;
+
+    // Smooth across the ±180 seam, same as the detection arc.
+    if (!Number.isFinite(this._wayBearing)) this._wayBearing = bearingDeg;
+    else {
+      const delta = this._wrapDeg(bearingDeg - this._wayBearing);
+      this._wayBearing = this._wrapDeg(this._wayBearing + delta * Math.min(1, dt * 8));
+    }
+
+    // Trail length IS the distance: 10 px at 26 m, 52 px at 110 m and beyond.
+    const targetLen = 10 + 42 * clamp01((dist - G.wayNear) / (G.wayFar - G.wayNear));
+    this._wayLen += (targetLen - this._wayLen) * Math.min(1, dt * 2.5);
+
+    // One transform string, and only when the quantised pose actually changed — 1.5° of bearing
+    // and 3 px of trail. A standing player writes nothing at all.
+    const b = this._wayBearing;
+    this._pointAtR(b, this._wayRX, this._wayRY, _pt);
+    const cx = this._w / 2, cy = this._h / 2;
+    let ux = _pt.x - cx, uy = _pt.y - cy;
+    const ul = Math.hypot(ux, uy) || 1;
+    ux /= ul; uy /= ul;
+    // rotate(θ) sends local (0,-1) to (sin θ, -cos θ); we want that to be the outward unit vector.
+    const rot = Math.atan2(ux, -uy) * 180 / Math.PI;
+
+    const m = g.__hud || (g.__hud = {});
+    const qx = Math.round(_pt.x), qy = Math.round(_pt.y), qr = Math.round(rot / 1.5) * 1.5;
+    if (m.wx !== qx || m.wy !== qy || m.wr !== qr) {
+      m.wx = qx; m.wy = qy; m.wr = qr;
+      g.setAttribute('transform', `translate(${qx} ${qy}) rotate(${qr})`);
+    }
+    const tm = this._wayTrailG.__hud || (this._wayTrailG.__hud = {});
+    const qs = Math.round(this._wayLen / 3) * 3;
+    if (tm.len !== qs) {
+      tm.len = qs;
+      // The trail path is authored from y=10 to y=40 (30 px); scale Y to hit the wanted length.
+      this._wayTrailG.setAttribute('transform', `scale(1 ${(qs / 30).toFixed(3)})`);
+    }
+  }
+
+  /** `_pointAt`, but on an arbitrary ellipse — the wayfinder rides its own, further inboard. */
+  _pointAtR(bearingDeg, rx, ry, out) {
+    const b = bearingDeg * Math.PI / 180;
+    const dx = Math.sin(b), dy = -Math.cos(b);
+    const t = Math.atan2(rx * dy, ry * dx);
+    out.x = this._w / 2 + Math.cos(t) * rx;
+    out.y = this._h / 2 + Math.sin(t) * ry;
+    return out;
   }
 
   /**
@@ -1943,8 +2177,10 @@ export class HUD {
     const target = verb ? 1 : 0;
     this._reticleFocus += (target - this._reticleFocus) * Math.min(1, dt * (this._reducedMotion ? 30 : 14));
     const f = this._reticleFocus;
-    styleNum(this._retDot, 'opacity', 0.55 - 0.34 * f, 100);
-    styleNum(this._retDotRing, 'opacity', 0.55 - 0.34 * f, 100);
+    // The alpha now lives in the fill/stroke (0.72 warm, 0.50 ink); this is the recede, not the
+    // base. Idle 0.72 · 1.00, verb-present 0.72 · 0.45 — the aim point never leaves the screen.
+    styleNum(this._retDot, 'opacity', 1 - 0.55 * f, 100);
+    styleNum(this._retDotRing, 'opacity', 1 - 0.55 * f, 100);
 
     // The seating band. Only when BuildSystem asks (`showMeter` — `story` difficulty or hints).
     if (this._seatingP >= 0) {
@@ -2211,8 +2447,16 @@ export class HUD {
   // VISIBILITY
   // ===============================================================================================
 
+  /**
+   * The whole overlay, on or off. The phase gate is here and not in each element because a reticle
+   * dot over the title card is the single most obvious way for this file to look broken, and
+   * `Menu.js` does not know we exist. Unknown phases are treated as PLAYABLE — a HUD that
+   * disappears because someone added a phase string is worse than one that shows up early.
+   */
   _updateVisibility() {
-    const hidden = this._hidden || this._paused;
+    const p = this._phase;
+    const offPhase = p === 'menu' || p === 'gameover' || p === 'night-end';
+    const hidden = this._hidden || this._paused || offPhase;
     const v = hidden ? '1' : '0';
     if (this._root.dataset.hidden !== v) this._root.dataset.hidden = v;
   }

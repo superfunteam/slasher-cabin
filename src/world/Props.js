@@ -389,6 +389,88 @@ void main(){
 }
 `;
 
+/*
+ * STAIN OVERLAY. The three public/img decals are RGB with no alpha channel, so the only honest
+ * way to use them at night is as a darkening mask: pull a mask out of luminance, remap it with a
+ * contrast window, and emit black with that as straight alpha. Identical safety property to
+ * DECAL_FRAG — if any pass ignores blending the worst case is a black smudge, never a white card.
+ */
+const STAIN_FRAG = /* glsl */`
+uniform sampler2D uTex;
+uniform float uStrength;
+uniform vec2 uContrast;     // x low, y high — the luminance window that becomes 0..1 stain
+uniform vec2 uFade;
+varying vec2 vUv;
+varying float vDepth;
+void main(){
+  vec3 t = texture2D(uTex, vUv).rgb;
+  float lum = dot(t, vec3(0.2126, 0.7152, 0.0722));
+  float m = 1.0 - smoothstep(uContrast.x, uContrast.y, lum);
+  // feather the quad edges so a stain never shows its own rectangle
+  vec2 e = min(vUv, 1.0 - vUv) * 2.0;
+  float edge = smoothstep(0.0, 0.34, min(e.x, e.y));
+  float a = m * edge * uStrength * (1.0 - smoothstep(uFade.x, uFade.y, vDepth));
+  if (a < 0.004) discard;
+  gl_FragColor = vec4(0.0, 0.0, 0.0, a);
+}
+`;
+
+/*
+ * Woodsmoke. Additive on purpose: smoke over a near-black sky is only visible because the fire
+ * lights it from below, and additive can only ever brighten — so the failure mode is "invisible"
+ * rather than "grey polygon". Density falls off with height and the column shears with uWind.
+ */
+const SMOKE_VERT = /* glsl */`
+uniform float uTime;
+uniform vec3 uWind;
+attribute vec2 aCorner;
+attribute vec3 aInfo;      // x seed, y 1/lifetime, z base half-width
+varying vec2 vUv;
+varying float vLife;
+varying float vSeed;
+varying float vDepth;
+void main(){
+  float seed = aInfo.x;
+  float life = fract(uTime * aInfo.y + seed);
+  float rise = life * 5.2;
+  float grow = aInfo.z * (0.35 + life * 2.6);
+  vec3 p = position;
+  p.y += rise;
+  p.x += (sin(life * 3.1 + seed * 19.0) * 0.42) * life + uWind.x * life * life * 3.4;
+  p.z += (cos(life * 2.7 + seed * 11.0) * 0.40) * life + uWind.z * life * life * 3.4;
+  vec4 mv = modelViewMatrix * vec4(p, 1.0);
+  mv.xy += aCorner * grow;
+  gl_Position = projectionMatrix * mv;
+  vUv = aCorner + 0.5;
+  vLife = life;
+  vSeed = seed;
+  vDepth = -mv.z;
+}
+`;
+
+const SMOKE_FRAG = /* glsl */`
+${NOISE_GLSL}
+uniform float uTime;
+uniform float uIntensity;
+uniform float uFogK;
+uniform vec3 uColor;
+varying vec2 vUv;
+varying float vLife;
+varying float vSeed;
+varying float vDepth;
+void main(){
+  float d = length(vUv - 0.5) * 2.0;
+  float a = 1.0 - smoothstep(0.10, 1.0, d);
+  a *= a;
+  float n = scFbm(vUv * 3.4 + vec2(vSeed * 9.0, -uTime * 0.22));
+  a *= 0.35 + 0.95 * n;
+  // bright and tight at the coals, wide and gone by the canopy
+  a *= (1.0 - vLife) * (1.0 - vLife) * (0.35 + 0.65 * smoothstep(0.0, 0.18, vLife));
+  a *= uIntensity * exp(-vDepth * uFogK);
+  gl_FragColor = vec4(uColor * a, 1.0);
+}
+`;
+
 /* ==============================================================================================
  * Geometry helpers
  * ============================================================================================ */
@@ -450,6 +532,66 @@ function taperHull(geo, halfLen, power, keep) {
   geo.computeVertexNormals();
 }
 
+/** The three additive-glow pseudo-materials Kit understands. Resolved in Props._emit(). */
+const GLOW_KEYS = { 'glow-canvas': 1, 'glow-window': 1, 'glow-fire': 1 };
+
+/**
+ * A cloth panel: a subdivided unit plane lying in local XZ (normal +Y), displaced in Y so it
+ * sags and wrinkles like canvas under its own weight instead of reading as a flat plate.
+ *
+ * The displacement is in METRES and survives the TRS as long as the caller passes sy === 1 —
+ * which is why every call site scales X and Z only. A tent roof made of two rigid boxes has a
+ * perfectly straight ridge and a perfectly straight eave; that pair of straight lines is the
+ * single strongest "this is a game asset" tell in the camp, and it is what this fixes.
+ *
+ * @param {number} segU,segV  subdivision
+ * @param {number} sag        metres of droop at the panel centre (negative = down)
+ * @param {number} wrinkle    metres of fine crease amplitude
+ * @param {number} seed
+ */
+function clothPanel(segU, segV, sag, wrinkle, seed) {
+  const g = new THREE.PlaneGeometry(1, 1, segU, segV);
+  g.rotateX(-Math.PI / 2);
+  const p = g.attributes.position;
+  for (let i = 0; i < p.count; i++) {
+    const u = p.getX(i) + 0.5, v = p.getZ(i) + 0.5;
+    const hold = Math.sin(Math.PI * u) * Math.sin(Math.PI * v);
+    const w = wrinkle * (
+      0.52 * Math.sin(u * 21.7 + v * 8.3 + seed)
+      + 0.30 * Math.sin(v * 33.1 - u * 6.9 + seed * 2.7)
+      + 0.18 * (ihash1((((u * 256) | 0) * 149 + ((v * 256) | 0) + (seed * 71 | 0)) | 0) - 0.5) * 2
+    );
+    p.setY(i, sag * hold + w * Math.min(1, hold * 3.2));
+  }
+  p.needsUpdate = true;
+  g.computeVertexNormals();
+  return g;
+}
+
+/**
+ * Segment/AABB overlap. Used at INIT ONLY, to bake the shadow a camp cot and a duffel bag throw
+ * onto the inside of a lit tent's canvas. A glowing tent with nothing in it is a lampshade; a
+ * glowing tent with a black cot-shaped hole in the light is somebody's bed.
+ * @param {object} b {cx,cy,cz,hx,hy,hz}
+ */
+function segHitsBox(lx, ly, lz, px, py, pz, b) {
+  const d = [px - lx, py - ly, pz - lz];
+  const o = [lx, ly, lz];
+  const c = [b.cx, b.cy, b.cz];
+  const h = [b.hx, b.hy, b.hz];
+  let t0 = 0, t1 = 1;
+  for (let a = 0; a < 3; a++) {
+    const lo = c[a] - h[a], hi = c[a] + h[a];
+    if (Math.abs(d[a]) < 1e-7) { if (o[a] < lo || o[a] > hi) return false; continue; }
+    let ta = (lo - o[a]) / d[a], tb = (hi - o[a]) / d[a];
+    if (ta > tb) { const s = ta; ta = tb; tb = s; }
+    if (ta > t0) t0 = ta;
+    if (tb < t1) t1 = tb;
+    if (t0 > t1) return false;
+  }
+  return true;
+}
+
 /**
  * Geometry accumulator. Everything the camp is made of goes through here, is transformed into
  * world space, gets metric UVs and an aExposure attribute, and is merged into one mesh per
@@ -486,7 +628,7 @@ class Kit {
     for (let i = 0; i < n; i++) { ex[i * 2] = e; ex[i * 2 + 1] = 1; }
     g.setAttribute('aExposure', new THREE.BufferAttribute(ex, 2));
 
-    const isGlow = mat === 'glow-canvas' || mat === 'glow-window';
+    const isGlow = GLOW_KEYS[mat] === 1;
     if (isGlow) {
       const gl = new Float32Array(n);
       const pos = g.attributes.position;
@@ -626,6 +768,11 @@ export class Props {
     this._instanced = [];
     this._ownGeo = [];
     this._ownMat = [];
+    /** @type {THREE.Texture[]} textures Props created itself (the stain overlay). */
+    this._ownTex = [];
+    this._stains = [];          // {m:Matrix4} stain-overlay quads, world space
+    this._stainCount = 0;
+    this.stainsReady = false;
     /** @type {Map<string,THREE.Material>} material keys Props authors itself, see _makeFabric. */
     this._ownNamed = new Map();
     this._unsub = [];
@@ -858,6 +1005,46 @@ export class Props {
     return v;
   }
 
+  /** Resolve one of the three additive-glow pseudo-material keys. */
+  _glowMat(name) {
+    if (name === 'glow-canvas') return this.matGlowCanvas;
+    if (name === 'glow-fire') return this.matFireGlow;
+    return this.matGlowWindow;
+  }
+
+  /**
+   * MATERIAL AUDIT. Every key this file asks for, resolved once, out loud.
+   *
+   * The failure this exists to catch is silent: `Materials.get('cloth')` for a key that is not
+   * in SPECS returns a flat untextured `mid.slate` standard material and warns ONCE, globally —
+   * so the second, third and fourth bad key are invisible, and the camp renders as grey boxes
+   * with nobody able to say why. This walks every key in M plus every Props-owned key and
+   * reports, per key, whether the shared library actually has it and whether the material that
+   * came back carries a colour map. Anything without a map is named at WARN level.
+   */
+  _auditMaterials() {
+    const keys = Array.from(new Set([...Object.values(M), ...this._ownNamed.keys()]));
+    const flat = [];
+    const ok = [];
+    for (const k of keys) {
+      const own = this._ownNamed.has(k);
+      const known = own || !this._mats || typeof this._mats.has !== 'function' || this._mats.has(k);
+      let m = null;
+      try { m = this._mat(k); } catch (e) { Log.error(`Props: _mat('${k}') threw`, e); }
+      const mapped = !!(m && (m.map || m.normalMap || m.roughnessMap));
+      if (!known || !mapped) flat.push(`${k}${own ? '(own)' : ''}${known ? '' : ':UNKNOWN'}${mapped ? '' : ':NO-MAP'}`);
+      else ok.push(k);
+    }
+    this.materialAudit = { total: keys.length, textured: ok.length, flat };
+    if (flat.length) {
+      Log.warn(`Props: ${flat.length}/${keys.length} material keys are untextured or unknown — `
+        + `these render as flat colour: ${flat.join(', ')}`);
+    } else {
+      Log.debug(`Props: material audit clean — ${ok.length}/${keys.length} keys textured.`);
+    }
+    return this.materialAudit;
+  }
+
   _mat(name) {
     const own = this._ownNamed.get(name);
     if (own) return own;
@@ -888,12 +1075,10 @@ export class Props {
   _emit(kit) {
     const parts = kit.build();
     for (const p of parts) {
-      const mat = (p.mat === 'glow-canvas') ? this.matGlowCanvas
-        : (p.mat === 'glow-window') ? this.matGlowWindow
-          : this._mat(p.mat);
+      const glow = GLOW_KEYS[p.mat] === 1;
+      const mat = glow ? this._glowMat(p.mat) : this._mat(p.mat);
       const mesh = new THREE.Mesh(p.geometry, mat);
       mesh.name = `sc-props-${p.mat}`;
-      const glow = p.mat === 'glow-canvas' || p.mat === 'glow-window';
       mesh.castShadow = !glow;
       mesh.receiveShadow = !glow;
       mesh.renderOrder = glow ? 6 : 0;
@@ -1034,6 +1219,19 @@ export class Props {
       toneMapped: false,
     });
 
+    this.uSmoke = {
+      uTime: new THREE.Uniform(0), uIntensity: new THREE.Uniform(0.115),
+      uFogK: new THREE.Uniform(fogK),
+      uWind: new THREE.Uniform(new THREE.Vector3(0.2, 0, 0.1)),
+      // Woodsmoke lit from below by an amber fire: a desaturated warm grey, never blue.
+      uColor: new THREE.Uniform(new THREE.Color(0x6b584a).convertSRGBToLinear()),
+    };
+    this.matSmoke = new THREE.ShaderMaterial({
+      name: 'sc-smoke', uniforms: this.uSmoke, vertexShader: SMOKE_VERT, fragmentShader: SMOKE_FRAG,
+      blending: THREE.AdditiveBlending, depthWrite: false, transparent: true, toneMapped: false,
+      side: THREE.DoubleSide,
+    });
+
     // The canvas colour map, if Textures is up. Used both as the glow shell's modulator and as
     // the lit tent's emissiveMap, so the SAME dirt shows in the fabric and in the light.
     const canvasSet = (this._textures && typeof this._textures.get === 'function')
@@ -1069,6 +1267,38 @@ export class Props {
       name: 'sc-glow-window', uniforms: this.uGlowWindow, vertexShader: GLOW_VERT, fragmentShader: GLOW_FRAG,
       blending: THREE.AdditiveBlending, depthWrite: false, transparent: true, toneMapped: false,
       polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -2, side: THREE.DoubleSide,
+    });
+
+    // The fire's own ground pool + the warm wash it throws up the stone ring and the bench logs.
+    // A separate material from glow-window purely so it can be driven by the FIRE's flicker
+    // (this._flick) rather than the tent lamps' slow independent breath — a warm pool on the dirt
+    // that does not pulse with the flame above it reads as a painted decal, which is what it was.
+    this.uGlowFire = {
+      uColor: new THREE.Uniform(new THREE.Color(PAL.fireMid).convertSRGBToLinear()),
+      uIntensity: new THREE.Uniform(3.1), uFlicker: new THREE.Uniform(1),
+      uFogK: new THREE.Uniform(fogK), uSeam: new THREE.Uniform(new THREE.Vector2(1, 0)),
+    };
+    this.matFireGlow = new THREE.ShaderMaterial({
+      name: 'sc-glow-fire', uniforms: this.uGlowFire, vertexShader: GLOW_VERT, fragmentShader: GLOW_FRAG,
+      blending: THREE.AdditiveBlending, depthWrite: false, transparent: true, toneMapped: false,
+      polygonOffset: true, polygonOffsetFactor: -3, polygonOffsetUnits: -3, side: THREE.DoubleSide,
+    });
+
+    // ---- STAIN OVERLAY. public/img/decal-{grunge,rust,moss}-01.png are RGB with no alpha, so
+    // they are used the only way an alpha-less photo can safely be used at night: as a DARKENING
+    // mask, written as straight alpha over black exactly like the contact decal (see DECAL_FRAG).
+    // Worst case if the texture never arrives is an invisible mesh — never a white card.
+    this.uStain = {
+      uTex: new THREE.Uniform(null),
+      uStrength: new THREE.Uniform(0.55),
+      uContrast: new THREE.Uniform(new THREE.Vector2(0.34, 0.86)),
+      uFade: new THREE.Uniform(new THREE.Vector2(46, 96)),
+    };
+    this.matStain = new THREE.ShaderMaterial({
+      name: 'sc-stain', uniforms: this.uStain, vertexShader: DECAL_VERT, fragmentShader: STAIN_FRAG,
+      blending: THREE.NormalBlending, depthWrite: false, transparent: true, toneMapped: false,
+      polygonOffset: true, polygonOffsetFactor: -3, polygonOffsetUnits: -3,
+      side: THREE.DoubleSide, visible: false,
     });
 
     this.uDecal = {
@@ -1137,8 +1367,42 @@ export class Props {
     this._ownNamed.set('canvas-lit', this.matCanvasLit);
 
     this._ownMat.push(this.matFlame, this.matEmber, this.matCoal, this.matGlowCanvas,
-      this.matGlowWindow, this.matDecal, this.matCloth, this.matClothWarm, this.matTarpSheet,
-      this.matCanvasLit);
+      this.matGlowWindow, this.matFireGlow, this.matSmoke, this.matStain, this.matDecal,
+      this.matCloth, this.matClothWarm, this.matTarpSheet, this.matCanvasLit);
+  }
+
+  /**
+   * Fetch the three overlay decals and hand them to the stain material. Deliberately NOT awaited
+   * by init(): the game is contractually required to run with zero binary art assets
+   * (ARCHITECTURE §1), so this is fire-and-forget and the stain meshes stay `visible: false`
+   * until a texture actually lands. Decoded off-thread via createImageBitmap so a 1024² PNG
+   * cannot hitch a frame. Any failure is logged at WARN and the camp simply has no stains.
+   */
+  _loadStains() {
+    if (this._tierIndex < 2) return;                       // low/medium: not worth the bytes
+    if (typeof fetch !== 'function' || typeof createImageBitmap !== 'function') return;
+    const url = '/img/decal-grunge-01.png';
+    fetch(url, { cache: 'force-cache' })
+      .then((r) => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.blob(); })
+      .then((b) => createImageBitmap(b, { imageOrientation: 'flipY' }))
+      .then((bmp) => {
+        if (this._disposed) { bmp.close?.(); return; }
+        const tex = new THREE.Texture(bmp);
+        tex.colorSpace = THREE.SRGBColorSpace;
+        tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
+        tex.minFilter = THREE.LinearMipmapLinearFilter;
+        tex.magFilter = THREE.LinearFilter;
+        tex.anisotropy = 4;
+        tex.needsUpdate = true;
+        this._ownTex.push(tex);
+        this.uStain.uTex.value = tex;
+        this.matStain.visible = true;
+        this.matStain.needsUpdate = true;
+        this.stainsReady = true;
+        Log.debug(`Props: stain overlay ready (${bmp.width}x${bmp.height}), `
+          + `${this._stainCount} quads enabled.`);
+      })
+      .catch((e) => { Log.warn(`Props: stain overlay '${url}' unavailable — surfaces will be clean.`, e); });
   }
 
   /**

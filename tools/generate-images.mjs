@@ -85,6 +85,53 @@ const IMAGES = [
       `spirit level, carpenter's square, adjustable wrench. Clean, uniform, catalogue-precise.`,
   },
   {
+    id: 'splash-title',
+    size: '1536x1024',
+    prompt:
+      `${HORROR_STYLE} A title-screen plate. Extreme wide shot of a small cleared shelf of ` +
+      `ground deep in black pines at night, seen from slightly above and far back. A single ` +
+      `kerosene lantern burns on a stud of a half-built timber frame, a tiny warm point in an ` +
+      `enormous cold blue-black forest. Heavy mist between the camera and the clearing. ` +
+      `Vast empty space in the upper third of the frame for a title to sit. Absolutely no people.`,
+  },
+  {
+    id: 'loading-plate',
+    size: '1024x1024',
+    prompt:
+      `${MANUAL_STYLE} A single centred isometric line drawing of a claw hammer resting across ` +
+      `two stacked planks, on otherwise completely empty paper. Enormous margins. Nothing else ` +
+      `in the frame. Serene, patient, catalogue-like.`,
+  },
+  {
+    id: 'icons-tools',
+    size: '1536x1024',
+    prompt:
+      `${MANUAL_STYLE} A grid of sixteen small square pictogram tiles, evenly spaced with wide ` +
+      `gutters, each containing one bold simple isometric line symbol readable at very small ` +
+      `size: a claw hammer, a hand saw, a chisel, a spirit level, a carpenter's square, an ` +
+      `adjustable wrench, a mallet, a pry bar, a plumb bob, a chalk line reel, a nail, a bolt, ` +
+      `a bracket, a lantern, an eye, and an ear. Thick confident strokes, high contrast, no ` +
+      `fine detail, designed to survive being scaled down to 32 pixels.`,
+  },
+  {
+    id: 'icons-parts',
+    size: '1536x1024',
+    prompt:
+      `${MANUAL_STYLE} A grid of twelve small square pictogram tiles, evenly spaced, each ` +
+      `containing one bold simple isometric line symbol of a timber building component: a ` +
+      `foundation pier block, a sill beam, a floor joist, a floor board, a wall stud, a top ` +
+      `plate, a door header, a window sash, a roof truss, a ridge beam, a corrugated roof ` +
+      `panel, and a plank door. Thick strokes, high contrast, readable at 32 pixels.`,
+  },
+  {
+    id: 'nightcard-texture',
+    size: '1024x1536',
+    prompt:
+      `${MANUAL_STYLE} A completely blank sheet of aged assembly-manual paper, empty except for ` +
+      `two horizontal fold creases across it and a faint irregular photocopy shadow along the ` +
+      `left edge. No drawing, no symbols, no marks of any kind. Just the paper.`,
+  },
+  {
     id: 'decal-grunge-01',
     size: '1024x1024',
     prompt:
