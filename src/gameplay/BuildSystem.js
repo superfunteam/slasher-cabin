@@ -2733,12 +2733,29 @@ export class BuildSystem {
   }
 
   /** STORY §1.4: pull the government stake out of the ground and build on the hole. */
+  /**
+   * Pull the thing standing in the slot (STORY §1.4). 1.10 s, silent — it makes no noise, nobody
+   * hears it, and it costs nothing on the stealth ledger.
+   *
+   * `slot.obstruction = null` is only HALF the removal. The obstruction's geometry belongs to
+   * `CabinSite`, and clearing the flag without telling it left the county stake standing in the
+   * hole: measured after a real pull, the post was still drawn spanning y 17.055–17.975 while the
+   * pier the player then seated tops out at 17.475, so half a metre of an officially-removed stake
+   * stood proud of the finished pier. Gameplay said gone, the world said no.
+   */
   removeObstruction(slotId) {
     const slot = this.slots.get(slotId);
     if (!slot?.obstruction) return false;
     return this._startAction('obstruction', slotId, TUNING.obstructionSeconds, true, () => {
       slot.obstruction = null;
       this.ctx?.state?.flag?.('pulledCountyStake');
+      // CabinSite is optional (ARCHITECTURE §2 — this file draws its own ghost without it), so
+      // probe for the method rather than assuming it.
+      const site = this.ctx?.systems?.get?.('CabinSite');
+      if (typeof site?.clearObstruction === 'function') {
+        try { site.clearObstruction(slotId); }
+        catch (e) { Log.once('bs:clearobs', 'CabinSite.clearObstruction threw; the stake stays drawn.', e); }
+      }
     });
   }
 

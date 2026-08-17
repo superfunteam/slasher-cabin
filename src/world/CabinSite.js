@@ -19,6 +19,7 @@
  *   slotWorldTransform(slotId)  -> { position, quaternion, scale }
  *   setInstalled(slotId, partOrId, correctOrInfo, torque)
  *   clearInstalled(slotId)
+ *   clearObstruction(slotId) / restoreObstruction(slotId)
  *   showGhost(slotId, partId, valid)
  *   hideGhost()
  *   partMesh(partId, part?)     -> THREE.Object3D
@@ -143,6 +144,15 @@ const PIER_XZ = [
   [-P.HX, -P.HZ], [0, -P.HZ], [P.HX, -P.HZ],
   [P.HX, P.HZ], [0, P.HZ], [-P.HX, P.HZ],
 ];
+
+/**
+ * Which dressing nodes are the "before" and "after" of an obstruction, per slot. Exactly one of
+ * each pair is drawn. `BuildSystem.removeObstruction()` flips it through `clearObstruction()`.
+ * Only P-01 has one (STORY §1.4); the table exists so a second obstruction is data, not code.
+ */
+const OBSTRUCTION_DRESSING = Object.freeze({
+  'P-01': { standing: 'dress:county-stake', pulled: 'dress:county-stake-pulled' },
+});
 
 /** Truss stations: six at 960 mm over the 4.80 m cabin, first and last on the gable walls. */
 const TRUSS_X = [-3.20, -2.24, -1.28, -0.32, 0.64, 1.60];
@@ -729,6 +739,54 @@ export class CabinSite {
 
   /** Draw calls, members and triangles for the whole site. Read by the perf HUD and by reviews. */
   get stats() { return this._stats; }
+
+  // --------------------------------------------------------------------------------- obstructions
+
+  /**
+   * The obstruction standing in `slotId` has been pulled out. Takes the standing object out of the
+   * world and lays the pulled one down beside the slot. Returns true if anything changed.
+   *
+   * Called by `BuildSystem.removeObstruction()` when its 1.10 s action completes (STORY §1.4).
+   * Idempotent, and safe to call for a slot that has no obstruction.
+   *
+   * WHY IT EXISTS. `removeObstruction()` used to clear `Slot.obstruction` — the gameplay flag —
+   * and stop. The stake itself lives here, baked into the site-prep dressing, so it kept standing.
+   * Measured after a real pull, with the pier seated: the post was still `visible`, spanning
+   * y 17.055–17.975 against a pier top face at 17.475. The player pulls the stake, the red mark
+   * clears, the ghost goes valid, the pier goes in — and the stake is still sticking half a metre
+   * out of the top of it. Two systems disagreeing about the same object, on the first join of the
+   * first night, in the one place STORY calls "the tutorial's first input".
+   */
+  clearObstruction(slotId) {
+    const pair = OBSTRUCTION_DRESSING[slotId];
+    if (!pair) return false;
+    const a = this._setDressingSuppressed(pair.standing, true);
+    const b = this._setDressingSuppressed(pair.pulled, false);
+    if (a || b) { this._dirty = true; this._featureDirty = true; }
+    return a || b;
+  }
+
+  /** The inverse, for a fresh Night One. Puts the stake back in the hole. */
+  restoreObstruction(slotId) {
+    const pair = OBSTRUCTION_DRESSING[slotId];
+    if (!pair) return false;
+    const a = this._setDressingSuppressed(pair.standing, false);
+    const b = this._setDressingSuppressed(pair.pulled, true);
+    if (a || b) { this._dirty = true; this._featureDirty = true; }
+    return a || b;
+  }
+
+  /** Returns true if the flag actually moved, so callers can skip a needless rebuild. */
+  _setDressingSuppressed(dressId, suppressed) {
+    for (let i = 0; i < this._dressing.length; i++) {
+      const d = this._dressing[i];
+      if (d.id !== dressId) continue;
+      if (d.suppressed === suppressed) return false;
+      d.suppressed = suppressed;
+      return true;
+    }
+    return false;
+  }
 
   // ------------------------------------------------------------------------------ install / ghost
 
@@ -1484,12 +1542,18 @@ export class CabinSite {
 
   // ---- dressing -------------------------------------------------------------------------------
 
-  _dress(id, requires, fn) {
+  /**
+   * `suppressed` is a second, independent gate on a dressing node, for state that is not "a join
+   * got installed" — currently only the county stake, which is present from before the first pier
+   * and leaves when the player pulls it. `_rebuild()` ANDs it with the `requires` test, so it
+   * cannot be undone by the next rebuild the way a bare `node.visible` write would be.
+   */
+  _dress(id, requires, fn, suppressed = false) {
     const k = new Kit();
     fn(k);
     if (!k.buckets.size) { k.dispose(); return; }
-    this._node(`dress:${id}`, k, { requires, visible: !requires || !requires.length });
-    this._dressing.push({ id: `dress:${id}`, requires: requires ?? [] });
+    this._node(`dress:${id}`, k, { requires, visible: (!requires || !requires.length) && !suppressed });
+    this._dressing.push({ id: `dress:${id}`, requires: requires ?? [], suppressed });
   }
 
   _buildDressing() {
@@ -1498,6 +1562,9 @@ export class CabinSite {
     // --- the site itself: always present, from before the first pier
     this._dress('pad', null, (k) => this._gPad(k));
     this._dress('lantern-post', null, (k) => this._gLanternPost(k));
+    // The obstruction pair: one standing in the hole, one lying beside it. Exactly one is drawn.
+    this._dress('county-stake', null, (k) => this._gCountyStake(k));
+    this._dress('county-stake-pulled', null, (k) => this._gCountyStakePulled(k), true);
 
     // --- floor frame: the joists arrive with the platform they bear on (keyart-site.png)
     this._dress('joists-w', ['S-01', 'S-05', 'S-06'], (k) => this._gJoists(k, -1, T));
@@ -1588,9 +1655,51 @@ export class CabinSite {
     for (const z of [-P.HZ, P.HZ]) {
       k.box(MAT.stone, 0.44, 0.16, 0.44, P.CAB_E, 0.075, z, r.range(-0.2, 0.2), 0.020);
     }
-    // STORY §1.4 — the county survey stake, driven where pier one goes. Painted, and old.
+    // The county survey stake used to be built here. It is now its own dressing node so it can be
+    // taken out of the world when the player pulls it — see `_gCountyStake()`.
+  }
+
+  /**
+   * STORY §1.4 — the county survey stake, driven where pier one goes. Painted, and old.
+   *
+   * ITS OWN NODE, DELIBERATELY. This was two lines inside `_gPad()`, merged into the shared
+   * site-prep batch and therefore permanent. `BuildSystem.removeObstruction()` cleared the slot's
+   * `obstruction` flag and nothing else, so after a real 1.10 s pull the post was still standing:
+   * measured in the running game at y 17.055–17.975 with the seated pier's top face at 17.475 —
+   * **half a metre of "removed" stake spearing straight up through the finished pier.** The
+   * gameplay said cleared and the world said otherwise, on the first join of the first night.
+   *
+   * Split out, it is one 44-triangle node that `clearObstruction()` can switch off. Cost: one
+   * extra node, no extra draw call — `_rebuild()` merges by material, and the stake shares
+   * `weathered` with the pulled version that replaces it.
+   */
+  _gCountyStake(k) {
     k.box(MAT.weathered, 0.045, 0.92, 0.045, PIER_XZ[0][0] + 0.14, 0.44, PIER_XZ[0][1] + 0.10, 0.3, 0.004);
     k.plate(MAT.concrete, 0.05, 0.16, 0.006, PIER_XZ[0][0] + 0.14, 0.80, PIER_XZ[0][1] + 0.128, 0.3);
+  }
+
+  /**
+   * The same stake, pulled and dropped where a man standing over the hole would toss it: clear of
+   * the slot, off-square, lying on its side. Hidden until the pull.
+   *
+   * The game never says a word (§17), so the only way the player learns their 1.10 s of holding E
+   * did something permanent is to SEE the thing that was in the way now lying beside the hole.
+   * That is the same grammar as the red mark: state is shown on the object, never written down.
+   */
+  _gCountyStakePulled(k) {
+    const [px, pz] = PIER_XZ[0];
+    const x = px + 0.60, z = pz + 0.34, yaw = 1.02;
+    // +X is the member's length axis; rotateY(yaw) sends it to (cos yaw, 0, -sin yaw).
+    const g = chamferBox(0.92, 0.045, 0.045, 0.004);
+    g.rotateZ(0.05);                       // one end still proud of the dirt
+    g.rotateY(yaw);
+    g.translate(x, 0.026, z);
+    k.push(MAT.weathered, g);
+    // The concrete tag, now face down at the far end.
+    const t = chamferBox(0.16, 0.006, 0.05, 0.0025);
+    t.rotateY(yaw);
+    t.translate(x + 0.30 * Math.cos(yaw), 0.052, z - 0.30 * Math.sin(yaw));
+    k.push(MAT.concrete, t);
   }
 
   /** The post the lantern hangs on. It is the first thing he put in the ground. keyart-site.png. */
@@ -2106,7 +2215,7 @@ export class CabinSite {
       for (let i = 0; i < d.requires.length; i++) {
         if (!this._installed.has(d.requires[i])) { on = false; break; }
       }
-      node.visible = on || d.requires.length === 0;
+      node.visible = !d.suppressed && (on || d.requires.length === 0);
     }
 
     const lists = this._scratchLists;
@@ -2267,7 +2376,14 @@ export class CabinSite {
 
   _bindEvents() {
     const on = (ev, fn) => { const u = this.bus?.on?.(ev, fn); if (u) this._unsubs.push(u); };
-    on('night:begin', () => { this._dirty = true; this._featureDirty = true; });
+    on('night:begin', (p) => {
+      this._dirty = true;
+      this._featureDirty = true;
+      // A fresh Night One puts the stake back in the hole: BuildSystem rebuilds P-01 with its
+      // `obstruction` set again, so the world has to agree. Only night 1 — on every later night
+      // the stake stays where the player threw it.
+      if ((p?.night | 0) === 1) for (const id of Object.keys(OBSTRUCTION_DRESSING)) this.restoreObstruction(id);
+    });
     on('build:place', () => { this._dirty = true; this._featureDirty = true; });
     on('build:remove', (p) => { if (p?.slot?.id) this.clearInstalled(p.slot.id); });
   }
