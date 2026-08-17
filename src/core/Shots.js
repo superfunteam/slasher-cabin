@@ -99,6 +99,12 @@ export const SHOTS = {
     from: 'buildSite', offset: [42, 0, -34], at: 'buildSite', aim: [0, 1.5, 0], eye: 1.7,
     timeOfNight: 0.38, rain: 0.2, fog: 0.6, lantern: true, hood: 0.5, carry: 'sill-beam',
   },
+  'opening': {
+    desc: "Night 1 as the player first sees it. Lantern deliberately UNFORCED — this shot exists "
+        + 'to observe whether the game lights its own lamp, so it must not set it.',
+    from: 'buildSite', offset: [0, 0, 9], at: 'buildSite', aim: [0, 1.2, 0], eye: 1.7,
+    timeOfNight: 0.02, rain: 0.1, fog: 0.5, lantern: null,
+  },
 };
 
 /** Fallbacks used only when Terrain is unavailable — keeps the harness usable standalone. */
@@ -216,8 +222,13 @@ export class Shots {
       if (s.lightning !== undefined && 'lightning' in weather) weather.lightning = s.lightning;
     }
 
+    // A shot may omit `lantern` entirely to leave the game's own lamp state alone. Forcing it
+    // every frame meant no canonical capture could ever observe what the game actually does —
+    // an agent testing "does Night 1 open with the lamp lit?" could not use the harness at all
+    // and had to work around it. `undefined` now means "don't touch"; `null` means the same
+    // explicitly, for a shot that wants to document the intent.
     const lantern = ctx.systems.get('Flashlight');
-    if (lantern && s.lantern !== undefined) {
+    if (lantern && s.lantern !== undefined && s.lantern !== null) {
       lantern.on = !!s.lantern;
       if (s.hood !== undefined && 'hoodLevel' in lantern) lantern.hoodLevel = s.hood;
     }
