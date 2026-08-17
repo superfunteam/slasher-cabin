@@ -116,6 +116,35 @@ const SURFACE_SFX = {
 const GEN_MANIFEST = 'audio/manifest.json';
 const GEN_SECTIONS = ['beds', 'sfx', 'music'];
 
+// ---------------------------------------------------------------- loading tiers
+//
+// `public/audio/` is ~14 MB. A first-time visitor is looking at the title booklet, not
+// playing a night, and every kilobyte of night audio pulled down there is a kilobyte the
+// splash art does not get. The rule: FETCH WHAT THIS MOMENT NEEDS, PREFETCH WHAT THE NEXT
+// MOMENT WILL NEED, BLOCK ON NOTHING.
+//
+//   tier 0  title    the title score bed, and only once the context is actually running.
+//                    §9.4 makes the title screen silent until a gesture; a silent screen has
+//                    no use for the forest.
+//   tier 1  briefing the player pressed ASSEMBLE. Warm the score bed for BUILDING and let
+//                    the bed director reach the network for tonight's weather.
+//   tier 2  night    on demand, exactly as before.
+//
+// A closed gate is NEVER a silence. Every caller below already falls through to the
+// procedural synthesis that is the permanent fallback (see the division of labour at the top
+// of `tools/generate-audio.mjs`), and the sample swaps itself in the moment it lands.
+const TIER_TITLE = 0;
+const TIER_BRIEFING = 1;
+const TIER_NIGHT = 2;
+const TIER_NAMES = ['title', 'briefing', 'night'];
+
+/** The only generated ids the title screen may reach the network for. */
+const TIER0_IDS = ['music-title'];
+
+/** `GameState.PHASES` split by tier, for the belt-and-braces promotion in `update()`. */
+const NIGHT_PHASES = ['build', 'chase'];
+const BRIEFING_PHASE = 'briefing';
+
 /** Vite is configured with `base: './'`, so every URL is resolved against the document. */
 function genUrl(rel) {
   let base = '/';
@@ -355,6 +384,25 @@ export class AudioEngine {
     this._manifestReady = null;
     this._xfadeSec = 2.0;
 
+    // ---- loading tiers. Monotonic: a tier never falls back, because everything it unlocked
+    // is already resident and re-gating it could only produce a hole.
+    this._loadTier = TIER_TITLE;
+    this._briefingPrefetched = false;
+
+    // ---- the procedural SFX bank's boot cost, measured rather than guessed. Public so the
+    // debug overlay (and a measuring agent) can read it without instrumenting the module.
+    this.bankCost = {
+      phase0Ms: 0,        // the only synthesis boot awaits
+      phase0Buffers: 0,
+      sweepStartedAt: 0,  // page-relative ms the background sweep was allowed to begin
+      sweepMs: 0,         // wall clock the sweep took, once it finishes
+      buffers: 0,
+    };
+    this._sweepStarted = false;
+    this._sweepTimer = 0;
+    this._sweepDelay = 0;
+    this._startBankSweep = null;
+
     // The crossfading bed player.
     this._beds = new Map();              // name → track
     this._bedList = [];                  // same tracks, index-iterable for update()
@@ -398,33 +446,139 @@ export class AudioEngine {
       // This is the only audio work the boot waits on.
       // A generous budget here: during boot every yield is pure wall-clock latency, and
       // there is no frame to protect yet.
+      const bankT0 = performance.now();
       await this.sfx.renderPhase(0, { budgetMs: 50, variants: 1 });
-      // Everything else renders in the background across frames — boot never stalls.
-      this.sfx.renderPhase(1, { budgetMs: 5 }).then(() => {
-        Log.debug(`Audio: SFX bank complete (${this.sfx.stats.buffers} buffers, ` +
-          `${this.sfx.stats.ms.toFixed(0)} ms).`);
-      }).catch((e) => {
-        Log.warn('Audio: background SFX render failed:', e?.message ?? e);
-      }).finally(() => {
-        // The bed comes up with whatever rendered. A missing layer is a missing layer,
-        // never a missing forest.
-        try { this._startAmbience(); } catch (e) { Log.warn('Audio: ambience failed:', e?.message ?? e); }
-        // …and the generated beds layer on top of it, once we know whether they exist. This
-        // runs after _startAmbience() on purpose: the cricket bus it routes into is built
-        // there, and the generated chorus must be cut by the same gesture as the synth one.
-        this._manifestReady?.then(() => this._startGeneratedBeds())
-          .catch((e) => Log.debug('Audio: generated beds unavailable:', e?.message ?? e));
-      });
+      this.bankCost.phase0Ms = performance.now() - bankT0;
+      this.bankCost.phase0Buffers = this.sfx.stats.buffers;
 
       this._loadImpulseResponses()
         .catch((e) => Log.warn('Audio: impulse responses failed:', e?.message ?? e));
       this._buildBody();
+      // `_startAmbience()` bails on `!this.enabled`, so the flag has to be up before it is
+      // called. It used to be, only by accident — the call hung off a `.finally()` and
+      // therefore ran a microtask late. Called directly, that accident is a silent forest.
       this.enabled = true;
+
+      // The forest comes up NOW, on phase 0 alone. `_startAmbience()` needs only
+      // `sfx.noise()`, which is synthesized on the spot and was never part of the bank, so
+      // hanging it off the end of the 227-buffer sweep delayed the ambience by twenty-odd
+      // seconds and bought nothing. A missing layer is a missing layer, never a missing forest.
+      try { this._startAmbience(); } catch (e) { Log.warn('Audio: ambience failed:', e?.message ?? e); }
+      // …and the generated beds layer on top of it, once we know whether they exist. This
+      // runs after _startAmbience() on purpose: the cricket bus it routes into is built
+      // there, and the generated chorus must be cut by the same gesture as the synth one.
+      // Nothing is FETCHED here — the tier gate decides that (see `mayFetchGenerated`).
+      this._manifestReady?.then(() => this._startGeneratedBeds())
+        .catch((e) => Log.debug('Audio: generated beds unavailable:', e?.message ?? e));
+
+      // Everything else renders in the background across frames, once the page has stopped
+      // fighting for bandwidth and main thread. Boot never stalls on it.
+      this._scheduleBankSweep();
+
       Log.debug(`Audio: context @${this.context.sampleRate} Hz, ${this._maxVoices} voices.`);
     } catch (e) {
       Log.error('AudioEngine.init failed — running silent.', e);
       this.enabled = false;
     }
+  }
+
+  /**
+   * Let the 227-buffer background sweep start once the page has stopped competing with it.
+   *
+   * The sweep is already chunked across frames at a 5 ms budget, so it never held a frame —
+   * but it used to *begin* inside `init()`, which is precisely when the title booklet's art
+   * is still on the wire and the decode threads are busy. Held until `load` (plus a beat), or
+   * until the player presses ASSEMBLE, or 2.5 s, whichever comes first, it costs the same CPU
+   * somewhere nobody is staring at a half-drawn title screen.
+   *
+   * If something asks for an unrendered id before the sweep reaches it, `SFXBank.ensure()`
+   * renders that one id on the spot — the sweep is an optimisation, never a precondition.
+   */
+  _scheduleBankSweep() {
+    if (this._sweepStarted || !this.sfx) return;
+    const start = () => {
+      if (this._sweepStarted || !this.sfx || !this.context) return;
+      this._sweepStarted = true;
+      if (this._sweepTimer) { clearTimeout(this._sweepTimer); this._sweepTimer = 0; }
+      const t0 = performance.now();
+      this.bankCost.sweepStartedAt = t0;
+      this.sfx.renderPhase(1, { budgetMs: 5 }).then(() => {
+        this.bankCost.sweepMs = performance.now() - t0;
+        this.bankCost.buffers = this.sfx.stats.buffers;
+        Log.debug(`Audio: SFX bank complete (${this.sfx.stats.buffers} buffers, `
+          + `${this.sfx.stats.ms.toFixed(0)} ms synth, started at `
+          + `${t0.toFixed(0)} ms, done at ${performance.now().toFixed(0)} ms).`);
+      }).catch((e) => {
+        Log.warn('Audio: background SFX render failed:', e?.message ?? e);
+      });
+    };
+    this._startBankSweep = start;
+
+    const doc = globalThis.document;
+    if (!doc || doc.readyState === 'complete') { start(); return; }
+    globalThis.addEventListener?.('load', () => { this._sweepDelay = setTimeout(start, 250); },
+      { once: true, passive: true });
+    // …and a hard backstop, because a 14 MB first load can hold `load` for a long time and
+    // the sweep is 227 buffers deep: the longer it waits the longer the first play of a rare
+    // id is a dropped voice rather than a sound.
+    this._sweepTimer = setTimeout(start, 2500);
+  }
+
+  // =============================================================== loading tiers
+
+  /** 0 = title, 1 = briefing, 2 = night. Read-only; promote with `setLoadTier()`. */
+  get loadTier() { return this._loadTier; }
+
+  /**
+   * Promote the loading tier. Monotonic and idempotent — a tier never falls back, because
+   * everything it unlocked is already resident and re-gating it could only make a hole.
+   * @param {number} tier
+   * @returns {number} the tier now in force
+   */
+  setLoadTier(tier) {
+    const t = clamp(Math.round(Number(tier) || 0), TIER_TITLE, TIER_NIGHT);
+    if (t <= this._loadTier) return this._loadTier;
+    this._loadTier = t;
+    Log.debug(`Audio: load tier ${t} (${TIER_NAMES[t]}).`);
+    // Anything the bed director asked for while the gate was shut asked in vain and fell
+    // through to synthesis. Ask again now, so the recording swaps itself in.
+    for (let i = 0; i < this._bedList.length; i++) {
+      const b = this._bedList[i];
+      if (b.level > 1e-3 && !b.buffer && !b.loading) this._bedFetch(b);
+    }
+    if (t >= TIER_BRIEFING) this._prefetchBriefing();
+    // The bank sweep is night work too; if the player got here before `load` fired, run it.
+    if (t >= TIER_BRIEFING && !this._sweepStarted) this._startBankSweep?.();
+    return this._loadTier;
+  }
+
+  /**
+   * May a *speculative* fetch of this generated id start right now? The whole policy, in one
+   * place, so `Music` can ask the same question about its own score beds.
+   *
+   * A `false` is never a silence: every caller falls through to the procedural path, and the
+   * sample swaps in on the next tick after it lands.
+   * @param {string} id manifest id, e.g. `'music-title'` or `'forest-night-calm'`
+   */
+  mayFetchGenerated(id) {
+    if (this._loadTier >= TIER_BRIEFING) return true;
+    // Tier 0. Only the title bed, and only once a gesture has actually resumed the context —
+    // §9.4 says the title screen is silent until then, and silence needs no download.
+    return this.started === true && TIER0_IDS.indexOf(String(id)) >= 0;
+  }
+
+  /**
+   * Tier 1. The player has committed to a night: warm the score bed for BUILDING before the
+   * first bar wants it. The beds for tonight's weather need no list here — the director is
+   * already asking for exactly them, and `setLoadTier()` re-drives those requests.
+   */
+  _prefetchBriefing() {
+    if (this._briefingPrefetched) return;
+    this._briefingPrefetched = true;
+    // Music owns its own decode cache; a 90 s stereo bed is ~35 MB of Float32 and pulling a
+    // second copy into ours to hand over would be worse than the wait it saves.
+    const music = this.ctx?.systems?.get?.('Music') ?? null;
+    try { music?.prefetchBed?.('work'); } catch { /* Music is optional, like everything else */ }
   }
 
   _createContext() {
@@ -1170,6 +1324,11 @@ export class AudioEngine {
     on('tool:missing', () => this.play('ui.deny', { bus: 'sfxUI' }));
     on('tool:found', () => this.play('ui.stamp', { bus: 'sfxUI' }));
 
+    // ---- loading tiers. ASSEMBLE is the first honest signal that a night is coming; until
+    // it lands the title screen fetches the title bed and nothing else.
+    on('game:start', () => this.setLoadTier(TIER_BRIEFING));
+    on('night:begin', () => this.setLoadTier(TIER_NIGHT));
+
     on('night:begin', () => this._firstBreathOfTheNight());
     on('night:complete', () => { this._restoreMix(2200); this._setBreath('calm'); });
     on('night:failed', () => this._theEnd());
@@ -1890,7 +2049,10 @@ export class AudioEngine {
   generatedBuffer(id) {
     const e = this._genCache.get(id);
     if (e) { e.used = ++this._genClock; return e.buffer; }
-    if (this.generatedAvailable && this._genIndex.has(id)) {
+    // The tier gate: at the title screen the hero samples stay on the server and the recipe
+    // plays instead. Every id here has one — `GEN_ONLY_INFO` is the only exception and none
+    // of those three can fire from a menu.
+    if (this.generatedAvailable && this._genIndex.has(id) && this.mayFetchGenerated(id)) {
       this.loadGenerated(id).catch(() => { /* already logged at debug */ });
     }
     return null;
@@ -2086,19 +2248,29 @@ export class AudioEngine {
     // Every gain move is ramped — an abrupt gain is an audible click (§9.2).
     const tau = Math.max(0.005, fadeSec / 3);
     this._set(t.gain.gain, lv > 1e-3 ? lv * dbToGain(t.def.db) : MIN_G, this.now(), tau);
-    if (lv > 1e-3 && !t.buffer && !t.loading) {
-      t.loading = true;
-      // Lazy: the bed is decoded on first use, not at boot.
-      this.loadGenerated(name).then((buf) => {
-        t.loading = false;
-        if (!buf || !this.context || !this._beds.has(name)) return;
-        t.buffer = buf;
-        const e = this._genCache.get(name);
-        if (e) e.refs++;                    // a live bed is never evicted out from under itself
-        t.nextAt = this.now() + 0.08;
-      }).catch(() => { t.loading = false; });
-    }
+    if (lv > 1e-3 && !t.buffer && !t.loading) this._bedFetch(t);
     return t;
+  }
+
+  /**
+   * Fetch one bed's recording, if the loading tier lets us. Below the gate this is a no-op
+   * and the synthesized wind/rain/crickets carry the layer alone — which is the state a
+   * clone with `public/audio/` deleted runs in permanently, so it is a known-good sound, not
+   * a degraded one. `setLoadTier()` re-drives every deferred track.
+   */
+  _bedFetch(t) {
+    const name = t.name;
+    if (!this.mayFetchGenerated(name)) return;
+    t.loading = true;
+    // Lazy: the bed is decoded on first use, not at boot.
+    this.loadGenerated(name).then((buf) => {
+      t.loading = false;
+      if (!buf || !this.context || !this._beds.has(name)) return;
+      t.buffer = buf;
+      const e = this._genCache.get(name);
+      if (e) e.refs++;                      // a live bed is never evicted out from under itself
+      t.nextAt = this.now() + 0.08;
+    }).catch(() => { t.loading = false; });
   }
 
   /**
@@ -2826,6 +2998,14 @@ export class AudioEngine {
       this._pollLightning(now);
       this._updateThunder(now);
       this._updateBeds(now, slow);
+      // Belt and braces on the tier gate. `Menu._startGame()` documents that NightManager may
+      // start a night through its own API without the canonical events, and a loaded save
+      // arrives already in a phase — either way, being IN a night unlocks the night's audio.
+      if (this._loadTier < TIER_NIGHT) {
+        const ph = this.ctx?.state?.phase;
+        if (NIGHT_PHASES.indexOf(ph) >= 0) this.setLoadTier(TIER_NIGHT);
+        else if (ph === BRIEFING_PHASE) this.setLoadTier(TIER_BRIEFING);
+      }
     }
     void elapsed;
   }
@@ -2993,6 +3173,10 @@ export class AudioEngine {
     this._unsubs.length = 0;
     for (const t of this._timers) clearTimeout(t);
     this._timers.clear();
+    if (this._sweepTimer) { clearTimeout(this._sweepTimer); this._sweepTimer = 0; }
+    if (this._sweepDelay) { clearTimeout(this._sweepDelay); this._sweepDelay = 0; }
+    this._sweepStarted = true;            // …and never let a pending `load` start one now
+    this._startBankSweep = null;
 
     for (const ev of ['pointerdown', 'keydown', 'touchstart']) {
       try { globalThis.removeEventListener?.(ev, this._resumeHandler); } catch { /* n/a */ }

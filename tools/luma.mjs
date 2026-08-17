@@ -31,6 +31,21 @@ function decode(path) {
   execFileSync('sips', ['-s', 'format', 'tiff', path, '--out', tmp], { stdio: 'ignore' });
   if (!existsSync(tmp)) throw new Error(`sips produced no output for: ${path}`);
   const buf = readFileSync(tmp);
+  // INDEXED PNGs: the IFD walk below assumes 3 samples/pixel, and `sips` preserves a palette,
+  // so a colour-type-3 PNG would be read as if its palette INDICES were RGB. That produced
+  // meanY NaN for one image and "99.81% below 0.02" for a near-white paper texture. Detect it
+  // and refuse. `__CAPTURE__` frames and the keyart are always truecolour, so the gate itself is
+  // unaffected — but public/img/ is now mostly indexed after optimisation.
+  {
+    const png = readFileSync(path);
+    // IHDR colour type is byte 25 of a PNG; 3 == indexed-colour.
+    if (png.length > 26 && png[1] === 0x50 && png[2] === 0x4e && png[25] === 3) {
+      throw new Error(
+        'indexed-colour PNG — this decoder reads palette indices as RGB. '
+        + `Flatten first:  magick ${path} -type TrueColor /tmp/flat.png`,
+      );
+    }
+  }
   // Minimal TIFF walk: find StripOffsets/width/height from the IFD.
   const le = buf.readUInt16LE(0) === 0x4949;
   const u16 = (o) => (le ? buf.readUInt16LE(o) : buf.readUInt16BE(o));

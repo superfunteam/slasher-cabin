@@ -108,6 +108,79 @@ const PLAYABLE_PHASES = new Set(['briefing', 'build', 'chase']);
 const WEIGHTS = { hairline: 0.75, thin: 1.5, medium: 2.5, heavy: 4.0 };
 
 /* ============================================================================================
+ * 0b. THE FIRST-SCREEN PRELOAD
+ *
+ * MEASURED, production build, cold cache, 1.5 MB/s shared link (the harness in
+ * ARCHITECTURE §11d's spirit: same instrument on both sides of the change):
+ *
+ *   boot plate visible        1,666 ms
+ *   TITLE SCREEN SHOWN        6,805 ms
+ *   splash-title.png finished 11,527 ms   <- its own background, 4.7 s LATER
+ *
+ * The title booklet was composited against a black rectangle for four and a half seconds and the
+ * forest photograph then cut in behind it. For a game whose whole visual thesis is flat bright
+ * paper against wet darkness, that is the thesis arriving after the punchline.
+ *
+ * Two causes, both here in this file, both fixed below.
+ *
+ * 1. NOTHING WAITED. `_probeImages()` was fire-and-forget and `init()` showed the title the
+ *    instant the engine was up, whatever had or had not arrived. Now `_maybeReveal()` is the
+ *    only path to the title screen and it will not run until every unit below reports done.
+ *
+ * 2. THE PIPE WAS FULL OF THINGS THE FIRST SCREEN DOES NOT USE. Measured on that same load,
+ *    boot spent its first seconds fetching, concurrently with the splash:
+ *
+ *      nightcard-texture.png  1,835 KB   the flat card shown at `night:begin` — minutes away
+ *      manual-cover.png       1,559 KB   the PAUSE sheet's cover — not reachable from the title
+ *      loading-plate.png        833 KB   the boot plate's own photo, which finished at 8,092 ms,
+ *                                        i.e. 1.3 s AFTER the boot plate it decorates was gone
+ *
+ *    4.2 MB of contention in front of the one image the player is actually looking at. The
+ *    first-screen set is now exactly two files; the other two are deferred until the title is
+ *    up (§'DEFERRED', below) and `loading-plate.png` is not requested at all — the boot plate
+ *    draws itself in `svgContentsPlate()`, which costs no bytes, is on screen in the first
+ *    frame, and cannot pop halfway through the load the way a photograph swapping in did.
+ *
+ * WEIGHTS: how much of the bar each unit is worth, not how long it will take. Nothing here is a
+ * clock. Units 2 and 4 advance by BYTES READ off the response stream, so the bar has genuine
+ * sub-unit resolution; the rest step on their own completion. The bar reaches 1.0 when, and only
+ * when, all six have reported — it is arithmetically incapable of finishing before the assets do.
+ * ========================================================================================== */
+
+const SPLASH_SRC = '/img/splash-title.png';
+const TITLE_ART_SRC = '/img/title-treatment.png';
+const COVER_SRC = '/img/manual-cover.png';
+const CARD_SRC = '/img/nightcard-texture.png';
+
+/** Six units, six roundels on the plate. Every one is an event, never a timer. */
+const PRELOAD_UNITS = [
+  { id: 'fonts', weight: 0.03 },        // document.fonts.ready
+  { id: 'splashBytes', weight: 0.42 },  // splash-title.png, streamed against content-length
+  { id: 'splashDecode', weight: 0.05 }, // ...and decoded to a bitmap, which is the visible hitch
+  { id: 'artBytes', weight: 0.28 },     // title-treatment.png, fetched and decoded
+  { id: 'systems', weight: 0.12 },      // every heavy system has init()ed (Menu is registered last)
+  { id: 'frame', weight: 0.10 },        // engine:booted, and a real frame has been presented
+];
+
+/** The plate may not vanish faster than this, or a warm cache turns it into a flash. */
+const MIN_PLATE_MS = 640;
+/** After the last unit lands, hold long enough for the measure to be seen arriving. */
+const PLATE_SETTLE_MS = 300;
+/** The title sheet's own entrance runs BEHIND the plate, so the reveal is one fade of one
+ *  finished screen rather than two things moving at once. Must exceed `--sc-in` (220 ms). */
+const SHEET_SETTLE_MS = 240;
+const PLATE_FADE_MS = 460;
+/**
+ * A ceiling on the asset wait alone. A player on a bad link must never be held at a loading
+ * screen by an optional decoration: past this the title opens on its drawn fallbacks, which are
+ * finished screens, and a late splash is faded in rather than cut in.
+ */
+const ASSET_CEILING_MS = 12000;
+/** Absolute last resort: a boot plate that outlives the boot is the one failure that looks
+ *  like a crash. */
+const PLATE_FAILSAFE_MS = 45000;
+
+/* ============================================================================================
  * 1. SETTINGS TABLE
  *
  * Grouped like a specification table, not like a game menu: sections are numbered, every row is
@@ -462,38 +535,77 @@ function svgBjorn(pose) {
 }
 
 /**
- * The boot plate's drawn fallback, used only when `public/img/loading-plate.png` is absent.
+ * THE BOOT PLATE, and the only progress readout in the game.
  *
- * NOT a hammer. The supplied plate is a claw hammer lying on two boards, and two attempts at
- * drawing that in code — once through the dimetric lattice, once in explicit screen coordinates
- * — produced a shape that read as a floating rectangle beside a hook, then as a red smear on a
- * board edge: at this size a plan-view hammer runs parallel to the boards it lies on and its
- * outline disappears into theirs. A drawing that is nearly right is worse than a different
- * drawing that is right, so the fallback prints the CONTENTS instead — six hardware roundels
- * over a ruled parts line, which is what 'CHECK CONTENTS BEFORE BEGINNING.' actually asks you
- * to do, and which is drawn from marks already proven on the title sheet.
+ * It is drawn, not photographed. `public/img/loading-plate.png` is a 1024² PNG of a claw hammer
+ * lying on two boards — 833 KB to deliver about 4 KB of line art, and measured arriving 1.3 s
+ * AFTER the boot it decorates had finished. A loading screen that is itself still loading, and
+ * that swaps a drawing for a photograph halfway through, is the exact defect this file is here
+ * to remove. The file stays in the repo (nothing is stripped that someone might wire up), but
+ * the critical path does not touch it.
+ *
+ * The composition is the one that was already working — six hardware roundels over a ruled
+ * parts line, under 'CHECK CONTENTS BEFORE BEGINNING.' — with two marks added, and both of them
+ * are readouts of real completions:
+ *
+ *   THE SIX BOXES (identity).  One under each roundel. It inks solid when that unit is
+ *     accounted for. The page says check the contents before beginning; the contents get
+ *     checked, one at a time, and then the game begins. No numeral, no word, no spinner.
+ *
+ *   THE DIMENSION LINE (magnitude).  ART_DIRECTION §13.4's double-headed span, unmodified:
+ *     1.5 px shaft, 0.75 px extension lines, two open heads. §13.7 — 'its length carries the
+ *     number' — so the measure grows from the left extension line toward the right one and the
+ *     heads touch the ticks when the job is done. This is the manual's own way of stating a
+ *     quantity without printing one, which is why it replaced the red bar that used to sweep
+ *     back and forth here on a 2.6 s loop, reporting nothing.
+ *
+ * Everything is drawn once; `_setProgress()` moves two attributes and six fills.
  */
+const PLATE_SPAN_X0 = 18;
+const PLATE_SPAN_X1 = 382;
+const PLATE_SPAN_Y = 168;
+
 function svgContentsPlate() {
   const T = WEIGHTS.thin, H = WEIGHTS.hairline;
   const out = [];
 
   // Six roundels, the same inset the title sheet carries, on the same 400 x 68 grid.
-  out.push(`  <g transform="translate(0 10)">\n${hardwareCells()}\n  </g>`);
+  out.push(`  <g transform="translate(0 4)">\n${hardwareCells()}\n  </g>`);
 
-  // Under them, a ruled parts line per roundel: the manual counting its own bag of fixings.
+  // Under them, a ruled parts line per roundel: the manual counting its own bag of fixings,
+  // and under that the box that gets inked when the line is verified.
   const counts = [24, 12, 40, 40, 1, 1];
   for (let i = 0; i < 6; i++) {
     const cx = 34 + i * 62;   // must track hardwareCells()'s own 34 + i * 62 spacing
-    out.push(poly([[cx - 22, 108], [cx + 22, 108]], H));
-    out.push(`  <text x="${cx}" y="126" text-anchor="middle" font-size="13"
+    out.push(poly([[cx - 22, 100], [cx + 22, 100]], H));
+    out.push(`  <text x="${cx}" y="117" text-anchor="middle" font-size="13"
       font-family="Helvetica Neue, Helvetica, Arial, sans-serif" letter-spacing="1.2"
       fill="currentColor">${counts[i]}×</text>`);
+    out.push(`  <rect class="sc-ld-box" data-i="${i}" x="${cx - 5.5}" y="126" width="11"`
+      + ` height="11" fill="none" stroke="currentColor" stroke-width="${T}"/>`);
   }
-  // A single heavier rule closing the block, with the manual's corner tick at the left.
-  out.push(poly([[18, 146], [382, 146]], T));
-  out.push(poly([[18, 141], [18, 151]], T));
+  // No closing rule under the contents block. There was one, and on screen it read as a second
+  // dimension line stacked on the real one — two full-width horizontals 22 units apart, the
+  // upper one meaning nothing. The measure closes the block now, which is what a measure is for.
 
-  return `<svg viewBox="0 0 400 160" role="img" aria-label="Contents supplied">\n`
+  // The measure. Extension lines mark the whole distance; the span reports how much of it is
+  // accounted for. `stroke-dashoffset` reveals the shaft without scaling its stroke, and the
+  // travelling head is a pure translate, so §13.2's four widths survive at every value.
+  const span = PLATE_SPAN_X1 - PLATE_SPAN_X0;
+  const y = PLATE_SPAN_Y;
+  out.push(poly([[PLATE_SPAN_X0, y - 9], [PLATE_SPAN_X0, y + 9]], H));
+  out.push(poly([[PLATE_SPAN_X1, y - 9], [PLATE_SPAN_X1, y + 9]], H));
+  out.push(`  <line class="sc-ld-span" x1="${PLATE_SPAN_X0}" y1="${y}" x2="${PLATE_SPAN_X1}"`
+    + ` y2="${y}" stroke="currentColor" stroke-width="${T}" stroke-linecap="butt"`
+    + ` stroke-dasharray="${span}" stroke-dashoffset="${span}"/>`);
+  out.push(`  <path d="M ${PLATE_SPAN_X0 + 8} ${y - 5.5} L ${PLATE_SPAN_X0} ${y}`
+    + ` L ${PLATE_SPAN_X0 + 8} ${y + 5.5}" fill="none" stroke="currentColor"`
+    + ` stroke-width="${T}" stroke-linecap="butt" stroke-linejoin="miter"/>`);
+  out.push(`  <path class="sc-ld-head" d="M -8 -5.5 L 0 0 L -8 5.5" fill="none"`
+    + ` stroke="currentColor" stroke-width="${T}" stroke-linecap="butt" stroke-linejoin="miter"`
+    + ` transform="translate(${PLATE_SPAN_X0} ${y})"/>`);
+
+  return `<svg viewBox="0 0 400 182" role="img" aria-label="Contents supplied">\n`
     + out.join('\n') + `\n</svg>`;
 }
 
@@ -566,12 +678,22 @@ const MENU_CSS = `
  * the lantern, the lightning and the moon still bleed through, and the frame is never a still.
  * With the file absent the layer stays at opacity 0 and the title screen is the live forest,
  * which is what it was before. Nothing about the sheet in front of it changes either way.
+ *
+ * The photograph is an <img> the preloader already fetched and DECODED, adopted into this
+ * element — not a 'background-image: url(...)'. A CSS background is a second reference to the
+ * same URL: it re-enters the fetch/decode path, and whether that costs a raster hitch, a
+ * memory-cache hit or a whole second download is a cache-policy question we do not get to
+ * answer. Measured on a 'no-store' origin, exactly that reference re-downloaded
+ * title-treatment.png in full — 1,205 KB, twice, on one load. Adopting the decoded element is
+ * the only version that cannot pop, on any origin, under any cache policy.
  */
 .sc-splash {
   position: absolute; inset: 0; opacity: 0; pointer-events: none;
-  background-image: var(--sc-splash, none);
-  background-size: cover; background-position: 50% 44%; background-repeat: no-repeat;
-  transform: scale(1.06);
+  transform: scale(1.06); overflow: hidden;
+}
+.sc-splash img {
+  display: block; position: absolute; inset: 0; width: 100%; height: 100%;
+  object-fit: cover; object-position: 50% 44%;
 }
 /*
  * No transition on this opacity, deliberately. A backdropped or occluded tab freezes the CSS
@@ -1036,13 +1158,20 @@ const MENU_CSS = `
 .sc-card__rule { width: 18ch; height: 0; border-top: var(--sc-hair) solid var(--sc-ink); margin-top: 1.5em; }
 
 /* --- the boot plate ---------------------------------------------------------------------------
- * Up from the Menu constructor until the engine reports booted. index.html paints #05070a and
- * nothing else, so without this the first eight seconds of the game are a black rectangle.
+ * Up from the Menu constructor until the FIRST SCREEN IS FINISHED — every heavy system init()ed,
+ * a frame presented, and splash-title.png fetched and decoded — not merely until the engine says
+ * booted. index.html paints #05070a and nothing else, so without this the first eight seconds of
+ * the game are a black rectangle; without the gate, the eight seconds after that were a booklet
+ * standing on one.
+ *
+ * It is opaque, and it covers the stage. So the title screen is built, opened and allowed to
+ * settle UNDERNEATH it, and this one fade is the entire transition: what appears is a finished
+ * composition, arriving all at once, the way a page is turned.
  */
 .sc-loading {
   position: absolute; inset: 0; z-index: 3; pointer-events: none;
   display: grid; place-items: center; background: #05070a;
-  transition: opacity 420ms ease;
+  transition: opacity ${PLATE_FADE_MS}ms cubic-bezier(.33,0,.2,1);
 }
 .sc-loading[data-off="1"] { opacity: 0; }
 .sc-load__sheet {
@@ -1056,23 +1185,19 @@ const MENU_CSS = `
   background-image: var(--sc-fibre); background-size: 128px 128px;
   mix-blend-mode: multiply; opacity: .55;
 }
-.sc-load__plate { margin: 1.1em 0 .2em; overflow: hidden; }
-.sc-load__plate svg, .sc-load__plate img {
+.sc-load__plate { margin: 1.1em 0 .85em; overflow: hidden; }
+.sc-load__plate svg {
   display: block; width: 100%; height: auto; max-width: 100%; color: var(--sc-ink);
 }
-.sc-load__plate img { aspect-ratio: 3 / 1.72; object-fit: cover; object-position: 50% 50%; }
-.sc-load__bar { position: relative; height: 0; border-top: var(--sc-thin) solid rgba(20,24,26,.22); margin: 1.15em 0 .9em; overflow: visible; }
-.sc-load__bar::after {
-  content: ''; position: absolute; left: 0; top: calc(var(--sc-thin) * -1); height: var(--sc-thin);
-  width: 34%; background: var(--sc-red);
-  animation: sc-sweep 2600ms cubic-bezier(.5,0,.5,1) infinite;
-}
-#${ROOT_ID}[data-reduced="1"] .sc-load__bar::after { animation: none; width: 100%; opacity: .5; }
-@keyframes sc-sweep {
-  0% { transform: translateX(0); }
-  50% { transform: translateX(194%); }
-  100% { transform: translateX(0); }
-}
+/*
+ * The two marks that move. Both transition, and both are driven only by '_setProgress()' from a
+ * real completion — the easing is the readout settling on a value it has already been given, not
+ * a clock filling a bar. There is no animation anywhere on this sheet that runs by itself.
+ */
+.sc-ld-box { transition: fill 260ms cubic-bezier(.16,.84,.28,1); }
+.sc-ld-box[data-on="1"] { fill: currentColor; }
+.sc-ld-span { transition: stroke-dashoffset 300ms cubic-bezier(.16,.84,.28,1); }
+.sc-ld-head { transition: transform 300ms cubic-bezier(.16,.84,.28,1); }
 .sc-load__word { font-size: clamp(.66rem, 1.3vmin, .84rem); letter-spacing: .3em; }
 
 /* --- the blank page --------------------------------------------------------------------------- */
@@ -1135,13 +1260,31 @@ export class Menu {
     this._camCx = 0; this._camCy = 0; this._camCz = 0;
     this._camReady = false;
 
-    this._imgTitle = null;
-    this._imgCover = null;
+    this._imgCover = null;      // pause sheet, deferred — a plain URL is enough behind a scrim
+    this._imgCard = null;       // night card, deferred — likewise
 
-    this._imgSplash = null;
-    this._imgLoading = null;
-    this._imgCard = null;
+    // The two first-screen images are held as DECODED ELEMENTS, not URLs. See `.sc-splash`.
+    this._elSplash = null;
+    this._elTitleArt = null;
+    this._blobUrls = [];
+
     this._loadingEl = null;
+    this._splashEl = null;
+    this._plateSvg = null;
+    this._plateBoxes = null;
+    this._plateSpan = null;
+    this._plateHead = null;
+
+    this._preloadStarted = false;
+    this._preP = PRELOAD_UNITS.map(() => 0);
+    this._preDone = false;
+    this._preDoneAt = 0;
+    this._plateAt = 0;
+    this._systemsReady = false;
+    this._reviewMode = false;
+    this._revealed = false;
+    this._revealTimer = 0;
+    this._fadeRaf = 0;
     this._booted = false;
 
     this._onKeyDown = this._onKeyDown.bind(this);
@@ -1165,14 +1308,18 @@ export class Menu {
       Log.warn('Menu: could not disarm NightManager auto-start.', e);
     }
 
-    // The boot screen. Built in the constructor because init() does not run until after every
-    // heavy system has finished (texture bake + terrain ≈ 8 s), and those 8 s are the first
-    // thing anyone sees. Errors here are reported, never swallowed — a missing boot screen must
-    // not also cost us the menu.
+    // The boot screen AND the preload. Both belong in the constructor: init() does not run until
+    // after every heavy system has finished (texture bake + terrain ≈ 8 s), and those 8 s are
+    // both the first thing anyone sees and — measured — dead time on the network. Starting the
+    // fetches here overlaps the whole 2 MB splash download with the bake, which is most of why
+    // the title no longer waits for it. Errors here are reported, never swallowed: a missing
+    // boot screen must not also cost us the menu.
     try {
       this._buildDom();
-      this._probeImages();
-      if (!this._bootSuppressed()) this._showLoading();
+      if (!this._bootSuppressed()) {
+        this._showLoading();
+        this._preload();
+      }
     } catch (e) {
       Log.error('Menu: boot screen construction failed.', e, e?.stack);
     }
@@ -1203,11 +1350,22 @@ export class Menu {
       Log.error('Menu: event binding failed — menu will not respond to input.', e, e?.stack);
     }
 
-    // Optional art. The screens are finished without it; this only replaces the drawn fallback.
-    this._probeImages();
-
     const params = this._params();
     this._bootHidden = params.has('shot') || params.has('shots') || params.has('nomenu');
+
+    /*
+     * Unit 5. Menu is registered LAST in `src/main.js`, and `Engine.initSystems()` awaits each
+     * system's init() in registration order — so reaching this line means Textures, Terrain,
+     * Forest and every other bake has already returned. It is the honest milestone for "the
+     * engine is nearly up", and it is the closest thing to sub-progress the engine offers.
+     *
+     * TODO(api): Engine emits `engine:booted` and nothing before it. A `system:init { name, i,
+     * n }` on ctx.bus, emitted from `Engine.initSystems()` as each init() resolves, would let
+     * this plate report the real long pole — which, measured, is the engine and not the network.
+     */
+    this._systemsReady = true;
+    this._mark('systems-ready');
+    this._unit('systems', 1);
 
     const phase = this.ctx.state?.phase ?? 'menu';
     if (this._bootHidden) {
@@ -1215,11 +1373,16 @@ export class Menu {
     } else if (params.has('menu')) {
       // Review hook: `?menu=title|pause|settings|report|report7|card|confirm|loading` opens one
       // screen straight out of boot, so a screenshot pass never has to race the game loop.
+      // `_reviewMode` stops `_maybeReveal()` from later replacing the requested screen with the
+      // title — which `?menu=loading` in particular would hit, since it leaves `screen` null.
+      this._reviewMode = true;
+      this._preload();
       this._hideLoading();
       this._showForReview(params.get('menu'));
     } else if (phase === 'menu') {
-      this._hideLoading();
-      this.showTitle();
+      // The title is NOT opened here. `_maybeReveal()` is the only path to it, and it does not
+      // run until the first screen is complete — see §0b.
+      this._maybeReveal();
     } else {
       this._hideLoading();
     }
@@ -1315,6 +1478,7 @@ export class Menu {
     for (const id of this._timers) clearTimeout(id);
     this._timers.clear();
     if (this._padPoll) { cancelAnimationFrame(this._padPoll); this._padPoll = 0; }
+    if (this._fadeRaf) { cancelAnimationFrame(this._fadeRaf); this._fadeRaf = 0; }
 
     try { globalThis.document?.removeEventListener('keydown', this._onKeyDown, true); } catch { /* noop */ }
     try { this.ctx.canvas?.removeEventListener('pointerdown', this._onCanvasDown); } catch { /* noop */ }
@@ -1325,9 +1489,16 @@ export class Menu {
     this._root?.remove();
     this._style?.remove();
     this._root = this._style = this._stage = this._card = this._sheetEl = null;
+    this._splashEl = null;
+    this._plateSvg = this._plateBoxes = this._plateSpan = this._plateHead = null;
     this._items.length = 0;
     this._rows.length = 0;
-    this._imgTitle = this._imgCover = this._imgSplash = this._imgLoading = this._imgCard = null;
+    this._imgCover = this._imgCard = null;
+    this._elSplash = this._elTitleArt = null;
+    // The decoded bitmaps are held alive by their object URLs; released only here, never while
+    // an <img> that uses one is still in the tree.
+    for (const url of this._blobUrls) { try { URL.revokeObjectURL(url); } catch { /* noop */ } }
+    this._blobUrls.length = 0;
   }
 
   /* ------------------------------------------------------------------ public API */
@@ -1470,6 +1641,7 @@ export class Menu {
 
     const splash = doc.createElement('div');
     splash.className = 'sc-splash';
+    this._splashEl = splash;
 
     const scrim = doc.createElement('div');
     scrim.className = 'sc-scrim';
@@ -1486,7 +1658,7 @@ export class Menu {
 
     this._root.style.setProperty('--sc-fibre', `url("${this._fibreTexture()}")`);
     if (this.ctx.settings?.get?.('reducedMotion')) this._root.dataset.reduced = '1';
-    if (this._imgSplash) this._applySplash();
+    if (this._elSplash) this._applySplash();
   }
 
   /**
@@ -1542,14 +1714,201 @@ export class Menu {
     }
   }
 
+  /* ------------------------------------------------------------------ the preload */
+
   /**
-   * Optional art. Nothing waits on it and nothing breaks without it: every one of these five
-   * files has a drawn or CSS fallback already on screen by the time the probe resolves, and the
-   * probe only ever *replaces* a finished screen with a better one.
+   * Resolve when `promise` settles OR when the document goes hidden — whichever is first.
+   *
+   * MEASURED, and it stranded this preloader on its first run: in a backgrounded tab Chrome
+   * suspends the compositor, and **both** `HTMLImageElement.decode()` and
+   * `requestAnimationFrame` simply never fire. A 4,000 ms probe on a hidden tab returned
+   * `TIMEOUT` for decode and `rafTIMEOUT` for a single rAF; the plate sat at 5/6 units until the
+   * 12 s ceiling released it. That is not a harness artefact — a player who middle-clicks the
+   * link and keeps reading their feed is in exactly that state, and would come back to a title
+   * screen with no background on it.
+   *
+   * The rule this encodes: **a preloader may never wait on anything that requires the page to be
+   * painting.** Both of those waits exist to get work done before the first paint. If there is
+   * no first paint, there is nothing to be early for, and the wait is already satisfied.
    */
-  _probeImages() {
-    if (this._probed) return;
-    this._probed = true;
+  _raceVisible(promise) {
+    const doc = globalThis.document;
+    if (!doc || doc.visibilityState === 'hidden') return Promise.resolve('hidden');
+    return new Promise((resolve) => {
+      let settled = false;
+      const finish = (why) => {
+        if (settled) return;
+        settled = true;
+        try { doc.removeEventListener('visibilitychange', onVis); } catch { /* noop */ }
+        resolve(why);
+      };
+      const onVis = () => { if (doc.visibilityState === 'hidden') finish('hidden'); };
+      doc.addEventListener('visibilitychange', onVis);
+      promise.then(() => finish('settled'), () => finish('failed'));
+    });
+  }
+
+  /**
+   * Fetch one image AND decode it, reporting bytes as they arrive.
+   *
+   * `new Image()` + `onload` is not enough. `onload` fires when the bytes are in and the header
+   * is parsed; the actual raster of a 1536×1024 PNG happens later, on the main thread, at the
+   * first paint that needs it — which is the frame we are about to reveal. `decode()` moves that
+   * work in front of the curtain instead of behind it, and it is the difference between a clean
+   * fade and a fade with a hitch in it.
+   *
+   * The body is read as a stream against `content-length`, so unit progress is literally the
+   * fraction of the file that has arrived. If the response is not streamable (no body, no
+   * length, an origin that will not say) the unit simply steps 0 → 1 on completion; it never
+   * invents a value in between.
+   *
+   * @returns {Promise<HTMLImageElement|null>} null on any failure — the drawn fallback stands.
+   */
+  async _fetchDecoded(src, onFraction) {
+    let res;
+    try {
+      res = await fetch(src, { credentials: 'same-origin' });
+    } catch (e) {
+      Log.debug(`Menu: ${src} unavailable.`, e);
+      return null;
+    }
+    if (!res.ok) { Log.debug(`Menu: ${src} returned ${res.status}.`); return null; }
+
+    const total = Number(res.headers.get('content-length')) || 0;
+    let blob = null;
+    try {
+      const reader = total > 0 ? res.body?.getReader?.() : null;
+      if (reader) {
+        const chunks = [];
+        let got = 0;
+        for (;;) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          if (this._disposed) { try { await reader.cancel(); } catch { /* noop */ } return null; }
+          chunks.push(value);
+          got += value.byteLength;
+          onFraction(got / total < 1 ? got / total : 1);
+        }
+        blob = new Blob(chunks, { type: res.headers.get('content-type') || 'image/png' });
+      } else {
+        blob = await res.blob();
+      }
+    } catch (e) {
+      Log.debug(`Menu: ${src} body read failed.`, e);
+      return null;
+    }
+    if (this._disposed) return null;
+    onFraction(1);
+
+    const url = URL.createObjectURL(blob);
+    this._blobUrls.push(url);
+    const img = new Image();
+    img.decoding = 'async';
+    img.alt = '';
+    img.draggable = false;
+    img.src = url;
+    const raster = typeof img.decode === 'function'
+      ? img.decode()
+      : new Promise((ok, no) => { img.onload = ok; img.onerror = no; });
+    // Never let the raster be a hostage: see `_raceVisible()`. A rejection is not fatal either —
+    // the bytes are already a blob and the element is already sourced from it.
+    raster.catch((e) => Log.debug(`Menu: ${src} decode reported ${e?.name ?? e}.`));
+    await this._raceVisible(raster);
+    return this._disposed ? null : img;
+  }
+
+  /**
+   * The first-screen preload. Started from the constructor, concurrent with the engine's bake.
+   *
+   * Only two files are on this path (see §0b). Everything else the menu ever shows is fetched
+   * in `_preloadDeferred()`, after the player is looking at the title screen.
+   */
+  _preload() {
+    if (this._preloadStarted || this._disposed) return;
+    this._preloadStarted = true;
+
+    // Unit 1. No web font is linked today, so this resolves almost immediately — but it is a
+    // real check, and the day a face is added to index.html the type will stop reflowing under
+    // the player. If the API is absent the unit is simply already satisfied.
+    const fonts = globalThis.document?.fonts;
+    if (fonts?.ready?.then) {
+      fonts.ready.then(() => this._unit('fonts', 1), () => this._unit('fonts', 1));
+    } else {
+      this._unit('fonts', 1);
+    }
+
+    // Unit 2 + 3. The night photograph: the single biggest thing the first frame needs.
+    this._fetchDecoded(SPLASH_SRC, (f) => this._unit('splashBytes', f)).then((img) => {
+      this._unit('splashBytes', 1);
+      this._unit('splashDecode', 1);
+      if (!img || this._disposed) return;
+      this._mark('splash-decoded');
+      this._elSplash = img;
+      this._applySplash();
+    });
+
+    // Unit 4. The booklet's own drawn plate. Fetch and decode count as one unit: it is a
+    // third of the splash's weight and splitting it would only add a step nobody can read.
+    this._fetchDecoded(TITLE_ART_SRC, (f) => this._unit('artBytes', f * 0.9)).then((img) => {
+      if (img && !this._disposed) {
+        this._mark('art-decoded');
+        this._elTitleArt = img;
+        img.className = 'sc-plate__art';
+        if (this.screen === 'title') this._refresh();
+      }
+      this._unit('artBytes', 1);
+    });
+
+    // Unit 6. `engine:booted` says the loop has started; it does not say a frame has reached the
+    // glass. Two rAFs after it, one has. That is what the player is actually waiting for, and on
+    // every cold load measured it is the last unit to land — the engine, not the network, is the
+    // long pole, and the plate now says so.
+    const framePresented = () => {
+      if (this._disposed) return;
+      this._booted = true;
+      const raf = globalThis.requestAnimationFrame;
+      const twoFrames = typeof raf === 'function'
+        ? new Promise((ok) => { raf(() => raf(() => ok())); })
+        : Promise.resolve();
+      // Hidden tab: rAF never fires (see `_raceVisible`). There is no frame to wait for.
+      this._raceVisible(twoFrames).then(() => {
+        this._mark('first-frame');
+        this._unit('frame', 1);
+      });
+    };
+    try { this.bus?.once?.('engine:booted', framePresented); } catch (e) {
+      Log.warn('Menu: could not subscribe to engine:booted.', e);
+      framePresented();
+    }
+
+    // The ceiling. Assets are decoration; the game is not. Past this the title opens on what it
+    // has. The engine's own units are deliberately NOT released by this — a title screen over an
+    // unbooted engine would be a menu over a black canvas, which is the bug, not the fix.
+    this._after(ASSET_CEILING_MS, () => {
+      if (this._preDone || this._disposed) return;
+      const stuck = PRELOAD_UNITS
+        .filter((u, i) => this._preP[i] < 1 && u.id !== 'systems' && u.id !== 'frame')
+        .map((u) => u.id);
+      if (!stuck.length) return;
+      Log.warn(`Menu: first-screen assets still incomplete after ${ASSET_CEILING_MS} ms `
+        + `(${stuck.join(', ')}) — opening the title on its drawn fallbacks.`);
+      for (const id of stuck) this._unit(id, 1);
+    });
+  }
+
+  /**
+   * Everything the first screen does not use. Measured, these two were taking 3.4 MB of the pipe
+   * in front of the splash and finishing before it: the pause sheet's cover and the night card's
+   * paper stock, neither of which is reachable in the first seconds of a session.
+   *
+   * These stay plain URLs rather than decoded elements. Both land behind a scrim (the cover
+   * renders at opacity .3; the card is multiplied under type), both replace a finished drawn
+   * screen, and neither is ever the first thing a player sees — so a raster hitch on them is
+   * invisible, and the cheaper mechanism is the right one.
+   */
+  _preloadDeferred() {
+    if (this._deferredStarted || this._disposed || this._bootSuppressed()) return;
+    this._deferredStarted = true;
     const load = (src, onOk) => {
       try {
         const im = new Image();
@@ -1557,26 +1916,94 @@ export class Menu {
         im.onload = () => {
           if (this._disposed) return;
           onOk(src);
-          if (this.screen === 'title' || this.screen === 'pause') this._refresh();
+          if (this.screen === 'pause') this._refresh();
         };
         im.onerror = () => { /* the drawn fallback is already on screen */ };
         im.src = src;
       } catch { /* noop */ }
     };
-    load('/img/title-treatment.png', (s) => { this._imgTitle = s; });
-    load('/img/manual-cover.png', (s) => { this._imgCover = s; });
-    load('/img/nightcard-texture.png', (s) => { this._imgCard = s; });
-    load('/img/splash-title.png', (s) => {
-      this._imgSplash = s;
-      this._applySplash();
-    });
+    load(COVER_SRC, (s) => { this._imgCover = s; });
+    load(CARD_SRC, (s) => { this._imgCard = s; });
+  }
+
+  /** Record a unit's fraction and update the plate. Monotonic: a unit never goes backwards. */
+  _unit(id, fraction) {
+    const i = PRELOAD_UNITS.findIndex((u) => u.id === id);
+    if (i < 0 || this._disposed) return;
+    const f = fraction < 0 ? 0 : fraction > 1 ? 1 : fraction;
+    if (f <= this._preP[i]) return;
+    this._preP[i] = f;
+
+    let complete = true;
+    for (let k = 0; k < PRELOAD_UNITS.length; k++) if (this._preP[k] < 1) complete = false;
+    this._setProgress(this._progress());
+
+    if (complete && !this._preDone) {
+      this._preDone = true;
+      this._preDoneAt = globalThis.performance?.now?.() ?? Date.now();
+      this._mark('preload-complete');
+      this._maybeReveal();
+    }
+  }
+
+  /** The weighted sum — the one number the plate reports, and the only one. */
+  _progress() {
+    let total = 0;
+    for (let k = 0; k < PRELOAD_UNITS.length; k++) total += PRELOAD_UNITS[k].weight * this._preP[k];
+    return total;
+  }
+
+  /** Move the six boxes and the dimension line. Called once per completion, never per frame. */
+  _setProgress(t) {
+    if (!this._plateSvg) return;
+    const boxes = this._plateBoxes;
+    if (boxes) {
+      for (let i = 0; i < boxes.length; i++) {
+        const on = this._preP[i] >= 1 ? '1' : '0';
+        if (boxes[i].dataset.on !== on) boxes[i].dataset.on = on;
+      }
+    }
+    const span = PLATE_SPAN_X1 - PLATE_SPAN_X0;
+    const x = span * (t < 0 ? 0 : t > 1 ? 1 : t);
+    this._plateSpan?.setAttribute('stroke-dashoffset', String(Math.round((span - x) * 100) / 100));
+    this._plateHead?.setAttribute(
+      'transform', `translate(${Math.round((PLATE_SPAN_X0 + x) * 100) / 100} ${PLATE_SPAN_Y})`,
+    );
   }
 
   /** The photographic night plate behind the title sheet. Absent → the live world alone. */
   _applySplash() {
-    if (!this._root || !this._imgSplash) return;
-    this._root.style.setProperty('--sc-splash', `url("${this._imgSplash}")`);
+    if (!this._root || !this._splashEl || !this._elSplash) return;
+    if (this._elSplash.parentNode !== this._splashEl) {
+      this._splashEl.replaceChildren(this._elSplash);
+    }
     this._root.dataset.splash = '1';
+    this._mark('splash-applied');
+    // Normal path: the plate is still up, nothing is visible yet, and this is free. Degraded
+    // path: the ceiling already opened the title, so the photograph must arrive as a fade and
+    // not as a cut. Driven by rAF rather than a CSS transition on purpose — a backgrounded tab
+    // freezes the CSS timeline and can strand a layer at its FROM value, which is how this
+    // element spent its first hour: correct in the cascade, invisible on screen.
+    if (this._revealed) this._fadeSplashIn();
+  }
+
+  _fadeSplashIn() {
+    const el = this._splashEl;
+    if (!el || this._fadeRaf) return;
+    const raf = globalThis.requestAnimationFrame;
+    if (typeof raf !== 'function') return;
+    const t0 = globalThis.performance?.now?.() ?? Date.now();
+    el.style.opacity = '0';
+    const step = () => {
+      this._fadeRaf = 0;
+      if (this._disposed || !this._splashEl) return;
+      const now = globalThis.performance?.now?.() ?? Date.now();
+      const k = (now - t0) / 900;
+      if (k >= 1) { el.style.opacity = ''; return; }   // hand it back to the stylesheet at .93
+      el.style.opacity = String(0.93 * k * k * (3 - 2 * k));
+      this._fadeRaf = raf(step);
+    };
+    this._fadeRaf = raf(step);
   }
 
   /* ------------------------------------------------------------------ the boot plate */
@@ -1594,9 +2021,6 @@ export class Menu {
    */
   _showLoading() {
     if (!this._root || this._loadingEl) return;
-    const plate = this._imgLoading
-      ? `<img src="${esc(this._imgLoading)}" alt="" draggable="false">`
-      : svgContentsPlate();
 
     const el = document.createElement('div');
     el.className = 'sc-loading';
@@ -1607,8 +2031,7 @@ export class Menu {
           <span class="sc-prop">${esc(PROPERTY_STAMP)}</span>
           <span class="sc-dim-text">ART. NO. ${esc(ARTICLE_NO)}</span>
         </div>
-        <div class="sc-load__plate">${plate}</div>
-        <div class="sc-load__bar"></div>
+        <div class="sc-load__plate">${svgContentsPlate()}</div>
         <div class="sc-foot">
           <span class="sc-load__word">CHECK CONTENTS BEFORE BEGINNING.</span>
           <span class="sc-dim-text">${esc(MAKERS_MARK)}</span>
@@ -1616,33 +2039,82 @@ export class Menu {
       </div>`;
     this._root.appendChild(el);
     this._loadingEl = el;
+    this._plateAt = globalThis.performance?.now?.() ?? Date.now();
+    this._mark('plate-visible');
 
-    // The plate has its own probe: it is wanted seconds before init() runs _probeImages().
-    try {
-      const im = new Image();
-      im.onload = () => {
-        if (this._disposed || !this._loadingEl) return;
-        this._imgLoading = '/img/loading-plate.png';
-        const slot = this._loadingEl.querySelector('.sc-load__plate');
-        if (slot) slot.innerHTML = `<img src="/img/loading-plate.png" alt="" draggable="false">`;
-      };
-      im.onerror = () => { /* the drawn hammer is already on screen */ };
-      im.src = '/img/loading-plate.png';
-    } catch { /* noop */ }
+    // Cache the nodes `_setProgress()` mutates, so reporting progress never touches innerHTML
+    // and never re-parses the drawing out from under its own transitions.
+    this._plateSvg = el.querySelector('.sc-load__plate svg');
+    this._plateBoxes = this._plateSvg ? el.querySelectorAll('.sc-ld-box') : null;
+    this._plateSpan = el.querySelector('.sc-ld-span');
+    this._plateHead = el.querySelector('.sc-ld-head');
+    this._setProgress(this._progress());
 
-    // Two independent teardowns. init() is the normal one; `engine:booted` covers the case
-    // where Menu.init() itself threw, and the timer covers a system that never returns. A boot
-    // plate that outlives the boot is the one failure mode that looks like a crash.
-    try { this.bus?.once?.('engine:booted', () => this._hideLoading()); } catch { /* noop */ }
-    this._after(45000, () => this._hideLoading());
+    // Absolute failsafe. `engine:booted` is NOT a teardown any more — it is unit 6, and the
+    // plate's whole job is to outlive it by however long the first screen still needs. But a
+    // system that never returns must not strand the player behind a sheet, so this stands.
+    this._after(PLATE_FAILSAFE_MS, () => {
+      if (this._revealed || this._disposed) return;
+      Log.warn(`Menu: boot did not complete within ${PLATE_FAILSAFE_MS} ms — revealing anyway.`);
+      this._revealed = true;
+      if (this.screen === null && (this.ctx.state?.phase ?? 'menu') === 'menu') this.showTitle();
+      this._hideLoading();
+    });
+  }
+
+  /**
+   * The single moment. Called by every unit as it lands, by init(), and by its own timer; it is
+   * idempotent and it is the only way the title screen is ever opened on a normal boot.
+   *
+   * Three gates, all of which must be past:
+   *   - the first screen is complete (or the ceiling released it),
+   *   - every system has init()ed, so there is a world behind the paper,
+   *   - the plate has been up long enough to read as a deliberate object rather than a flash.
+   */
+  _maybeReveal() {
+    if (this._disposed || this._revealed) return;
+    if (this._bootHidden || this._bootSuppressed() || this._reviewMode) return;
+    if (!this._systemsReady || !this._preDone) return;
+    // Something else took the screen while we were loading (a night began, a review hook fired).
+    // The plate is not the owner of that transition — get out of its way and stop.
+    if (this.screen !== null) { this._revealed = true; this._hideLoading(); return; }
+
+    const now = globalThis.performance?.now?.() ?? Date.now();
+    const earliest = Math.max(this._plateAt + MIN_PLATE_MS, this._preDoneAt + PLATE_SETTLE_MS);
+    if (now < earliest) {
+      if (!this._revealTimer) {
+        this._revealTimer = this._after(Math.ceil(earliest - now), () => {
+          this._revealTimer = 0;
+          this._maybeReveal();
+        });
+      }
+      return;
+    }
+
+    this._revealed = true;
+    this._mark('title-mounted');
+    this.showTitle();
+
+    // Let the sheet's own entrance finish while it is still hidden, then draw the curtain.
+    // Two motions at once would read as a web page assembling itself; one fade of a finished
+    // page reads as a page being turned, which is the only metaphor this game has.
+    this._after(SHEET_SETTLE_MS, () => {
+      this._mark('title-revealed');
+      this._hideLoading();
+      this._preloadDeferred();
+    });
   }
 
   _hideLoading() {
     const el = this._loadingEl;
     if (!el) return;
     this._loadingEl = null;
+    this._plateSvg = this._plateBoxes = this._plateSpan = this._plateHead = null;
     el.dataset.off = '1';
-    this._after(460, () => el.remove());
+    this._after(PLATE_FADE_MS + 40, () => el.remove());
+    // Whatever route got us here — reveal, review hook, failsafe — the deferred art is now safe
+    // to fetch: the pipe is no longer in front of anything the player is waiting on.
+    this._after(PLATE_FADE_MS, () => this._preloadDeferred());
   }
 
   /* ------------------------------------------------------------------ screen plumbing */
@@ -1668,7 +2140,10 @@ export class Menu {
 
     this._stage.innerHTML = html;
     this._sheetEl = this._stage.querySelector('.sc-sheet');
+    this._graftArt();
     this._root.dataset.open = '1';
+
+    if (name === 'title') this._mark('title-shown');
 
     this._collect();
     this._releaseLock();
@@ -1676,6 +2151,17 @@ export class Menu {
     if (opts.pause) this._startPadPoll(); else this._stopPadPoll();
     this.resize(this.ctx.width ?? 0, this.ctx.height ?? 0);
     if (!first) this._sfx('ui.page', 0.8);
+  }
+
+  /**
+   * Move the decoded title art into whatever markup was just written. The element is a single
+   * live node, so it is moved rather than copied; `.sc-plate img` already carries its sizing and
+   * the `mix-blend-mode: darken` that dissolves the plate's slightly lighter stock into ours.
+   */
+  _graftArt() {
+    if (!this._elTitleArt || !this._stage) return;
+    const slot = this._stage.querySelector('.sc-plate');
+    if (slot && this._elTitleArt.parentNode !== slot) slot.appendChild(this._elTitleArt);
   }
 
   /** Re-render the current screen in place (art arrived, a setting changed). */
@@ -1693,6 +2179,7 @@ export class Menu {
 
     this._stage.innerHTML = html;
     this._sheetEl = this._stage.querySelector('.sc-sheet');
+    this._graftArt();
     this._collect();
     this._index = clamp(keepIndex, 0, Math.max(0, this._items.length - 1));
     this._rowIndex = clamp(keepRow, 0, Math.max(0, this._rows.length - 1));
@@ -1896,8 +2383,14 @@ export class Menu {
     const steps = this._totalSteps();
     // The supplied plate already carries the red rule and the hardware roundels; the drawn
     // fallback has to print them itself, so the two versions of this sheet say the same things.
-    const plate = this._imgTitle
-      ? `<img src="${esc(this._imgTitle)}" alt="" draggable="false">`
+    //
+    // When the art is present the slot is left EMPTY here and `_graftArt()` moves the decoded
+    // element into it after the markup lands. Re-emitting `<img src>` would ask the browser for
+    // the picture a second time — a request whose cost is entirely at the mercy of the origin's
+    // cache headers, and which measured as a full 1,205 KB re-download on a `no-store` origin,
+    // arriving 3.7 s after the sheet it belongs to.
+    const plate = this._elTitleArt
+      ? ''
       : `<div class="sc-plate__draw">${svgCabin()}</div>
           <div class="sc-plate__rule"></div>
           <div class="sc-plate__hw">${svgHardware()}</div>`;
@@ -2824,6 +3317,26 @@ export class Menu {
   _sfx(id, volume = 1, delayMs = 0) {
     const fire = () => this.bus?.emit?.('audio:sfx', { id, volume });
     if (delayMs > 0) this._after(delayMs, fire); else fire();
+  }
+
+  /**
+   * The first-load instrument.
+   *
+   * ARCHITECTURE §11d: a claim about timing needs an instrument that can be checked against a
+   * known reference. These marks are written at the exact statement that causes the pixel — the
+   * boot plate's appendChild, the title's `data-open`, each asset's own resolution — and they
+   * share `performance.now()`'s time base with the Resource Timing API, so `splash-decoded`
+   * and `splash-title.png`'s `responseEnd` are directly comparable without any conversion.
+   *
+   * Readable as `window.__MENU_TIMING__`. Two numbers and no branches; it cannot perturb what
+   * it measures.
+   */
+  _mark(name) {
+    try {
+      const t = globalThis.performance?.now?.() ?? 0;
+      const store = (globalThis.__MENU_TIMING__ ||= {});
+      if (store[name] === undefined) store[name] = Math.round(t * 10) / 10;
+    } catch { /* noop */ }
   }
 
   _after(ms, fn) {

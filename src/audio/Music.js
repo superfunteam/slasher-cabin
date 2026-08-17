@@ -476,7 +476,10 @@ export class Music {
     this._bedDead = new Set();       // ids that 404'd or failed to decode — never retried
     this._bedVoices = [];
     this._bedCurrent = null;
-    this._bedWant = 'work';
+    // The game boots at the title screen, so that is what the first moment wants. This used
+    // to default to 'work' and the manifest's warm-up therefore pulled 1.4 MB of BUILDING
+    // music down before the player had pressed anything.
+    this._bedWant = 'title';
     this._bedOff = false;            // setBeds(false) — synthesis is unaffected either way
     this._bedGateTarget = 0;
     this._bedStopAt = Infinity;
@@ -1814,6 +1817,20 @@ export class Music {
   }
 
   /**
+   * Warm the score bed for a mood before the moment that wants it arrives. Public because
+   * AudioEngine's tier-1 prefetch calls it the instant the player presses ASSEMBLE, so the
+   * BUILDING bed is decoded by the time the first bar line comes round. Never blocks, never
+   * throws, and a mood with no shipped bed simply does nothing.
+   * @param {string} mood one of the `MUSIC_BEDS` keys
+   */
+  prefetchBed(mood) {
+    if (!this.generatedAvailable) return;
+    const id = MUSIC_BEDS[mood];
+    if (!id) return;
+    this._ensureBedBuffer(id);
+  }
+
+  /**
    * The decoded buffer for `id`, or null. A miss starts exactly one background load and
    * returns null immediately — the caller keeps synthesizing and asks again next tick.
    */
@@ -1828,6 +1845,12 @@ export class Music {
     if (this._bedDead.has(id) || this._bedLoading.has(id)) return null;
     const entry = this._bedFiles.get(id);
     if (!entry) return null;
+    // AudioEngine owns the loading-tier policy for every generated asset (see its
+    // `mayFetchGenerated`). A shut gate is not a failure and is never written off: the
+    // scheduler asks again on the next bar, and until then the synthesized score — which is
+    // a complete score on its own — carries the mood alone.
+    const gate = this.ctx?.systems?.get?.('Audio') ?? null;
+    if (gate && typeof gate.mayFetchGenerated === 'function' && !gate.mayFetchGenerated(id)) return null;
 
     const p = (async () => {
       try {
