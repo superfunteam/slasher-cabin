@@ -34,6 +34,10 @@ export const SHOTS = {
   'site-wide': {
     desc: "The build site from the treeline — the game's establishing shot.",
     from: 'buildSite', offset: [18, 0, 16], at: 'buildSite', aim: [0, 1.4, 0], eye: 2.2,
+    // Park the PLAYER at the plot rather than under the camera, so the lantern auto-hangs on the
+    // hook instead of being carried into shot. Carried, its mesh sat 0.93m from the lens and
+    // washed the lower 40% of the establishing frame flat orange.
+    playerAt: 'buildSite', playerOffset: [1.5, 0, 1.5],
     timeOfNight: 0.35, rain: 0.15, fog: 0.55, lantern: true, hood: 0,
   },
   'site-close': {
@@ -48,7 +52,11 @@ export const SHOTS = {
   },
   'camp-fire': {
     desc: 'Camp firelight through trees. The warm/cool palette collision.',
-    from: 'camp', offset: [-34, 0, -6], at: 'camp', aim: [0, 1.2, 0], eye: 1.7,
+    // Resolves against Props.firePosition, not campCenter. Offsetting from the camp centroid
+    // put the camera hard against the flank of a shed with the fire nowhere in frame — the shot
+    // scored 3/10 for framing, not for rendering. Landmarks that own themselves should be asked
+    // where they are, exactly as the moon shot asks Sky.
+    from: 'firepit', offset: [-9, 0, -7], at: 'firepit', aim: [0, 0.8, 0], eye: 1.7,
     timeOfNight: 0.25, rain: 0.0, fog: 0.45, lantern: false,
   },
   'camp-tents': {
@@ -110,6 +118,7 @@ export const SHOTS = {
 /** Fallbacks used only when Terrain is unavailable — keeps the harness usable standalone. */
 const LANDMARK_FALLBACK = {
   camp: [124, 0, -18],
+  firepit: [124, 0, -18],
   buildSite: [-140, 0, 128],
   dock: [106, 0, -72],
   latrine: [96, 0, 34],
@@ -119,6 +128,7 @@ const LANDMARK_FALLBACK = {
 const _pos = new THREE.Vector3();
 const _tgt = new THREE.Vector3();
 const _off = new THREE.Vector3();
+const _off2 = new THREE.Vector3();
 
 export class Shots {
   constructor(ctx) {
@@ -204,10 +214,21 @@ export class Shots {
     ctx.camera.lookAt(_tgt);
 
     if (this.frozen) {
-      // Park the player on the camera so systems that follow the player behave.
+      // Park the player on the camera so systems that follow the player behave — unless the shot
+      // names a different place for them to stand. A shot that wants the lantern HUNG needs the
+      // player near the hook while the camera stands back to frame it.
       const player = ctx.systems.get('Player');
       if (player?.position) {
-        player.position.copy(_pos);
+        if (s.playerAt) {
+          this._landmark(terrain, s.playerAt, _off2).add(_off.fromArray(s.playerOffset ?? [0, 0, 0]));
+          if (terrain?.heightAt) {
+            const g = terrain.heightAt(_off2.x, _off2.z);
+            if (Number.isFinite(g)) _off2.y = g + 1.7;
+          }
+          player.position.copy(_off2);
+        } else {
+          player.position.copy(_pos);
+        }
         player.velocity?.set?.(0, 0, 0);
       }
     }
@@ -250,6 +271,13 @@ export class Shots {
   /** Resolve a landmark name to a world position, writing into `out`. */
   _landmark(terrain, name, out) {
     const key = name ?? 'origin';
+
+    // Some landmarks are owned by the system that builds them, not by Terrain. Ask the owner.
+    if (key === 'firepit') {
+      const f = this.ctx.systems.get('Props')?.firePosition;
+      if (f && Number.isFinite(f.x)) return out.copy(f);
+    }
+
     const v = terrain?.[key === 'buildSite' ? 'buildSiteCenter' : key === 'camp' ? 'campCenter' : key];
     if (v && Number.isFinite(v.x)) return out.set(v.x, v.y ?? 0, v.z);
     const f = LANDMARK_FALLBACK[key] ?? LANDMARK_FALLBACK.origin;
