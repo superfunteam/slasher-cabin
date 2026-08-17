@@ -58,7 +58,14 @@
  *   windLoad             float 0..1     structural load on the frame = base + gust. Use this for
  *                                       BuildSystem's Mw so a gust makes bad joins talk.
  *   fog                  float 0..1
- *   lightning            float 0..1     flash envelope, drives uLightning
+ *   lightning            float 0..1     flash envelope. WRITABLE, and writing it FIRES A STRIKE:
+ *                                       a rising edge past 0.05 runs the whole strike path
+ *                                       (Sky.flash, key light, flashSeq, strike position,
+ *                                       thunder at distance/343, masking window). Holding it
+ *                                       high — the shot harness re-writes it every frame —
+ *                                       holds the flash at that level instead of letting the
+ *                                       0.62 s envelope expire under a still. Setting it to 0
+ *                                       or calling clearPins() releases the hold.
  *   isStorming           bool
  *   nextStrikeIn         seconds until the next flash (Infinity when none). CALLABLE: both
  *                        `w.nextStrikeIn` and `w.nextStrikeIn()` work — see callableNumber().
@@ -76,7 +83,9 @@
  *   requestWind(delta, seconds = 90)      GAME_DESIGN §5.4 rubber band, NightManager
  *   requestGust(strength = 1, delay = 0)  GAME_DESIGN §7.3 cascade cover, BuildSystem
  *   requestCover(within = 45)             GAME_DESIGN §7.5 guarantee, BuildSystem
- *   strike(opts)                          force a strike (NightManager beats, debug)
+ *   strike(intensity | opts)              force a strike (NightManager beats, debug, harness).
+ *                                         strike(1) is a full-intensity strike, now;
+ *                                         strike({ intensity: 1, hold: true }) holds it at peak.
  *   setNight(n)  clearPins()
  *
  * Emits: `weather:change { rain, wind, fog }` (throttled), `noise:emit { kind:'thunder' }`,
@@ -96,6 +105,12 @@ const _v3d = new THREE.Vector3();
 
 /** exp(-x^2). Written as a function because `-a ** 2` is a JavaScript syntax error. */
 const gauss = (x) => Math.exp(-(x * x));
+
+/** Above this, an outside write to `.lightning` means "strike", not "the flash is fading". */
+const FLASH_TRIGGER = 0.05;
+
+/** ART_DIRECTION §3.2: the lightning key is a DirectionalLight, no shadow, peak 4.5, #c9d6ee. */
+const LIGHTNING_KEY_INTENSITY = 4.5;
 
 const clamp01 = (x) => (x < 0 ? 0 : x > 1 ? 1 : x);
 const clamp = (x, a, b) => (x < a ? a : x > b ? b : x);
@@ -482,15 +497,23 @@ attribute float aScale;
 
 varying float vAlpha;
 varying vec3  vColor;
+varying float vRing;
 
 void main() {
   float age = uTime - aSpawn;
   float k = age / uLife;
   if (aSpawn <= 0.0 || k < 0.0 || k > 1.0) {
     vAlpha = 0.0;
+    vRing = 0.0;
     gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
     return;
   }
+  // Where across the annulus this vertex sits, 0 at the inner rim, 1 at the outer. The ring
+  // geometry runs 0.55..1.0 in radius, so this recovers the parameter the fragment needs to
+  // taper the ring off at BOTH rims. Without it the ring is a flat-shaded annulus with two
+  // hard edges — a drawn hoop lying on the ground, which is exactly what the lantern pool
+  // showed. A splash ring is a disturbance in a surface, and it has no outline.
+  vRing = clamp((length(position.xz) - 0.55) / 0.45, 0.0, 1.0);
   float r = aScale * (0.12 + 0.88 * sqrt(k));
   vec3 wp = aPos + vec3(position.x * r, 0.0, position.z * r);
 
@@ -532,10 +555,15 @@ precision highp float;
 
 varying float vAlpha;
 varying vec3  vColor;
+varying float vRing;
 
 void main() {
-  if (vAlpha < 0.003) discard;
-  gl_FragColor = vec4(vColor, vAlpha);
+  // Taper to nothing at both rims. sin(pi*x) is the cheapest profile that is zero at 0 and 1
+  // and smooth in between; the ring reads as a crest in the water rather than a stroked circle.
+  float band = sin(vRing * 3.14159265);
+  float a = vAlpha * band * band;
+  if (a < 0.003) discard;
+  gl_FragColor = vec4(vColor, a);
   #include <tonemapping_fragment>
   #include <colorspace_fragment>
 }
@@ -626,6 +654,9 @@ export class Weather {
     this._rollEndsAt = -1e9;
     this._rollPeak = 0;
     this._coverRequestedUntil = -1e9;
+    this._extLightning = 0;      // last externally-written .lightning, for rising-edge detection
+    this._heldFlash = 0;         // >0 while somebody is holding .lightning up (Shots, debug)
+    this._skyFlashRearmAt = -1e9;
 
     // ---- pins (Shots.js / debug overrides)
     this._pin = { rain: null, fog: null, lightning: null };
@@ -742,6 +773,7 @@ export class Weather {
 
     this._adoptPins();
     this._writeUniforms(d);
+    this._updateLightningLight();
     // The particle clock is the night clock, not the session clock: `_t` is bounded by the
     // night length, so `velocity * time` inside the wrap never loses float precision on a long
     // session, and it resets cleanly at every night boundary.
@@ -1024,6 +1056,10 @@ export class Weather {
 
   _resetLightning() {
     this.lightning = 0;
+    this._extLightning = 0;
+    this._heldFlash = 0;
+    this._skyFlashRearmAt = -1e9;
+    if (this._lightningLight) this._lightningLight.intensity = 0;
     this.flashExposure = 1.0;
     this._flashAt = -1e9;
     this._thunderAt = Infinity;
@@ -1050,8 +1086,12 @@ export class Weather {
 
     // A storm is still a storm after its last strike. It stops being one when the rain and the
     // wind stop, which on Night 7 happens at t = 0.80 and is the whole point of Night 7.
-    this.isStorming = (this._active.strikes > 0)
-      && (this.rain > 0.30 || this.windStrength > 0.55);
+    // A forced strike is a storm too. `?shot=lightning` used to report `isStorming false` in the
+    // middle of its own flash because the shot runs on Night 1, whose profile authors no strikes.
+    this.isStorming = ((this._active.strikes > 0)
+      && (this.rain > 0.30 || this.windStrength > 0.55))
+      || this._heldFlash > 0
+      || (this._t - this._lastStrikeAt) < 8;
 
     // Re-apply pins so a pinned value survives the simulation, then record what the simulation
     // produced. _adoptPins() compares against this to tell an external write from our own.
@@ -1281,8 +1321,26 @@ export class Weather {
       if (this.lightning < 0.002) this.lightning = 0;
     }
 
+    // A HELD pin (the shot harness writes `.lightning` every frame) means "the flash is at this
+    // level right now". Hold the envelope there — and keep re-arming Sky, whose own flash()
+    // envelope expires after 0.72 s and whose external-value latch fires exactly once, so
+    // without this the world goes dark under a pin that never dropped.
+    if (this._heldFlash > 0) {
+      this.lightning = Math.max(this.lightning, this._heldFlash);
+      // Re-arm Sky only once its own envelope has sagged well below the hold. Re-arming every
+      // frame would restart the 3-stage envelope at zero forever; re-arming on a fixed period
+      // makes the dome strobe. This keeps Sky's dome inside [0.6, 1.0] of the hold, and
+      // Weather's own key light (below) makes up the exact remainder, so the KEY is steady even
+      // while the dome breathes. A still grabbed at any frame gets the same light.
+      const skyLevel = this._skyLightningLevel();
+      if (skyLevel < this._heldFlash * 0.6 && now >= this._skyFlashRearmAt) {
+        this._skyFlashRearmAt = now + 0.08;
+        this._skyFlash(this._heldFlash);
+      }
+    }
+
     // GAME_DESIGN §9.4 — exposure persists 0.25 s, which is what makes the flash a trade.
-    this.flashExposure = (fe >= 0 && fe < TUNING.flashExposureSeconds)
+    this.flashExposure = (this._heldFlash > 0 || (fe >= 0 && fe < TUNING.flashExposureSeconds))
       ? TUNING.flashExposureFactor : 1.0;
 
     // --- thunder arrival
@@ -1383,13 +1441,9 @@ export class Weather {
     this._thunderAt = now + dist / TUNING.speedOfSound;
     this._thunderEnvelope = TUNING.envelopeFloor + TUNING.envelopeSpan * near;
 
-    // Sky owns the world flash if it can do it; otherwise Weather's own directional light does.
-    let sky = null;
-    try { sky = this.ctx?.systems?.get?.('Sky') ?? null; } catch { sky = null; }
-    if (typeof sky?.flash === 'function') {
-      try { sky.flash(this._flashPeak); }
-      catch (e) { Log.once('weather-sky-flash', 'Weather: Sky.flash() threw.', e); }
-    }
+    // Sky paints the dome and swings the bolt direction; Weather's own key light (§3.2 names
+    // Weather as the owner) carries whatever Sky's envelope is not currently delivering.
+    this._skyFlash(this._flashPeak);
 
     Log.debug(`Weather: strike ${this.strikeCount} at ${distanceKm.toFixed(2)} km — `
       + `thunder in ${(dist / TUNING.speedOfSound).toFixed(1)} s, `
@@ -1501,8 +1555,28 @@ export class Weather {
     return Number.isFinite(this._nextFlashAt) && this._nextFlashAt - this._t <= w;
   }
 
-  /** Force a strike. NightManager beats and the debug harness; not part of normal play. */
+  /**
+   * Force a strike. NightManager beats and the debug harness; not part of normal play.
+   *
+   *   strike()                       a random strike, now
+   *   strike(1)                      a full-intensity strike, now      <- harness form
+   *   strike({ intensity: 0.7 })
+   *   strike({ distanceKm: 2.4 })
+   *   strike({ immediate: false, inSeconds: 3 })
+   *   strike({ hold: true })         stay at peak until strike({ hold: false }) or clearPins()
+   */
   strike(opts = {}) {
+    if (typeof opts === 'number') opts = { intensity: clamp01(opts) };
+    if (Number.isFinite(opts.intensity)) {
+      // Same path a pinned `.lightning` takes, so both entry points behave identically.
+      const level = clamp01(opts.intensity);
+      this._extLightning = 0;
+      this._fireExternalStrike(level);
+      // `hold` pins `.lightning`, which is what keeps the flash at peak (see _adoptPins).
+      if (opts.hold) { this._pin.lightning = level; this.lightning = level; }
+      else if (this._pin.lightning !== null) this._pin.lightning = null;
+      return;
+    }
     const km = clamp(
       Number.isFinite(opts.distanceKm) ? opts.distanceKm : this._rand.range(0.4, 4.2),
       TUNING.distanceMinKm, TUNING.distanceMaxKm,
@@ -1584,6 +1658,8 @@ export class Weather {
     this._pin.rain = null;
     this._pin.fog = null;
     this._pin.lightning = null;
+    this._extLightning = 0;
+    this._heldFlash = 0;
   }
 
   // ================================================================ pins & uniforms
@@ -1599,12 +1675,50 @@ export class Weather {
       // by somebody else this frame.
       if (this.rain !== this._published.rain) this._pin.rain = clamp01(this.rain);
       if (this.fog !== this._published.fog) this._pin.fog = clamp01(this.fog);
-      if (this.lightning !== this._published.lightning) this._pin.lightning = clamp01(this.lightning);
+      if (this.lightning !== this._published.lightning) {
+        // `weather.lightning = x` USED TO BE INERT. It set a number that _writeUniforms copied
+        // into uLightning and nothing else: no Sky.flash(), no key light, no flashSeq for the
+        // campers to flashMark against (§9.4), no strike position, no thunder. The canonical
+        // `?shot=lightning` frame measured `lightning === 1.0` and `uLightning === 1.0` next to
+        // `flashSeq 0 / isStorming false / strikeDistanceKm 0` — the number was set and the
+        // flash had never happened. The property is now the trigger it always claimed to be.
+        const level = clamp01(this.lightning);
+        this._pin.lightning = level;
+        // RISING edge only: the harness re-writes the same value every frame, and firing on
+        // every write would machine-gun `flashSeq` and restart the envelope forever.
+        if (level > FLASH_TRIGGER && this._extLightning <= FLASH_TRIGGER) {
+          this._fireExternalStrike(level);
+        }
+        this._extLightning = level;
+      }
     }
     if (this._pin.rain !== null) this.rain = this._pin.rain;
     if (this._pin.fog !== null) this.fog = this._pin.fog;
     if (this._pin.lightning !== null) this.lightning = this._pin.lightning;
+    // A pin held above the trigger IS the hold: it says "the flash is at this level, now".
+    // _simLightning keeps the envelope and Sky's dome there instead of letting the 0.62 s decay
+    // run out from under a still that has not been grabbed yet.
+    this._heldFlash = (this._pin.lightning !== null && this._pin.lightning > FLASH_TRIGGER)
+      ? this._pin.lightning : 0;
     this._publish();
+  }
+
+  /**
+   * Fire the real thing from an outside intensity: Sky flashes, the key light comes up,
+   * `flashSeq` increments (campers flashMark on it, §9.4), a strike position is chosen, thunder
+   * is scheduled at distance/343, and the masking window opens.
+   */
+  _fireExternalStrike(level) {
+    // Near strikes are the bright ones (_flashPeak = 0.46 + 0.54*near), so invert the peak the
+    // caller asked for back into a distance. `lightning = 1` is therefore a 0.4 km strike with
+    // its own short thunder delay, not an abstract brightness with no cause behind it.
+    const near = clamp01((level - 0.46) / 0.54);
+    const km = clamp(
+      lerp(TUNING.distanceMaxKm, TUNING.distanceMinKm, near),
+      TUNING.distanceMinKm, TUNING.distanceMaxKm,
+    );
+    this._commitStrike(this._t, km);
+    this._flashPeak = Math.max(this._flashPeak, level);
   }
 
   _publish() {
@@ -1652,15 +1766,9 @@ export class Weather {
     this._published.fog = this.fog;
     this._published.lightning = this.lightning;
 
-    if (this._lightningLight) {
-      this._lightningLight.intensity = 4.5 * this.lightning;
-      if (this.lightning > 0.01) {
-        _v3a.copy(this.strikePosition).sub(this.ctx?.camera?.position ?? _v3b.set(0, 0, 0));
-        _v3a.y = Math.max(_v3a.y, 180);
-        this._lightningLight.position.copy(_v3a).normalize().multiplyScalar(320);
-        this._lightningLight.target.position.set(0, 0, 0);
-      }
-    }
+    // The key light is driven in _updateLightningLight(), which nets off whatever Sky's own
+    // bolt is already contributing. Driving it here as a flat 4.5 * lightning double-counted
+    // the flash on every frame Sky was also flashing.
 
     // Height fog: ART §5.1 columns, blended by the front. Numeric-only calls do not allocate;
     // colours do, so they are set once per night in _applyFogProfile.
@@ -1728,15 +1836,43 @@ export class Weather {
 
   // ================================================================ rendering
 
-  _ensureLightningLight() {
+  /** Sky's current flash level, 0 when Sky is absent or not flashing. */
+  _skyLightningLevel() {
+    try {
+      const sky = this.ctx?.systems?.get?.('Sky') ?? null;
+      const v = sky?.lightningLevel;
+      return Number.isFinite(v) ? clamp01(v) : 0;
+    } catch { return 0; }
+  }
+
+  /** Ask Sky to paint the dome and swing its bolt. Safe when Sky is absent or older. */
+  _skyFlash(level) {
     let sky = null;
     try { sky = this.ctx?.systems?.get?.('Sky') ?? null; } catch { sky = null; }
-    if (typeof sky?.flash === 'function') return;      // Sky owns the flash light
+    if (typeof sky?.flash !== 'function') return false;
+    try { sky.flash(clamp01(level)); return true; }
+    catch (e) { Log.once('weather-sky-flash', 'Weather: Sky.flash() threw.', e); return false; }
+  }
+
+  /**
+   * The lightning key. ART §3.2's table names **Weather** as this light's owner, and it is built
+   * unconditionally — including when Sky has a flash() of its own.
+   *
+   * This used to bail out whenever `Sky.flash` existed, which left `weather.lightning` with no
+   * way to light anything: Sky's envelope expires 0.72 s after its own flash() call and its
+   * external-value latch fires exactly once, so a HELD `.lightning` lit the world for two thirds
+   * of a second and then sat at 1.0 over a dark forest. The light is driven every frame at
+   * `4.5 * max(0, lightning - skyLevel)`, so it never double-counts Sky's contribution and the
+   * total key is always exactly `4.5 * lightning`.
+   */
+  _ensureLightningLight() {
     if (!this.ctx?.scene) return;
 
     // Created at init with intensity 0 so the lights hash never changes mid-game (a new light
     // at strike time means a shader recompile, i.e. a hitch on the best frame in the game).
-    // ART §3.2: DirectionalLight, no shadow, peak 4.5, #c9d6ee. ART §3.6 budgets MAX_DIR 2.
+    // ART §3.2: DirectionalLight, no shadow, peak 4.5, #c9d6ee. ART §3.6 budgets MAX_DIR 2 —
+    // moon + lightning — and Sky's own bolt occupies the same slot, so this one only ever runs
+    // above zero when Sky's is not carrying the flash.
     const l = new THREE.DirectionalLight(0xc9d6ee, 0);
     l.castShadow = false;
     l.position.set(-120, 260, -220);
@@ -1745,6 +1881,35 @@ export class Weather {
     this.ctx.scene.add(l.target);
     this._lightningLight = l;
     this._ownsLightningLight = true;
+  }
+
+  /**
+   * Drive the key light. Called from update(), after the pins have been adopted, so a held
+   * `.lightning` lights the frame it was written for.
+   */
+  _updateLightningLight() {
+    const l = this._lightningLight;
+    if (!l) return;
+    const want = clamp01(this.lightning) - this._skyLightningLevel();
+    l.intensity = want > 0 ? want * LIGHTNING_KEY_INTENSITY : 0;
+    if (l.intensity <= 0) return;
+
+    // Aim it from the strike. `strikePosition` is a real world point (upwind-biased, 600-1500 m
+    // up), so the key comes from where the bolt is and the terminator on every trunk agrees with
+    // it. Parked relative to the camera because a directional light only has a direction.
+    const cam = this.ctx?.camera?.position;
+    _v3a.copy(this.strikePosition);
+    if (cam) {
+      _v3a.sub(cam);
+      if (_v3a.lengthSq() < 1e-6) _v3a.set(-0.5, 0.7, -0.5);
+      _v3a.normalize().multiplyScalar(300);
+      l.target.position.copy(cam);
+      l.position.copy(cam).add(_v3a);
+    } else {
+      if (_v3a.lengthSq() < 1e-6) _v3a.set(-120, 260, -220);
+      l.target.position.set(0, 0, 0);
+      l.position.copy(_v3a.normalize().multiplyScalar(300));
+    }
   }
 
   _buildRain() {

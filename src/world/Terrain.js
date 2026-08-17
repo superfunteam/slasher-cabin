@@ -372,6 +372,25 @@ export class Terrain {
       + 27 * Math.exp(-Math.pow((x - 118) / 42, 2));   // the camp bay
   }
 
+  /**
+   * The FAR bank (world z). Water is z > nz(x); land is z < nz(x).
+   *
+   * The lake used to have no far side: the basin floor levelled off at -11 m and ran flat to the
+   * world boundary at z = -256, so from the dock there was nothing across the water but 205 m of
+   * open surface and then the sky. A lake with no opposite bank has no horizon LINE — only a
+   * gradient into fog — which is precisely what ?shot=lake scored 4/10 for. keyart-lake.png is
+   * built on the opposite treeline: it is the hard black edge the water reflects and the moon
+   * sits over. This puts one at ~110 m out from the dock, which is inside the range trees are
+   * still rendered at (Materials' height fog, not the ground's).
+   */
+  _northShoreZ(x) {
+    const s = this._seed;
+    return -184
+      - 13 * Math.sin(x * 0.0083 - 1.4)
+      + 15 * (fbm(x * 0.0061, 311.7, 3, s + 63) - 0.5)
+      - 17 * Math.exp(-Math.pow((x + 52) / 62, 2));   // the bay behind the granite headland
+  }
+
   /** Ridge crest amplitude and centreline x at a given z. */
   _ridgeAt(z, out) {
     const N = RIDGE_NODES;
@@ -428,16 +447,28 @@ export class Terrain {
     // bedrock where the ridge core is strong or the slope is a scarp
     let rock = clamp01((ridgeProfile - 0.44) * 2.3) * clamp01(amp / 14);
 
-    // --- lake basin, beach, headland outcrops -------------------------------------------------
+    // --- the north rim, so the far bank has something to stand on ----------------------------
+    // Mirrors the east/west rim above. Zero for z > -186, so nothing south of the lake moves.
+    h += 15.0 * smoothstep(-186, -252, z);
+
+    // --- lake basin, TWO banks, beach, headland outcrops --------------------------------------
     const sz = this._shoreZ(x);
-    const sd = z - sz;                    // >0 land, <0 water
+    const nz = this._northShoreZ(x);
+    const sd = z - sz;                    // >0 south of the near shore  (land)
+    const nd = nz - z;                    // >0 north of the far  shore  (land)
+    const land = Math.max(sd, nd);        // <0 => in the water
     let profile;
-    if (sd < 0) {
-      profile = -Math.min(11, 0.42 * Math.pow(-sd, 0.78));
-    } else {
+    if (land < 0) {
+      // depth is set by whichever bank is nearer, so the basin has two shelves and a flat middle
+      profile = -Math.min(11, 0.42 * Math.pow(Math.min(-sd, -nd), 0.78));
+    } else if (sd >= nd) {
       profile = 0.135 * Math.pow(sd, 1.05);
+    } else {
+      // The far bank climbs harder than the camp beach: it is a backdrop at 110 m, and it has to
+      // clear the water fast enough to put trunks — not a mudflat — on the skyline.
+      profile = 0.52 * Math.pow(nd, 0.92);
     }
-    const blend = smoothstep(6, 62, sd);
+    const blend = smoothstep(6, 62, land);
     h = lerp(profile, h, blend);
 
     // granite knobs running into the water at the ridge's north toe
@@ -2199,6 +2230,21 @@ if ( uHeightFog > 0.001 ) {
       uTime: g?.uTime ?? { value: 0 },
       uWind: { value: 0.2 },
       uRain: g?.uRain ?? { value: 0.15 },
+
+      // --- reflection. MEASURED 2026-08-17: the lake had NOTHING to reflect. scene.environment
+      // is null, mat.envMap is null, the four spot lights are all behind the camp at z > -32 and
+      // the moon key is 0.06 intensity, so a roughness-0.02 dielectric over a 0.0077-luminance
+      // albedo integrated to ~0.002 outgoing radiance. It was not "dark water"; it was a hole.
+      // uWSky is the horizon radiance the surface mirrors, taken from scene.fog.color, which
+      // Sky.js publishes as LINEAR RADIANCE and matches to its own dome horizon (Sky.js §50).
+      uWSky: { value: new THREE.Color(0x2a3a44) },
+      uWMoon: { value: new THREE.Color(0x000000) },
+      uMoonDir: g?.uMoonDir ?? { value: new THREE.Vector3(0.794, 0.438, 0.421) },
+      uWRefl: { value: 1.0 },
+
+      // --- fog. x D0, y y0, z H, w scatterScale. Kept in step with Weather.fog in update().
+      uWFog: { value: new THREE.Vector4(0.012 + 0.040 * 0.35, -1.0, 4.2 + 4.2 * 0.35, 1.0) },
+      uWFogCol: { value: new THREE.Color(0x2a3a44) },
     };
     this._waterUniforms = WU;
 
@@ -2207,6 +2253,13 @@ if ( uHeightFog > 0.001 ) {
       roughness: 0.02, metalness: 0.0,
       transparent: true, depthWrite: true,
       side: THREE.FrontSide, dithering: true,
+      // three's stock fog is FogExp2 — 1 - exp(-(d * density)^2). MEASURED against the analytic
+      // HEIGHT fog every Materials-built surface in the scene uses: at 45 m the stock curve is
+      // 0.989 opaque where the height curve is 0.615, and by 68 m it is 1.000000. A lake is a
+      // horizontal plane running to the horizon, so a distance-SQUARED extinction does not make
+      // it recede — it deletes it at a fixed radius, and takes the horizon with it. We run the
+      // same analytic height fog as the ground material below, so fog is off here.
+      fog: false,
     });
     mat.name = 'terrain.lake';
     mat.onBeforeCompile = (sh) => {
@@ -2250,9 +2303,38 @@ varying float vDepth;
 varying vec3 vWNrmW;
 varying vec3 vWPosW;
 uniform float uRain;
+uniform float uTime;
+uniform float uWind;
+uniform vec3  uWSky;
+uniform vec3  uWMoon;
+uniform vec3  uMoonDir;
+uniform float uWRefl;
+uniform vec4  uWFog;
+uniform vec3  uWFogCol;
+float scDistW;
+vec3  scRipN;
 #include <common>`)
-        .replace('#include <normal_fragment_begin>',
-          '#include <normal_fragment_begin>\n  normal = normalize( ( viewMatrix * vec4( normalize( vWNrmW ), 0.0 ) ).xyz );')
+        // The vertex Gerstner sum cannot carry anything shorter than the mesh step (2.5 m at
+        // high, 2 m at ultra), so the three shortest waves in it are below Nyquist and average
+        // to a flat plane. Everything that makes water read as water between 15 m and 90 m is
+        // this per-pixel slope. Amplitude falls with distance and what it loses goes into
+        // roughness, so the moon path spreads into a path instead of aliasing into fireflies.
+        .replace('#include <normal_fragment_begin>', /* glsl */`
+#include <normal_fragment_begin>
+{
+  vec2 scP = vWPosW.xz;
+  vec2 scSl = vec2( 0.0 );
+  scSl += vec2( cos( scP.x * 1.57 + scP.y * 0.94 + uTime * 1.10 ),
+                cos( scP.x * 0.94 - scP.y * 1.57 + uTime * 0.86 ) ) * 0.052;
+  scSl += vec2( cos( scP.x * 3.70 - scP.y * 2.30 - uTime * 1.90 ),
+                cos( scP.x * 2.30 + scP.y * 3.70 + uTime * 1.60 ) ) * 0.028;
+  scSl += vec2( cos( scP.x * 8.90 + scP.y * 5.10 + uTime * 3.30 ),
+                cos( scP.x * 5.10 - scP.y * 8.90 + uTime * 2.90 ) ) * 0.013;
+  float scRipFade = 1.0 / ( 1.0 + scDistW * 0.055 );
+  scSl *= ( 0.45 + 0.95 * uWind ) * scRipFade * ( 0.30 + 0.70 * smoothstep( 0.05, 2.2, vDepth ) );
+  scRipN = normalize( vec3( vWNrmW.x + scSl.x, vWNrmW.y, vWNrmW.z + scSl.y ) );
+  normal = normalize( ( viewMatrix * vec4( scRipN, 0.0 ) ).xyz );
+}`)
         .replace('#include <map_fragment>', /* glsl */`
 {
   // shallow water lets the gravel bed through; the shoreline gets a scum/foam line
@@ -2265,9 +2347,43 @@ uniform float uRain;
   diffuseColor.a *= smoothstep( 0.0, 0.16, vDepth );
 }`)
         .replace('#include <roughnessmap_fragment>', /* glsl */`
-float roughnessFactor = roughness + uRain * 0.06 + smoothstep( 0.5, 0.0, vDepth ) * 0.25;`);
+scDistW = max( length( vWPosW - cameraPosition ), 1e-3 );
+// Toksvig-ish: the ripple detail the normal drops past ~20 m has to reappear as roughness or
+// the specular lobe stays a pinpoint and the moon path never becomes a path.
+float roughnessFactor = roughness + uRain * 0.06 + smoothstep( 0.5, 0.0, vDepth ) * 0.25
+  + 0.13 * ( 1.0 - 1.0 / ( 1.0 + scDistW * 0.055 ) );`)
+        .replace('#include <opaque_fragment>', /* glsl */`
+#include <opaque_fragment>
+{
+  // --- Fresnel sky reflection. This is the whole read. At the grazing angles a lake is
+  // actually seen at (77 deg from the normal at 25 m, 89 deg at the horizon) Schlick over
+  // F0 0.02 runs 0.30 -> 0.95, so a night lake is mostly a mirror of the sky and only
+  // incidentally its own colour. Without it the surface integrated to 0.002 and vanished.
+  vec3 scVw = normalize( vWPosW - cameraPosition );
+  float scNdV = clamp( dot( -scVw, scRipN ), 0.0, 1.0 );
+  float scF = 0.02 + 0.98 * pow( 1.0 - scNdV, 5.0 );
+  vec3 scR = reflect( scVw, scRipN );
+  float scUp = clamp( scR.y, 0.0, 1.0 );
+  // steep rays see the dark zenith, grazing rays see the bright horizon: dark near, pale far,
+  // which IS the vertical gradient that tells a viewer they are looking at a water plane.
+  vec3 scSky = uWSky * mix( 1.0, 0.28, pow( scUp, 0.55 ) );
+  float scMu = clamp( dot( scR, uMoonDir ), 0.0, 1.0 );
+  vec3 scGlint = uWMoon * ( pow( scMu, 900.0 ) * 24.0 + pow( scMu, 30.0 ) * 0.7 );
+  gl_FragColor.rgb = mix( gl_FragColor.rgb, scSky, scF * uWRefl ) + scGlint * scF * uWRefl;
+
+  // --- analytic exponential HEIGHT fog, the same model the ground material and every
+  // Materials-built surface run (ART_DIRECTION §4.1 / §5.1). See the fog:false note above.
+  float scFdy = vWPosW.y - cameraPosition.y;
+  float scEa = exp( -( cameraPosition.y - uWFog.y ) / uWFog.z );
+  float scEb = exp( -( vWPosW.y - uWFog.y ) / uWFog.z );
+  float scOpt = ( abs( scFdy ) > 0.05 )
+    ? uWFog.x * scDistW * ( scEa - scEb ) * uWFog.z / scFdy
+    : uWFog.x * scDistW * scEa;
+  float scFf = clamp( 1.0 - exp( -max( scOpt, 0.0 ) * uWFog.w ), 0.0, 1.0 );
+  gl_FragColor.rgb = mix( gl_FragColor.rgb, uWFogCol, scFf );
+}`);
     };
-    mat.customProgramCacheKey = () => 'terrain-lake-v1';
+    mat.customProgramCacheKey = () => 'terrain-lake-v2';
 
     const mesh = new THREE.Mesh(geo, mat);
     mesh.name = 'terrain.lake';
@@ -2774,9 +2890,34 @@ diffuseColor.rgb = mix( diffuseColor.rgb, vec3( 0.070, 0.062, 0.036 ), smoothste
       ? clamp01(Math.hypot(gw.x, gw.y, gw.z) / 1.4)
       : this._wind;
     if (this._waterUniforms) {
-      if (!g?.uTime) this._waterUniforms.uTime.value = this._time;
-      if (!g?.uRain) this._waterUniforms.uRain.value = this._rain;
-      this._waterUniforms.uWind.value = wind;
+      const WU = this._waterUniforms;
+      if (!g?.uTime) WU.uTime.value = this._time;
+      if (!g?.uRain) WU.uRain.value = this._rain;
+      WU.uWind.value = wind;
+
+      // The lake mirrors the sky, so it has to be told what the sky is worth. scene.fog.color is
+      // Sky's own LINEAR horizon radiance and is the only authoritative number for it in the
+      // build; hard-coding a hex here would drift the moment the night or the weather changed.
+      const fc = this.ctx?.scene?.fog?.color;
+      if (fc) { WU.uWSky.value.copy(fc); WU.uWFogCol.value.copy(fc); }
+
+      const sky = this.ctx?.systems?.get?.('Sky');
+      const ml = sky?.moonLight;
+      if (ml?.color) {
+        const vis = Number.isFinite(sky.moonVisibility) ? sky.moonVisibility : 1;
+        WU.uWMoon.value.copy(ml.color).multiplyScalar(Math.max(0, ml.intensity * vis));
+      }
+      if (!g?.uMoonDir && sky?.moonDirection) WU.uMoonDir.value.copy(sky.moonDirection);
+
+      // Weather.fog is written as a plain property (Shots.js pins it that way and the
+      // weather:change event is throttled), so poll it rather than trust the event to arrive.
+      // VERIFIED: in a ?shot=lake run Materials._fogUniforms was still holding the clear-night
+      // D0 of 0.014 because no payload had ever reached it.
+      const wfog = this.ctx?.systems?.get?.('Weather')?.fog;
+      if (Number.isFinite(wfog)) {
+        const f = clamp01(wfog);
+        WU.uWFog.value.set(0.012 + 0.040 * f, -1.0, 4.2 + 4.2 * f, 1.0);
+      }
     }
     if (this._reedUniforms) {
       if (!g?.uTime) this._reedUniforms.uTime.value = this._time;

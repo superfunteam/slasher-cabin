@@ -1333,13 +1333,16 @@ export class Props {
       // 1.35 used to be the ENTIRE lit tent, because the canvas under it was black. The fabric
       // now carries the lamp itself; this is only the near-field gradient laid over it.
       //
-      // 0.90 was measured, at ultra, as a flat saturated orange slab: every texel on a 3.5 x 4.4 m
-      // tent sat above the bloom knee, so the lamp gradient, the weave, the seams and the baked
-      // cot shadow were all clipped into one colour and the tent read as a cardboard box. It also
-      // made a tent lamp brighter in frame than the campfire, which breaks ART §3.2's rule that
-      // exactly one local source is dominant. 0.40 keeps the tent glowing and puts everything
-      // that was being clipped back inside the display range.
-      uIntensity: new THREE.Uniform(0.40), uFlicker: new THREE.Uniform(1),
+      // 0.90 was cut to 0.40 against a frame that clipped it. That frame no longer exists: the
+      // post chain now meters to exposure 1.86 with a bloom threshold at 0.72 DISPLAY-linear,
+      // i.e. 0.387 scene-linear. MEASURED at 0.40, from the tent row at 25 m: the shell's own
+      // peak term is glowFn<=0.33 x 0.40 = 0.13 scene-linear BEFORE fog, which is under the
+      // bloom knee by a factor of three and under the ground mist it sits in. The five tents
+      // captured as flat blue silhouettes with no warm pixel anywhere on them (pw0-tents-face).
+      // 2.6 puts the panel next to the lamp at ~0.85 scene-linear (blooms, reads as fabric with
+      // a lamp behind it) and the far end of the same tent at ~0.10 (dark, which is the whole
+      // point of a gradient). Anything that clips now clips inside 40 cm of the lamp.
+      uIntensity: new THREE.Uniform(3.2), uFlicker: new THREE.Uniform(1),
       uFogK: new THREE.Uniform(fogK), uSeam: new THREE.Uniform(new THREE.Vector2(0.95, 0.55)),
       uTex: new THREE.Uniform(canvasMap),
       uTexAmt: new THREE.Uniform(0.95),
@@ -1355,9 +1358,22 @@ export class Props {
       side: THREE.DoubleSide,
     });
 
+    // ---- LIT CABIN WINDOW. This drives three separate elements at three separate glow weights:
+    // the pane (glow 1.0), the halo bar on the clapboard (0.055) and the ground spill (0.030).
+    //
+    // MEASURED on ?shot=ridge at 75 m, at 4.6: the pane landed at 192,127,124 sRGB — a flat
+    // salmon rectangle with hard edges and, critically, NO bloom, because 4.6 x 0.44 (the
+    // shader's own fog term) x the froxel transmittance at 75 m arrives under the 0.387
+    // scene-linear bloom threshold. A lit window that does not bloom is a decal. The frame's
+    // p99.9 was 0.2022 against the keyart's 0.8554: the shot contained no highlight range at
+    // all, and these windows were the only warm thing in it.
+    //
+    // 15.0 puts the pane ~2 stops over the bloom knee at 75 m so it blows out a warm core and
+    // throws a halo, and — because the halo and spill are authored as FRACTIONS of it — it is
+    // simultaneously what lets a 5.5% wall bar and a 3.0% ground pool survive the fog.
     this.uGlowWindow = {
       uColor: new THREE.Uniform(new THREE.Color(PAL.lantern).convertSRGBToLinear()),
-      uIntensity: new THREE.Uniform(4.6), uFlicker: new THREE.Uniform(1),
+      uIntensity: new THREE.Uniform(15.0), uFlicker: new THREE.Uniform(1),
       uFogK: new THREE.Uniform(fogK), uSeam: new THREE.Uniform(new THREE.Vector2(1, 0)),
     };
     this.matGlowWindow = new THREE.ShaderMaterial({
@@ -1372,7 +1388,18 @@ export class Props {
     // that does not pulse with the flame above it reads as a painted decal, which is what it was.
     this.uGlowFire = {
       uColor: new THREE.Uniform(new THREE.Color(PAL.fireMid).convertSRGBToLinear()),
-      uIntensity: new THREE.Uniform(3.1), uFlicker: new THREE.Uniform(1),
+      //
+      // MEASURED on ?shot=camp-fire at 11 m: at 3.1 the pool's peak vertex weight of 0.235 gave
+      // 0.73 scene-linear right under the stones and 0.09 at 2 m out — under the ground mist,
+      // which reads at 0.05-0.10 there. The pit was a bright object in an unlit field and the
+      // bench logs 3 m away were pure blue-black.
+      //
+      // Raising the SpotLights is not the lever: a controlled test at 400 (15x spec) moved the
+      // nearest lit surfaces' red channel from 38 to 76 sRGB and left the logs blue. What the
+      // 15x test DID do was light the fog, which is the honest read at this fog density — so
+      // the fire's surroundings are lit by the authored pool (this) plus the volumetrics, and
+      // the SpotLights stay at ART 3.2's 26 / 11.
+      uIntensity: new THREE.Uniform(9.0), uFlicker: new THREE.Uniform(1),
       uFogK: new THREE.Uniform(fogK), uSeam: new THREE.Uniform(new THREE.Vector2(1, 0)),
     };
     this.matFireGlow = new THREE.ShaderMaterial({
@@ -1452,12 +1479,16 @@ export class Props {
     });
     this.matCanvasLit.emissive = new THREE.Color(PAL.lantern);
     this.matCanvasLit.emissiveMap = this.matCanvasLit.map || null;
-    // Low. The fabric only has to stop being BLACK; the additive shell above supplies the hot
-    // gradient around the lamp. Pushed higher the tent becomes an amber cardboard box.
-    // Measured: at 0.22 the fabric alone was already at the top of the display range before the
-    // additive shell was composited on top of it, so the two together clipped. 0.085 leaves the
-    // canvas a dim warm grey on its own and lets the shell supply every bit of the modelling.
-    this.matCanvasLit.emissiveIntensity = this.matCanvasLit.emissiveMap ? 0.085 : 0.02;
+    // The fabric only has to stop being BLACK; the additive shell above supplies the hot
+    // gradient around the lamp. But note WHAT this number multiplies: `emissiveMap` is the
+    // canvas COLOUR map, whose linear mean is ~0.085 (a #5c5b46 weave). So 0.085 emitted
+    // 0.085 x 0.085 = 0.0072 scene-linear — seven thousandths, two and a half orders of
+    // magnitude under the mist it is seen through. That is why the lit tents captured as
+    // silhouettes with a faint brown tinge and nothing else (pw0-tents-face).
+    // 1.35 x 0.085 puts the unlit-by-the-lamp far panel at ~0.11 scene-linear: a dim warm grey
+    // that reads as cloth with something behind it, still 8x under the near panel, and still
+    // modulated by the weave, the mildew and the patches because the map is doing the work.
+    this.matCanvasLit.emissiveIntensity = this.matCanvasLit.emissiveMap ? 1.00 : 0.11;
     this.matCanvasLit.side = THREE.DoubleSide;
 
     /** Names `_mat()` resolves locally instead of asking the shared library. */
@@ -1589,14 +1620,19 @@ export class Props {
     const n = this._tier(56, 110, 190, 280);
     const ep = new Float32Array(n * 3);
     const es = new Float32Array(n * 3);
+    // The spawn disc was 0.46 m and every ember shared one rise profile, so from any distance
+    // the column read as a single vertical file of dots leaving one point. A fire's ember plume
+    // is a turbulent cone: it leaves the whole width of the coal bed, and the ones that get
+    // highest are the ones that wander furthest. Wider bed, and the lateral excursion is now
+    // correlated with the rise height through aSeed.z, which the vertex shader already scales by.
     for (let i = 0; i < n; i++) {
-      const a = r.next() * Math.PI * 2, rad = Math.sqrt(r.next()) * 0.46;
+      const a = r.next() * Math.PI * 2, rad = Math.sqrt(r.next()) * 0.72;
       ep[i * 3] = Math.cos(a) * rad;
-      ep[i * 3 + 1] = 0.12 + r.range(0, 0.2);
+      ep[i * 3 + 1] = 0.10 + r.range(0, 0.28);
       ep[i * 3 + 2] = Math.sin(a) * rad;
       es[i * 3] = r.next() * 97;
-      es[i * 3 + 1] = 1 / r.range(1.5, 4.4);
-      es[i * 3 + 2] = r.range(2.6, 7.4);
+      es[i * 3 + 1] = 1 / r.range(1.4, 5.2);
+      es[i * 3 + 2] = r.range(1.8, 8.6);
     }
     const eg = new THREE.BufferGeometry();
     eg.setAttribute('position', new THREE.BufferAttribute(ep, 3));
@@ -2086,6 +2122,10 @@ export class Props {
     }
     kit.box(M.tin, 0.90, 0.02, 2.30, hw + 0.34, 1.28, -0.15, 0, { rx: 0.06, exposure: 1 });
 
+    // Porch depth. Declared here rather than beside the porch below because the window spill has
+    // to know where the deck is — see the note on `deckSpill`.
+    const pdDeck = 1.75;
+
     if (lit) {
       // The pane itself, and a HALO on the clapboard around it. A lit window with a hard edge and
       // nothing spilling onto the boards beside it is a decal; the halo is what makes it a light.
@@ -2095,36 +2135,73 @@ export class Props {
       // The halo is authored in CABIN-LOCAL space — the vertices Kit hands the glowFn are already
       // in world space, so they are folded back through R^T first. Measuring a local offset with
       // world coordinates is how the old ground-spill ended up as a hard-edged warm rectangle.
-      const halo = new THREE.PlaneGeometry(1, 1, 10, 10);
+      //
+      // THE HALO IS THE POINT, and it was authored two orders of magnitude under the pane.
+      // 0.10 x t^3 x 4.6 put the boards 70 cm from the sill at 0.006 scene-linear — nothing. The
+      // frame that resulted (?shot=ridge) was four hard-edged orange rectangles hanging in a
+      // grey wall, and from 75 m that is the entire read of "somebody lives there".
+      //
+      // Two changes: t^2, not t^3 (a cube falls off so fast that the only lit region is behind
+      // the pane that occludes it), and 0.048 of a much brighter source. The bar is now
+      // ANISOTROPIC and offset DOWN — light leaving a window and hitting a wall runs down the
+      // clapboard under the sill, it does not make a circle centred on the glass.
+      // The plane stands 0.20 m proud of the clapboard, not 0.115: the sill projects 0.17 and the
+      // head drip cap 0.20, so at 0.115 the two pieces of trim nearest the glass were in FRONT of
+      // the halo and punched the brightest band of it out.
+      const halo = new THREE.PlaneGeometry(1, 1, 12, 14);
       for (const wx of winsN) {
-        kit.add('glow-window', halo, TRS(wx, winY, -hd - 0.115, 0, 3.0, 2.6, 1), {
+        kit.add('glow-window', halo, TRS(wx, winY - 0.38, -hd - 0.20, 0, 3.7, 4.1, 1), {
           glowFn: (gx, gy2, gz) => {
-            const t = 1 - Math.hypot((toLX(gx, gz) - wx) / 1.42, (gy2 - y - winY) / 1.20);
-            return t > 0 ? 0.10 * t * t * t : 0;
+            const dx = (toLX(gx, gz) - wx) / 1.55;
+            const dv = (gy2 - y - winY) + 0.34;
+            // Falls twice as fast upward as downward: a sill throws light down, not up.
+            const dy = dv > 0 ? dv / 0.92 : dv / 1.85;
+            const t = 1 - Math.hypot(dx, dy);
+            return t > 0 ? 0.105 * t * t : 0;
           },
         });
       }
       halo.dispose();
-      // Warm spill on the ground under the window. The falloff MUST reach zero inside the quad.
-      // The old term (0.22 - 0.03*d, measured from the cabin centre) was still ~0.10 at the
-      // quad's corners, so every lit cabin laid a hard-edged 5.0 x 3.4 m warm rectangle on the
-      // grass — a lit slab, not light. Radial from the spill's own centre, squared, to zero.
-      const spillC = new THREE.Vector3(0, 0, -hd - 1.5).applyMatrix4(TRS(x, y, z, ry));
+      // Warm bar on the PORCH BOARDS under the window. The old ground spill was centred at
+      // local z = -hd - 1.5, which is 85 cm inside a 1.75 m porch deck standing 46 cm up — it
+      // was drawn underneath the porch and could not be seen from anywhere. Light out of these
+      // windows lands on the deck first; the ground only gets what passes the drip edge.
+      const deckY = floor + 0.075;
+      const deckSpill = new THREE.PlaneGeometry(1, 1, 12, 8);
+      for (const wx of winsN) {
+        kit.add('glow-window', deckSpill,
+          TRS(wx, deckY, -hd - pdDeck * 0.52, 0, 2.9, 1, pdDeck * 0.98, -Math.PI / 2), {
+            glowFn: (gx, gy, gz) => {
+              const lx = toLX(gx, gz) - wx, lz = toLZ(gx, gz) + hd;
+              const t = 1 - Math.hypot(lx / 1.35, lz / 1.55);
+              return t > 0 ? 0.034 * t * t : 0;
+            },
+          });
+      }
+      deckSpill.dispose();
+      // ...and a wider, softer pool on the grass past the drip edge. The falloff MUST reach zero
+      // inside the quad: the old term (0.22 - 0.03*d, measured from the cabin centre) was still
+      // ~0.10 at the corners, so every lit cabin laid a hard-edged warm rectangle on the grass.
+      const spillC = new THREE.Vector3(0, 0, -hd - pdDeck - 1.35).applyMatrix4(TRS(x, y, z, ry));
       kit.add('glow-window', Kit.UNIT_PLANE,
-        TRS(0, -y + this._h(x, z) + 0.05, -hd - 1.5, 0, 5.0, 3.4, 1, -Math.PI / 2),
+        TRS(0, -y + this._h(x, z) + 0.05, -hd - pdDeck - 1.35, 0, 6.4, 4.2, 1, -Math.PI / 2),
         {
           glowFn: (gx, gy, gz) => {
-            const t = 1 - Math.hypot(gx - spillC.x, gz - spillC.z) / 2.3;
-            return t > 0 ? 0.085 * t * t : 0;
+            const t = 1 - Math.hypot(gx - spillC.x, gz - spillC.z) / 2.7;
+            return t > 0 ? 0.022 * t * t : 0;
           },
         });
       const wp = new THREE.Vector3(-1.55, winY, -hd - 0.4).applyMatrix4(TRS(x, y, z, ry));
       this._proxy(wp.x, wp.y, wp.z, PAL.lantern, 2.4, 9, true);
-      this._decal(x, z - hd - 1.2, 2.6, 0.18);
+      // World space. `(x, z - hd - 1.2)` is only "in front of the porch" for a cabin at ry = 0,
+      // and every cabin in the row is rotated 90 deg — same class of bug as the two porch decals
+      // fixed at the bottom of this method.
+      const dc = toW(0, 0, -hd - pdDeck - 1.2);
+      this._decal(dc.x, dc.z, 2.6, 0.18);
     }
 
     // porch: deck, three posts (one leaning), a sagging rail, steps, a screen door
-    const pd = 1.75;
+    const pd = pdDeck;
     kit.box(M.wood, w - 0.3, 0.12, pd, 0, floor, -hd - pd * 0.5, 0, { exposure: 0.9 });
     for (let i = 0; i < 3; i++) {
       const px = (i - 1) * (w * 0.35);
@@ -2481,10 +2558,12 @@ export class Props {
     // one tent the door flap is tied open — a gap in the wall band, not a missing stair.
     const gabH = ridgeH - wallH;
     const wallY = deck + 0.05 + wallH * 0.5;
+    const flapOpen = seed % 2 === 0;
+    const apW = 0.95;
     for (const s of [-1, 1]) {
-      const doorOpen = s < 0 && seed % 2 === 0;
+      const doorOpen = s < 0 && flapOpen;
       if (doorOpen) {
-        const sw = Math.max(0.25, (W - 0.95) * 0.5);
+        const sw = Math.max(0.25, (W - apW) * 0.5);
         for (const q of [-1, 1]) {
           kit.box(CANVAS, sw, wallH, 0.03, q * (W - sw) * 0.5, wallY, s * hd, 0, { exposure: 1 });
         }
@@ -2600,6 +2679,35 @@ export class Props {
       shellWall.dispose();
       shellRoof.dispose();
       shellGable.dispose();
+
+      // ---- THE OPENING. ART §6.3(2), and the single most-reported defect on this shot: on a
+      // tent with the flap tied open, the aperture was a hole onto an unlit interior — the tent's
+      // fog proxy is not in the scene (header note 2) and nothing else lights the inside — while
+      // the canvas around it glowed. The opening was measurably DARKER than the fabric, which
+      // inverts the entire image: a lit tent's doorway is the brightest thing on it, because you
+      // are looking straight at the source instead of through 0.4 mm of duck canvas.
+      //
+      // One card, spanning the aperture, standing just INSIDE the gable plane so the wall bands
+      // beside it occlude it and only the gap shows it. It is the far wall of the tent seen
+      // directly: hottest at lamp height, falling off up toward the ridge and down to the boards.
+      if (flapOpen) {
+        const apY0 = deck + 0.05, apY1 = apY0 + wallH;
+        const lampH = ly;
+        const mouth = new THREE.PlaneGeometry(1, 1, 4, 10);
+        kit.add('glow-canvas', mouth,
+          TRS(0, wallY, -(hd - 0.07), 0, apW * 0.96, wallH * 0.98, 1), {
+            glowFn: (px, py, pz) => {
+              const dy = (py - y) - lampH;
+              // 2.35 is the aperture's weight against the shell's <=0.33: the doorway reads
+              // roughly three stops over the canvas beside it, which is the correct sign and
+              // about the correct size for looking at a lamp instead of through cloth.
+              const v = 2.35 / (1 + dy * dy * 2.9);
+              const edge = Math.min(1, ((py - y) - apY0) / 0.18) * Math.min(1, (apY1 - (py - y)) / 0.22);
+              return Math.max(0, v * Math.max(0, edge));
+            },
+          });
+        mouth.dispose();
+      }
       const wp = toW(lampL.x, ly, lampL.z);
       this._proxy(wp.x, wp.y, wp.z, PAL.lantern, 3.6, 10, true);
       // Warm spill on the platform boards immediately outside the tied-open flap.
@@ -2688,9 +2796,14 @@ export class Props {
         const dr = Math.hypot(px - x, pz - z) / poolR;
         if (dr >= 1) return 0;
         const t = 1 - dr;
-        // squared falloff to zero well inside the quad, plus a hard bright ring of scorched
-        // ground right at the stones
-        return 0.085 * t * t * t + 0.15 * Math.max(0, 1 - dr * 5.4) ** 2;
+        // Squared, not cubed, and inverse-square-shaped near the pit. A cube put everything
+        // past 2 m at under a hundredth of the peak, which is why the bench logs at 3.3 m sat
+        // in a pool that had already reached zero. Now: a hot scorched ring inside the stones,
+        // a real 1/(1+r^2) core out to ~3 m, and a wide tail that still reaches 6.8 m.
+        const rm = dr * poolR;
+        return 0.030 * t * t
+          + 0.075 / (1 + rm * rm * 0.42)
+          + 0.115 * Math.max(0, 1 - dr * 5.4) ** 2;
       },
     });
     pg.dispose();
