@@ -628,6 +628,7 @@ export class HUD {
     this._paused = false;          // game:pause
     this._stripped = false;        // Night Seven (GAME_DESIGN §12.8)
     this._blueprintOpen = false;
+    this._bpEcho = false;        // a `ui:blueprint-*` landed since the last poll
     this._phase = 'menu';
 
     // --- reticle / prompt
@@ -697,6 +698,7 @@ export class HUD {
     this._manualHint = 0;
     this._manualRearm = 0;
     this._manualEverOpened = false;
+    this._manualHintNight = false;   // does TONIGHT teach the manual at all? Night One does.
 
     this._t = 0;
     this._faultLogged = false;
@@ -1060,8 +1062,10 @@ export class HUD {
     // HUD owns the blueprint toggle (ARCHITECTURE §5; STORY §2.4.1: "HUD emits
     // `ui:blueprint-open`; `BlueprintUI` plays the wipe"). Track our own state so a stubbed
     // BlueprintUI cannot desync us.
-    on('ui:blueprint-open', () => { this._blueprintOpen = true; this._manualEverOpened = true; });
-    on('ui:blueprint-close', () => { this._blueprintOpen = false; });
+    // `_bpEcho` records that SOMEBODY moved the manual since the last poll — which is how
+    // `_pollWorld` tells "BlueprintUI already handled the key" from "nobody did". See it there.
+    on('ui:blueprint-open', () => { this._blueprintOpen = true; this._manualEverOpened = true; this._bpEcho = true; });
+    on('ui:blueprint-close', () => { this._blueprintOpen = false; this._bpEcho = true; });
 
     on('story:beat', (p) => {
       // Night Seven's blank spread. §12.8 takes the HUD away and this is the earliest signal.
@@ -1076,8 +1080,10 @@ export class HUD {
     // creak feedback, no detection smear. `settings.subtitles` still works; nothing speaks."
     this.setStripped(n >= 7);
     this._manualEverOpened = false;
-    // The one teaching prompt in the game: the manual, Night One, until they use it.
-    this._manualHint = n === 1 ? 20 : 0;
+    // The one teaching prompt in the game: the manual, Night One, until they use it. Armed here
+    // and held through the briefing; `_pollWorld` runs the clock only once the build phase starts.
+    this._manualHintNight = n === 1;
+    this._manualHint = this._manualHintNight ? 20 : 0;
     this._manualRearm = 0;
     this._wayA = 0;
     this._wayBearing = NaN;
@@ -1377,6 +1383,23 @@ export class HUD {
     try { return this.ctx.systems?.get?.(name) ?? null; } catch { return null; }
   }
 
+  /**
+   * What does `BlueprintUI` think its own state is? `null` when there is nobody to ask — it is not
+   * in the build, or it publishes neither shape.
+   *
+   * It publishes `isOpen` as a GETTER, so `typeof bp.isOpen` is `'boolean'`, never `'function'`.
+   * The method branch survives only for a stub that publishes one; getting this test the wrong way
+   * round is what made the manual unopenable, so both shapes are covered and neither is assumed.
+   */
+  _readBlueprintOpen(bp) {
+    try {
+      if (!bp) return null;
+      if (typeof bp.isOpen === 'function') return !!bp.isOpen();
+      if (typeof bp.isOpen === 'boolean') return bp.isOpen;
+    } catch { /* a system mid-teardown is not an authority */ }
+    return null;
+  }
+
   _pollWorld(dt) {
     const st = this.ctx.state;
     this._phase = st?.phase ?? this._phase;
@@ -1385,35 +1408,73 @@ export class HUD {
     const input = this._sys('Input');
     if (input && typeof input.wasPressed === 'function' && !this._paused) {
       if (input.wasPressed('blueprint')) {
-        const want = !this._blueprintOpen;
-        // ARCHITECTURE §5 assigns the emit to HUD and STORY §2.4.1 repeats it. But `BlueprintUI`'s
-        // contract also lists `toggle()`, so if it has claimed the key too, emitting here would
-        // toggle the page twice and it would appear not to open at all. Ask it what it thinks the
-        // state is; if it already agrees with where we are going, it handled the key and we do not.
-        let theirs = null;
+        // ARCHITECTURE §5 assigns the emit to HUD and STORY §2.4.1 repeats it. But `BlueprintUI`
+        // also claims this key, off `input:key`, INSIDE the DOM event — which is strictly before
+        // this poll runs. So by the time we get here it has already toggled and already emitted,
+        // and `_blueprintOpen` below is the state AFTER the press, not before it.
+        //
+        // The previous version of this block computed `want = !this._blueprintOpen` from that
+        // already-updated flag, so `want` was the state before the press, disagreed with
+        // BlueprintUI, and emitted the opposite event. Every press ran closed -> wipe -> closed
+        // and the manual could not be opened by any key, ever.
+        //
+        // So `_blueprintOpen` cannot serve as a "before" reading, and neither can comparing it
+        // with BlueprintUI's state: the listener in `_bind()` keeps the two identical. `_bpEcho`
+        // is the reading that works — it is true only when a
+        // `ui:blueprint-*` actually came back since the previous poll, which is precisely the
+        // window the key event sat in, so it says whether ANYONE handled this press.
         const bp = this._sys('BlueprintUI');
-        try {
-          if (bp && typeof bp.isOpen === 'function') theirs = !!bp.isOpen();
-          else if (bp && typeof bp.isOpen === 'boolean') theirs = bp.isOpen;
-        } catch { theirs = null; }
-        this._blueprintOpen = want;
-        this._manualEverOpened = true;
-        if (theirs !== want) this.bus?.emit(want ? 'ui:blueprint-open' : 'ui:blueprint-close', {});
+        const theirs = this._readBlueprintOpen(bp);
+        if (this._bpEcho) {
+          // Handled already. Adopt BlueprintUI's answer and emit NOTHING — a second event here
+          // is what cancelled the wipe.
+          if (theirs !== null) this._blueprintOpen = theirs;
+        } else {
+          // Nobody moved: BlueprintUI is absent, stubbed, or never bound the key. HUD owns the
+          // toggle outright, and then believes whatever the manual says afterwards, so one that
+          // refuses to open cannot leave this file thinking the page is up.
+          const want = !this._blueprintOpen;
+          this._blueprintOpen = want;
+          this.bus?.emit(want ? 'ui:blueprint-open' : 'ui:blueprint-close', {});
+          const after = this._readBlueprintOpen(bp);
+          if (after !== null) this._blueprintOpen = after;
+        }
+        // `_manualEverOpened` is NOT set here. A press is not an open — this block used to retire
+        // the teaching hint on a press that opened nothing at all. The `ui:blueprint-open`
+        // listener in `_bind()` owns that flag and it fires only when the page really opens.
       }
     }
+    // Cleared every poll, pressed or not, so the flag always means "since the previous frame".
+    this._bpEcho = false;
+
     // The manual hint. Once the manual has been opened even once it is gone for the rest of the
     // run and never returns. Until then it re-arms: the playtest found players who never opened it
     // at all, and a single 20 s prompt on a night that lasts twelve minutes is a prompt they were
-    // looking at the floor for. 20 s on, 40 s off, and it stops the instant they press the key.
-    if (this._manualEverOpened || this._phase !== 'build') {
+    // looking at the floor for. 20 s on, 40 s off, and it stops the instant the page opens.
+    //
+    // The clock belongs to the BUILD phase, and it must be HELD outside it rather than cleared.
+    // Night One opens in `briefing` and NightManager holds that for up to 15 s
+    // (`briefingHoldNight1`), so the old `phase !== 'build'` reset zeroed both counters before the
+    // build phase ever arrived — and the ladder below has no entry point once both are zero, both
+    // arms requiring a counter > 0. It was a permanent deadlock, not a timing miss: the one
+    // teaching prompt in a game with no tutorial never rendered on the night it exists for.
+    if (this._manualEverOpened || !this._manualHintNight) {
       this._manualHint = 0;
       this._manualRearm = 0;
+    } else if (this._phase !== 'build') {
+      // Held. The prompt still DRAWS during the briefing (see `_updatePrompt`) — that silent hold
+      // is exactly the window a playtester spent standing still — but it is not spent there.
     } else if (this._manualHint > 0) {
       this._manualHint -= dt;
       if (this._manualHint <= 0) this._manualRearm = 40;
     } else if (this._manualRearm > 0) {
       this._manualRearm -= dt;
       if (this._manualRearm <= 0) this._manualHint = 20;
+    } else {
+      // Both counters at rest inside the build phase, on a night that teaches, with the manual
+      // still unopened: this is the first build frame. Arm it. This is the ladder's entry point
+      // and its only one — belt and braces against ever losing both counters again.
+      this._manualHint = 20;
     }
 
     // --- the mask window (NoiseSystem is the authority; BuildSystem mirrors it).
@@ -2280,7 +2341,13 @@ export class HUD {
         icon = this._verb;
         key = this._verbKey;
         hold = this._verbHold;
-      } else if (this._manualHint > 0 && !this._manualEverOpened) {
+      } else if (this._manualHint > 0 && !this._manualEverOpened
+                 && (this._phase === 'build' || this._phase === 'briefing')) {
+        // The phase gate lives HERE and not on the counter, so the 20 s is spent in the build
+        // phase but the pictogram is still up during the briefing — the one stretch of Night One
+        // where the player has nothing to look at and no reason to believe the game wants
+        // anything from them. It is a keycap and a drawing of a folded sheet: an input legend,
+        // which §13.7 allows, not a tutorial line, which it does not.
         icon = 'manual';
         key = 'blueprint';
       }

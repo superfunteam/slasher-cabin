@@ -146,6 +146,17 @@ const FALLBACK_PANELS = Object.freeze([0, 3, 4, 4, 4, 3, 4, 2]);
 /** Pages per night including the cover (ART §13.5's Pages column + 1). */
 const FALLBACK_PAGES = Object.freeze([0, 2, 3, 3, 4, 4, 5, 3]);
 
+/**
+ * `Blueprint` panel kinds whose subject is a part going into its own place — a solid, an arrow,
+ * and the outline it belongs in. These are the pages that TEACH; everything else on the sheet
+ * (the cover, the wave, the parts manifest, the scale reference) describes rather than instructs.
+ * Night One's is `1.3` at index 3, and it is the page GAME_DESIGN §17 t=0:09 is written about:
+ * "the whole grammar, in one picture."
+ */
+const TEACHING_KINDS = new Set([
+  'exploded', 'one-arrow', 'sequence', 'brace-sequence', 'hinge-in-situ', 'shim-fix',
+]);
+
 const DEG = Math.PI / 180;
 
 /* ══════════════════════════════════════════════════════════════════════════════════════════
@@ -1718,6 +1729,7 @@ export class BlueprintUI {
     this._t = 0;                 // ms into the current phase
     this._pageIndex = 0;
     this._pendingIndex = 0;
+    this._openAtTeaching = false;   // Night One, first open only. See `_teachingPageIndex`.
     this._disposed = false;
     this._enabled = true;
 
@@ -1990,6 +2002,21 @@ export class BlueprintUI {
   open() {
     if (this._disposed || !this._enabled) return false;
     if (this._phase !== 'closed' && this._phase !== 'closing') return false;
+    // NIGHT ONE'S FIRST OPEN LANDS ON THE INSTRUCTION, NOT THE COVER.
+    //
+    // A player in a game with no tutorial text opened this and got page 0: the cover. Page 1 is
+    // the mascot waving, page 2 is the parts manifest. The panel that actually teaches the game —
+    // a pier block, one straight arrow, the dashed outline of itself, the square in the drawing
+    // being the square on the ground — is three page-turns away, and nothing in the game teaches
+    // the page turn either. A manual is only wordless successfully if the wordless page is the
+    // one you see. Every other night opens on its cover, and paging back from here reaches this
+    // night's, so nothing is lost and nothing new is drawn.
+    if (this._openAtTeaching) {
+      this._openAtTeaching = false;
+      const idx = this._teachingPageIndex();
+      // Still `closed` at this point, so this is silent: no page sound, no refusal, no bake.
+      if (idx !== this._pageIndex) this.setPanel(idx);
+    }
     this._phase = 'wipe';
     this._t = 0;
     this._pendingIndex = this._pageIndex;
@@ -2043,6 +2070,28 @@ export class BlueprintUI {
 
   nextPanel() { return this.setPanel(this._pageIndex + 1); }
   prevPanel() { return this.setPanel(this._pageIndex - 1); }
+
+  /**
+   * The first page of tonight's sheet that instructs rather than describes — the earliest panel
+   * whose kind is in `TEACHING_KINDS`. Index 0 is always the cover and is never it.
+   *
+   * With `Blueprint` absent the fallback sheet is short (night one is two pages) and its second
+   * page is the insert/torque row, so page 1 is the right answer there. Never returns an index
+   * outside the sheet.
+   */
+  _teachingPageIndex() {
+    const n = this.panelCount;
+    if (n <= 1) return 0;
+    let panels = null;
+    try { panels = this._blueprint()?.def?.panels ?? null; } catch { panels = null; }
+    if (Array.isArray(panels)) {
+      const last = Math.min(panels.length, n);
+      for (let i = 1; i < last; i++) {
+        if (TEACHING_KINDS.has(panels[i]?.kind)) return i;
+      }
+    }
+    return Math.min(1, n - 1);
+  }
 
   /** @param {number|string} i index, or a panel id when Blueprint is present. */
   setPanel(i) {
@@ -2198,6 +2247,9 @@ export class BlueprintUI {
   _onNightBegin(p) {
     this._pageIndex = 0;
     this._pendingIndex = 0;
+    // §17's first five minutes are Night One's alone: only that night's first open jumps past
+    // the cover to the page that teaches. Every later night opens on HJEM, which is the joke.
+    this._openAtTeaching = (p?.night ?? this._night()) === 1;
     this._marks.clear();
     this._anchorsUsed = 0;
     this._marksDirty = true;
