@@ -598,13 +598,28 @@ export class NightManager {
 
     this.setPhase('briefing');
     this._phaseT = 0;
-    this._emit('night:begin', { night, blueprint: bp });
-    this._autosave(`night-${night}-start`);
 
-    // Opening image (Script.nights[n].openingImage) is a sound, not a caption. §17 t=0:00.
+    // ---------------------------------------------------------------------------------------
+    // THE OPENING IMAGE IS A SOUND, NOT A CAPTION. GAME_DESIGN §17 t=0:00: "Black. One
+    // `audio:sfx { id:'crate_settle' }`." AUDIO_DIRECTION §8 S1 is explicit about the order:
+    // "On Night 1 specifically, `crate_settle` plays *before* the 2.2 s, over black."
+    //
+    // This USED TO SIT BELOW the `night:begin` emit, and the first sound in the game was
+    // therefore inaudible. `night:begin` runs AudioEngine's S1 handler synchronously, and its
+    // first act is `_hardMute(true, 0.05)` on the master duck — a setTargetAtTime with tau
+    // 16.7 ms, i.e. down 26 dB in 50 ms. A 0.85 s crate settling into that is a click.
+    //
+    // Order alone is not the whole fix and must not be mistaken for it: emitting one line
+    // earlier still puts the mute on the same audio-context timestamp as the source start.
+    // AudioEngine's `_openingRingTail()` is the other half — it lets a one-shot that began in
+    // this same tick ring out before S1 takes the world away. Both halves are required.
+    // ---------------------------------------------------------------------------------------
     if (night === 1 && !opts.restored) {
       this._emit('audio:sfx', { id: 'crate_settle', volume: 0.9 });
     }
+
+    this._emit('night:begin', { night, blueprint: bp });
+    this._autosave(`night-${night}-start`);
 
     // §17 t=0:00 — he arrives at dusk with the lamp already burning. MUST come after the
     // night:begin emit above: Flashlight's own handler for that event refills the tank and

@@ -28,7 +28,9 @@
  *                                       2·angle. Three keeps far and fov in step with the beam
  *                                       for us; do not hand-set them.
  *   lamp.spill                  THREE.SpotLight  — shadowless 6% leak (ART_DIRECTION §3.2)
- *   lamp.glow                   THREE.PointLight — near-field: hands, held lumber, the page
+ *   lamp.glow                   THREE.SpotLight  — near-field: hands, held lumber, the page.
+ *                                       Was a PointLight; see D12. Wide (90°, penumbra 0.5)
+ *                                       and aimed BACK along the beam at the player.
  *   lamp.pageLight              THREE.SpotLight  — manual page bounce (ART_DIRECTION §3.2/§13.8)
  *   lamp.object                 THREE.Group      — the lantern mesh. World-space, spring-lagged.
  *
@@ -101,9 +103,15 @@
  *       lower-right. ART_DIRECTION is a binding rank-3 document and it is also mechanically
  *       right (GAME_DESIGN §4.3 keeps the right hand for the mallet), so left wins. It is one
  *       number: TUNING.handOffset.x, or call setHandOffset().
- *   D3  sfx ids `lantern_ignite` / `lantern_douse` / `lantern_hood` / `lantern_unhood` /
- *       `lantern_refuel` / `lantern_gutter` do not yet exist in AUDIO_DIRECTION's recipe list.
- *       They are emitted anyway; an unknown id is a no-op in AudioEngine. Owner: Audio agent.
+ *   D3  RESOLVED. sfx ids `lantern_ignite` / `lantern_douse` / `lantern_hood` / `lantern_unhood`
+ *       / `lantern_refuel` / `lantern_gutter` used to resolve to nothing: every one was a
+ *       silent no-op that logged `audio: unknown sfx id`, including the ignition the game plays
+ *       at GAME_DESIGN §17 t=0:00. All six are now registered in `ProceduralSFX.ALIASES`. The
+ *       first four land on the document's own recipes (AUDIO_DIRECTION §4.20's switch click for
+ *       ignite/douse, `click.shutter` for the hood); `lantern_gutter` and `lantern_refuel` are
+ *       flagged there as interim stand-ins, because §4.2 specifies only the lantern's hiss,
+ *       squeak and rattle and there is no recipe for either event to be right about. Nothing in
+ *       this file changed — the ids were always the ones the class documents.
  *
  *   D4  ART_DIRECTION §3.2 says core intensity 40 cd, angle 0.42, distance 14. Shipped at
  *       105 / 0.78 / 26. This is measured, not preferred. Captured `?shot=site-close` at
@@ -243,6 +251,41 @@
  *       and a third of its warm pixels, from elapsed time alone. Three captures I took late in a
  *       session read %warm 9.4–9.9 where the same build reads 14–20 fresh. The tank is now held
  *       full while `Shots.active` is set.
+ *
+ *   D12 THE ONLY POINTLIGHT IN THE BUILD WAS THIS CLASS'S, and it was not free. `lamp.glow`
+ *       was a `THREE.PointLight`, which ART_DIRECTION §3.2 forbids outright ("all local lights
+ *       are SpotLights") and §3.6 budgets at `MAX_POINT 0`. `Props._assertNoPointLights()` has
+ *       warned about it at every boot.
+ *
+ *       The warning's own text said it "will not light anything", and that part was FALSE:
+ *       §3.6's enforcement mechanism, `Materials.assignLights(renderList)`, was never written
+ *       — there is no such function in `src/render/Materials.js` — so three derives
+ *       `NUM_POINT_LIGHTS` from the visible scene lights exactly as it always does. The light
+ *       worked, and it forked the material library into a point-lit permutation family.
+ *       MEASURED over CDP on a private dev server, same seed, same procedure, before/after:
+ *
+ *                                   programs   of those, carrying a `pointLights` uniform
+ *           title screen, before       115                     0
+ *           after night:begin, before  242                    58
+ *           title screen, after        115                     0
+ *           after night:begin, after   242                     0
+ *
+ *       READ THAT HONESTLY: the program COUNT did not fall. 58 point-lit permutations became
+ *       58 spot-lit ones, because the permutation axis is the light census and the light is
+ *       still there. Zero at the title in both, because three's `projectObject` skips an
+ *       invisible light and this one is `visible = false` until the wick catches — which is
+ *       also why the assert fires at init and the cost does not arrive until the night starts.
+ *       Draw calls at the same two moments: 285 / 357 before, 285 / 355 after — i.e. inside
+ *       run-to-run noise. This change buys the §3.2 contract and a clean console
+ *       (ARCHITECTURE §13), NOT a frame-time win, and it should not be sold as one.
+ *
+ *       Fixed by making it a SpotLight at three's maximum 90° half-angle, penumbra 0.5, aimed
+ *       BACK along the beam. Not removed: the fill is what lights the player's own hands and
+ *       the part on their shoulder, and those pixels sit between the emitter and the camera —
+ *       i.e. in the half of the old sphere that was doing the work. The forward half was
+ *       already owned by the 105 cd core and the spill. Same intensity, same distance, same
+ *       decay, same hood and hang curves; `lamp.glow` is still the published handle and
+ *       VolumetricFog / Navmesh both accept a SpotLight on the same code path.
  *
  *   D8  A NUMERICALLY OVERFLOWED NODE, live in the scene graph: the 'lantern-page-bounce'
  *       SpotLight was measured at world Y = -7.02e+99. Root cause is a latch, not a divergence:
@@ -481,6 +524,21 @@ export const TUNING = {
   glowIntensity: 1.1,
   glowDistance: 3.2,
   glowForward: 0.40,             // pushed clear of its own chimney — see D5
+  /**
+   * D12. The near field is a SpotLight, not a PointLight. See the class header.
+   *
+   * `angle` is three's maximum (a PointLight is the only way to get more, and that is the
+   * thing being removed). `penumbra 0.5` puts `cosInner` at 0.5, so `getSpotAttenuation`'s
+   * smoothstep is fully open out to 60° off axis and then falls to nothing at 90°: a broad
+   * flat near-field plateau with a soft rim, rather than a visible cone edge on the hands.
+   *
+   * The cone is aimed BACK along the beam, at the player. That is the half of the old sphere
+   * that was doing the work — the hands, the lamp's own brass, and the part on the shoulder,
+   * all of which sit between the emitter and the camera. The forward half was redundant: the
+   * core at 105 cd and the spill already own everything ahead of the lamp.
+   */
+  glowAngle: Math.PI / 2,
+  glowPenumbra: 0.5,
 
   /* --- THE ONE THAT MATTERED (D6) -----------------------------------------------------
    * How far along the aim the emitters sit, ahead of the physical flame. Three's
@@ -649,7 +707,8 @@ export class Flashlight {
 
     /** @type {THREE.SpotLight|null} */ this.light = null;
     /** @type {THREE.SpotLight|null} */ this.spill = null;
-    /** @type {THREE.PointLight|null} */ this.glow = null;
+    /** @type {THREE.SpotLight|null} */ this.glow = null;          // D12 — was a PointLight
+    /** @type {THREE.Object3D|null} */ this._glowTargetObj = null;
     /** @type {THREE.SpotLight|null} */ this.pageLight = null;
     /** @type {THREE.Group|null} */ this.object = null;
 
@@ -796,6 +855,7 @@ export class Flashlight {
     if (this.glow) { this.glow.dispose?.(); drop(this.glow); }
     if (this.pageLight) { this.pageLight.dispose?.(); drop(this.pageLight); }
     drop(this._targetObj);
+    drop(this._glowTargetObj);
     drop(this._pageTargetObj);
     if (this.object) drop(this.object);
 
@@ -812,6 +872,7 @@ export class Flashlight {
     this.pageLight = null;
     this.object = null;
     this._targetObj = null;
+    this._glowTargetObj = null;
     this._pageTargetObj = null;
     this._parts = { flame: null, halo: null, glass: null, glassSheen: null, sleeve: null, wick: null };
   }
@@ -1537,6 +1598,12 @@ export class Flashlight {
       // It is a near-field FILL for the hands and the carried lumber, so it belongs out in
       // front of the lamp, not inside it.
       glow.position.copy(this.flamePosition).addScaledVector(this._aimDir, T.glowForward);
+      // D12. A spot needs somewhere to point. One metre back along the beam puts the cone's
+      // axis on the fist that is holding the lamp; everything the fill exists for — hands,
+      // brass, the part on the shoulder — is inside the 60° plateau from there.
+      if (this._glowTargetObj) {
+        this._glowTargetObj.position.copy(glow.position).addScaledVector(this._aimDir, -1);
+      }
     }
 
     const page = this.pageLight;
@@ -1596,6 +1663,7 @@ export class Flashlight {
     fix(this.glow);
     fix(this.pageLight);
     fix(this._targetObj);
+    fix(this._glowTargetObj);
     fix(this._pageTargetObj);
     fix(this.object);
   }
@@ -1756,11 +1824,17 @@ export class Flashlight {
     spill.target = target;
     spill.visible = false;
 
-    // --- near-field: the player's own hands and whatever is in them
-    const glow = new THREE.PointLight(T.flameColor, 0, T.glowDistance, T.decay);
+    // --- near-field: the player's own hands and whatever is in them.
+    // D12: a SpotLight aimed back at the player, NOT a PointLight. ART_DIRECTION §3.2 ("all
+    // local lights are SpotLights") and §3.6 (`MAX_POINT 0`); `Props._assertNoPointLights()`
+    // has been warning about this one since it was added.
+    const glow = new THREE.SpotLight(T.flameColor, 0, T.glowDistance, T.glowAngle, T.glowPenumbra, T.decay);
     glow.name = 'lantern-glow';
     glow.castShadow = false;
     glow.visible = false;
+    const glowTarget = new THREE.Object3D();
+    glowTarget.name = 'lantern-glow-aim';
+    glow.target = glowTarget;
 
     // --- manual page bounce (ART_DIRECTION §3.2 row 9, owned by this file)
     const page = new THREE.SpotLight(T.pageColor, 0, T.pageDistance, T.pageAngle, T.pagePenumbra, T.decay);
@@ -1776,10 +1850,11 @@ export class Flashlight {
     this.glow = glow;
     this.pageLight = page;
     this._targetObj = target;
+    this._glowTargetObj = glowTarget;
     this._pageTargetObj = pageTarget;
 
     if (scene) {
-      scene.add(core, target, spill, glow, page, pageTarget);
+      scene.add(core, target, spill, glow, glowTarget, page, pageTarget);
     } else {
       Log.warn('Flashlight: no scene on ctx — the lantern exists but is not in the world.');
     }

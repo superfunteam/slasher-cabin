@@ -16,7 +16,9 @@
  *   plus the DSP primitives (modal, grainTrain, frictionOsc, burst, noiseBuffer, …)
  *
  * Determinism: every buffer is rendered from a Rand seeded by `${id}:${variant}`.
- * Never Math.random().
+ * Never `Math.random` — parentheses omitted deliberately, because `tools/check.mjs` counts that
+ * name followed by an open paren anywhere in the file, comments included, and this line was the
+ * entirety of this file's reported "1 call".
  */
 import { Rand } from '../core/Rand.js';
 import { Log } from '../core/Log.js';
@@ -2048,6 +2050,30 @@ export const ALIASES = {
   'thunder': 'thunder.mid', 'rain': 'rain.leaves', 'wind': 'wind.pines',
   'twig': 'twig.snap', 'branch': 'branch.snap',
   'ui.confirm': 'ui.chime', 'ui.error': 'ui.deny', 'ui.turn': 'ui.page',
+  // ---- the lantern (Flashlight.js, documented deviation D3 there: "these ids do not yet
+  // exist in AUDIO_DIRECTION's recipe list ... Owner: Audio agent"). They are OURS, and until
+  // now all six were silent no-ops that logged `audio: unknown sfx id`. The lamp is lit in the
+  // player's fist from GAME_DESIGN §17 t=0:00, so `lantern_ignite` was a hole in the first
+  // second of the game.
+  //
+  // The first four are the document's own recipes, not a guess:
+  //   §4.20 is the switch click, and it says in as many words that "the player's own lantern
+  //   douse ... uses the same recipe" — that is `click.flashlight.on` / `.off`, which the
+  //   `lantern.on` / `lantern.off` aliases below already point at.
+  //   `click.shutter` is literally "a metal shutter: two leaves, a spring, and a stop"
+  //   (buildShutterClick), which is the hood. Flashlight already separates hood from unhood by
+  //   rate and level, so both map to the one recipe.
+  'lantern_ignite': 'click.flashlight.on', 'lantern_douse': 'click.flashlight.off',
+  'lantern_hood': 'click.shutter', 'lantern_unhood': 'click.shutter',
+  // The last two are INTERIM and flagged as such: AUDIO_DIRECTION §4.2 specifies only the
+  // lantern's hiss, squeak and rattle, so neither of these has a recipe to be right about.
+  // A gutter is a draught knocking the flame down — `canvas.flap`'s 136 ms whoomph sweeping
+  // 3200 -> 380 Hz over a 68 Hz body is the nearest thing in the bank to moved air, and
+  // Flashlight already plays it at 0.35-0.75 volume and 0.9-1.2 rate. A refuel is a threaded
+  // brass fount cap; `screw.torque` is the bank's threaded-fastener sound. Both are stand-ins
+  // for a §4.2 recipe that should be written, and both are better than the silence-plus-warning
+  // they replace. Neither is a rename of a GAME_DESIGN ⚑ id, so both are ours to change.
+  'lantern_gutter': 'canvas.flap', 'lantern_refuel': 'screw.torque',
   // ids other systems emit by name (BuildSystem, Physics, Weather, Script)
   'hardware_chime': 'ui.chime', 'join_seat': 'screw.seat', 'join_split': 'wood.split',
   'creak_groan': 'creak.t3.s1', 'creak_tick': 'creak.t1.s1',

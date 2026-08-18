@@ -174,6 +174,25 @@ const TIER0_IDS = ['music-title'];
 const LATE_PLAY_MS = 1200;
 
 /**
+ * S1's head start for the opening beat (`_openingRingTail`). AUDIO_DIRECTION §8 puts
+ * `crate_settle` *before* the 2.2 s of silence, and NightManager emits it in the same
+ * synchronous call as `night:begin`, so the two land on the same audio-context timestamp.
+ *
+ * OPENING_LEAD_MS is how young a voice must be to count as "emitted with this event". 60 ms is
+ * two orders of magnitude above the gap it has to span (both `play()` and the mute read
+ * `context.currentTime` in one JS tick, so the real age is 0) and two orders below anything a
+ * human would call simultaneous, so it separates the opening one-shot from the ordinary
+ * gameplay sound that happens to be in flight when a night starts.
+ *
+ * OPENING_TAIL_MAX bounds the wait no matter what is playing. `crate_settle` resolves to
+ * `lumber.drop`, dur 0.85 s + the 0.05 s `_playBuffer` guard, so the opening needs 0.90 s and
+ * 1.4 s leaves room for a longer replacement without ever letting a stray id hold the night
+ * open. Above this the sound is cut, exactly as it is today.
+ */
+const OPENING_LEAD_MS = 60;
+const OPENING_TAIL_MAX = 1.4;
+
+/**
  * The late-play position snapshot. `opts.position` reaching `play()` is very often a
  * module-scope scratch vector — ARCHITECTURE §12 REQUIRES callers to reuse one — so the late
  * path copies the three numbers at schedule time and writes them back into this one vector at
@@ -2019,22 +2038,76 @@ export class AudioEngine {
 
   // --------------------------------------------------------------- silence rules (§8)
 
-  /** S1 — the first breath of the night: 2.2 s of absolute silence, then the bed arrives. */
+  /**
+   * S1 — the first breath of the night: 2.2 s of absolute silence, then the bed arrives.
+   *
+   * §8 has a clause this used to ignore: *"On Night 1 specifically, `crate_settle` (§4.28.5)
+   * plays BEFORE the 2.2 s, over black."* NightManager emits that one-shot immediately before
+   * `night:begin`, so by the time this handler runs the wooden sound is 0 ms old and still on
+   * the master bus. Muting on this tick swallowed the first sound in the game — a 0.85 s crate
+   * cut to a 50 ms click, every session, since the beat was written.
+   *
+   * So: let whatever began in this same tick ring out, THEN take the world away. The 2.2 s
+   * itself is untouched — it starts when the crate finishes, which is what §8 describes.
+   */
   _firstBreathOfTheNight() {
     if (!this.context) return;
+    const lead = this._openingRingTail();
+    this._holdVoice(8200 + lead * 1000, 'S1 first breath');
+    this._takeTheWorldAway(lead);
+  }
+
+  /**
+   * S1 proper: the 2.2 s of nothing, and the staggered return of the bed.
+   *
+   * `lead` delays ONLY the mute, and it delays it on the audio clock. Everything else runs
+   * now: the ambience layers fade out under the opening sound, which is what "and nothing
+   * answers it" means, and the crickets are already cut before the silence lands.
+   */
+  _takeTheWorldAway(lead = 0) {
+    if (!this.context) return;
     const now = this.now();
-    this._hardMute(true, 0.05);
+    const at = now + Math.max(0, lead);
+    this._hardMute(true, 0.05, false, at);
     this._ambTargets(0, 0, 0, 0.05);
-    this._holdVoice(8200, 'S1 first breath');
     this._cricketCut = 1;
-    this._cricketClearAt = now + 6.4;
-    this._after(2.2, () => {
+    this._cricketClearAt = at + 6.4;
+    this._after(lead + 2.2, () => {
       this._hardMute(false, 0.35);
       // Wind first, then the distance layer, then the crickets last (staggered, §5.4).
       this._ambTargets(1, 0, 0, 2.4);
       this._after(2.0, () => this._ambTargets(1, 1, 0, 2.4));
     });
     this._setBreath('calm');
+  }
+
+  /**
+   * Seconds of head start S1 owes a sound that has only just started, so the opening beat is
+   * heard instead of muted.
+   *
+   * Deliberately narrow, because S1 taking everything away is the whole point of S1 and a rule
+   * that waits for the world is not a silence rule at all:
+   *
+   *   - loops and beds never count (they are what S1 exists to cut),
+   *   - only voices younger than OPENING_LEAD_MS count, so a footstep or a creak already in
+   *     flight when a night begins is still cut instantly — the exception is a sound emitted
+   *     in the same synchronous call as `night:begin`, i.e. the opening one and nothing else,
+   *   - and the wait is capped at OPENING_TAIL_MAX so no id, however long, can hold the night
+   *     open.
+   *
+   * Returns 0 whenever nothing qualifies, which is every night except the opening of Night 1.
+   */
+  _openingRingTail() {
+    const now = this.now();
+    let tail = 0;
+    for (let i = 0; i < this._voices.length; i++) {
+      const v = this._voices[i];
+      if (!v || v.free || v.loop) continue;
+      if ((now - v.startedAt) * 1000 > OPENING_LEAD_MS) continue;
+      const t = v.endsAt - now;
+      if (t > tail) tail = t;
+    }
+    return tail > 0 ? Math.min(tail, OPENING_TAIL_MAX) : 0;
   }
 
   /**
@@ -2221,16 +2294,27 @@ export class AudioEngine {
 
   // --------------------------------------------------------------- mix helpers
 
-  _hardMute(on, fadeSec = 0.05, includeUI = false) {
+  /**
+   * @param {boolean} on
+   * @param {number} [fadeSec]
+   * @param {boolean} [includeUI] sfxUI hangs off masterGain, not `_mixDuck`, so it survives a
+   *   plain hard mute — which is what makes S6's chime-in-a-vacuum possible.
+   * @param {number} [when] absolute context time to schedule the move at. Defaults to now.
+   *   Use it rather than a `setTimeout` for anything that has to be exact: `startNight()`
+   *   blocks the main thread for whole frames (blueprint generation, the site rebuild), so a
+   *   timer lands whenever the frame recovers, while `cancelAndHoldAtTime` + `setTargetAtTime`
+   *   on a future stamp are sample-accurate and do not care that the main thread is busy.
+   */
+  _hardMute(on, fadeSec = 0.05, includeUI = false, when = 0) {
     if (!this.context) return;
-    const now = this.now();
+    const at = Math.max(this.now(), Number.isFinite(when) ? when : 0);
     const p = this._mixDuck.gain;
-    this._hold(p, now);
-    p.setTargetAtTime(on ? MIN_G : 1, now, Math.max(0.008, fadeSec / 3));
+    this._hold(p, at);
+    p.setTargetAtTime(on ? MIN_G : 1, at, Math.max(0.008, fadeSec / 3));
     if (includeUI && this.buses?.sfxUI) {
       const u = this.buses.sfxUI.duck.gain;
-      this._hold(u, now);
-      u.setTargetAtTime(on ? MIN_G : 1, now, Math.max(0.008, fadeSec / 3));
+      this._hold(u, at);
+      u.setTargetAtTime(on ? MIN_G : 1, at, Math.max(0.008, fadeSec / 3));
     }
   }
 

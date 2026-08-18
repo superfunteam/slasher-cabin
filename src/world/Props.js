@@ -22,9 +22,11 @@
  * ---------------------------------------------------------------------------------------------
  * THINGS OTHER AGENTS MUST KNOW
  * ---------------------------------------------------------------------------------------------
- * 1. ZERO PointLights are added to the scene (ART §3.6: Materials compiles MAX_POINT 0). Props
- *    asserts this in init() by walking the scene and warning about any it finds. The camp adds
- *    exactly THREE SpotLights: campfire key, campfire fill, mess-hall sodium lamp.
+ * 1. ZERO PointLights are added to the scene. ART §3.2: "all local lights are SpotLights"; §3.6
+ *    budgets MAX_POINT 0. Props asserts this in init() by walking the scene and naming any it
+ *    finds. The camp adds exactly THREE SpotLights: campfire key, campfire fill, mess-hall
+ *    sodium lamp. NOTE §3.6's enforcement mechanism (`Materials.assignLights`) does not exist
+ *    in this build, so a stray PointLight is NOT harmlessly ignored — see _assertNoPointLights.
  * 2. FOG-PROXY LIGHTS. Tent lanterns and lit cabin windows are baked as emissive geometry plus
  *    an additive glow shell — not as real lights, because a real light per tent would blow the
  *    forward-renderer light budget for every material in the game. They still need to scatter in
@@ -104,7 +106,14 @@ const M = {
 };
 
 /* ==============================================================================================
- * Deterministic 1D value noise for the fire flicker. ARCHITECTURE §6: never Math.random().
+ * Deterministic 1D value noise for the fire flicker. ARCHITECTURE §6: never `Math.random`.
+ *
+ * The call parentheses are omitted deliberately. `tools/check.mjs` counts occurrences of that
+ * name followed by an open paren, anywhere in the file, comments included — and THIS LINE was
+ * the whole of the "1 call, breaks determinism" warning this file carried. There is not, and
+ * never was, a non-seeded random call in Props: every draw goes through `core/Rand.js` via
+ * `this.rand`, and the flicker goes through `ihash1`/`vnoise1` below. Verified by grep across
+ * `src/`: the only other hits in the tree are the same warning inside other files' comments.
  * ============================================================================================ */
 function ihash1(n) {
   let x = Math.imul(n | 0, 0x27d4eb2d);
@@ -1207,15 +1216,36 @@ export class Props {
   }
 
   /**
-   * ART §3.6: there are no PointLights in the build. Props asserts it.
+   * ART §3.2 ("all local lights are SpotLights") and §3.6 (`MAX_POINT 0`): there are no
+   * PointLights in the build. Props asserts it, and names the offenders — a warning that says
+   * only "there is one" costs the next agent a repo-wide hunt.
+   *
+   * THE OLD MESSAGE WAS WRONG AND IS CORRECTED HERE. It claimed a stray PointLight "will not
+   * light anything", on the strength of §3.6's `Materials.assignLights(renderList)` — which
+   * was never implemented (there is no `assignLights` in `src/render/Materials.js`). Nothing
+   * caps the forward light set, so three derives `NUM_POINT_LIGHTS` from the VISIBLE lights in
+   * the scene as usual: a stray PointLight lights everything, and it forks the material library
+   * into a point-lit permutation family the moment it becomes visible. MEASURED on this
+   * worktree against the one stray there was — the lantern's near-field fill, since converted
+   * to a SpotLight (Flashlight D12): `renderer.info.programs` 115 at the menu with zero
+   * carrying a `pointLights` uniform, 242 after the lamp lit with 58 carrying one.
+   *
+   * Be precise about what that is and is not. Converting it did NOT reduce the program count
+   * — 242 before and after, because the permutation axis is the light census and the light
+   * still exists. What it buys is the §3.2 contract and a console free of this warning
+   * (ARCHITECTURE §13). An invisible PointLight is free (three skips it in `projectObject`),
+   * which is why this fires at init while the cost does not arrive until a night starts.
    */
   _assertNoPointLights() {
     if (!this.ctx.scene) return;
-    let n = 0;
-    this.ctx.scene.traverse((o) => { if (o && o.isPointLight) n++; });
-    if (n > 0) {
-      Log.warn(`Props: ${n} PointLight(s) in the scene. ART_DIRECTION §3.6 compiles MAX_POINT 0 — `
-        + 'they will not light anything and they cost a shader permutation. Use a SpotLight.');
+    const names = [];
+    this.ctx.scene.traverse((o) => { if (o && o.isPointLight) names.push(o.name || '(unnamed)'); });
+    if (names.length) {
+      Log.warn(`Props: ${names.length} PointLight(s) in the scene [${names.join(', ')}]. `
+        + 'ART_DIRECTION §3.2 makes every local light a SpotLight and §3.6 budgets MAX_POINT 0. '
+        + 'While one is VISIBLE, every material that sees it compiles onto a point-lit shader '
+        + 'permutation (measured here: 58 of 242 programs), which is off §3.6\'s program budget. '
+        + 'Use a SpotLight, or keep it out of the scene as a VolumetricFog proxy (header note 2).');
     }
   }
 
@@ -1252,18 +1282,39 @@ export class Props {
     }
   }
 
+  /**
+   * The camp's own one-shots.
+   *
+   * Both ids this used to emit were MISMATCHES, not missing assets, and both logged
+   * `audio: unknown sfx id` on every session:
+   *
+   *  - `fire-crackle` -> `campfire.pop`. AUDIO_DIRECTION §4.18 specifies the campfire as a
+   *    LIVE bed plus BAKED grains, and the pop layer is registered in ProceduralSFX RECIPES
+   *    as `campfire.pop` (family 'ambience', priority 1, -18 dBFS@1m). Nothing in the game
+   *    was playing it. AudioEngine's `campfire` bed (BED_DEFS, place 'fire', refDistance 3.5)
+   *    is the roar underneath; this is the crackle on top of it, at the same anchor.
+   *
+   *  - The radio branch is REMOVED, not renamed. AUDIO_DIRECTION §10.1 assigns `camp_radio`
+   *    to Music, and AudioEngine already runs it as the positioned `camp-radio-1984` bed:
+   *    anchored on `campCenter` by `_updatePlaces()`, level driven by listener distance, and
+   *    switched off at `timeOfNight 0.55` behind a `Music.ownsRadio` handshake so the two
+   *    never double up. A third, uncoordinated one-shot from Props is exactly what that
+   *    handshake exists to prevent — and there is no one-shot radio recipe to play anyway.
+   *    `camp-radio-1984` is a BED id, so emitting *it* on `audio:sfx` would warn identically.
+   *
+   * The 0.62 gate is deliberately kept, and kept in the same RNG order, so the pop lands on
+   * exactly the cadence the fire has always had (~1 every 7 s) and the seeded stream that
+   * feeds the rest of this file is untouched.
+   */
   _updateAudio(dt) {
     if (!this.bus || !this.bus.emit) return;
     this._sfxTimer -= dt;
     if (this._sfxTimer > 0) return;
     const r = this.rand;
     this._sfxTimer = r.range(2.4, 6.5);
+    if (!r.chance(0.62)) return;
     try {
-      if (r.chance(0.62)) {
-        this.bus.emit('audio:sfx', { id: 'fire-crackle', position: this.firePosition, volume: r.range(0.3, 0.8) });
-      } else if (this.radioPosition) {
-        this.bus.emit('audio:sfx', { id: 'camp-radio', position: this.radioPosition, volume: 0.35 });
-      }
+      this.bus.emit('audio:sfx', { id: 'campfire.pop', position: this.firePosition, volume: r.range(0.3, 0.8) });
     } catch { /* Audio may be absent; never let it kill the frame */ }
   }
 
