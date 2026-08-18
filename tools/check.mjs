@@ -157,10 +157,18 @@ async function main() {
     }
 
     // Contract hygiene.
-    const consoleHits = rel === 'core/Log.js' ? 0 : (src.match(/(^|[^.\w])console\.(log|warn|error|info|debug)\s*\(/gm) || []).length;
+    //
+    // These run against stripNonCode(), NOT the raw source. Matching raw text made this tool
+    // report defects that did not exist: Props.js and ProceduralSFX.js were each flagged for a
+    // Math.random() call when their only "hit" was a COMMENT SAYING NEVER TO USE IT. An agent
+    // duly went and reworded the comments to appease the linter. A checker that flags the
+    // documentation of a rule as a violation of that rule teaches people to edit prose until the
+    // tool is quiet, which is the opposite of what it is for.
+    const scan = stripNonCode(src);
+    const consoleHits = rel === 'core/Log.js' ? 0 : (scan.match(/(^|[^.\w])console\.(log|warn|error|info|debug)\s*\(/gm) || []).length;
     if (consoleHits) add('warn', 'console', `${consoleHits} console.* call(s) — use Log from core/Log.js`);
 
-    const randHits = (src.match(/Math\.random\s*\(/g) || []).length;
+    const randHits = (scan.match(/Math\.random\s*\(/g) || []).length;
     if (randHits) add('warn', 'math-random', `${randHits} Math.random() call(s) — breaks determinism, use core/Rand.js`);
 
     if (/export\s+class\s+\w+/.test(src) && !/\bdispose\s*\(/.test(src)) {
