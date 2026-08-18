@@ -652,31 +652,47 @@ const NIGHT_NAME = ['', 'GRUNNMUR', 'BJELKELAG', 'REISVERK', 'KLEDNING', 'TAKSTO
  * advisory to `Props`/`CabinSite`, which own final placement and snap Y to the heightfield.
  * `cue` is the material-appropriate 90-second audio hint; stone gets none, on purpose.
  * `indignity` is the escalation the brief asks for, stated so it cannot be tuned away.
+ *
+ * `count` / `supplied` are MANIFEST quantities: how many the drawing prints against how many are
+ * in the pile. (`BuildSystem.SHORTFALLS` has a `count` too and it means something else — how many
+ * objects to withhold and re-spawn. Two tables, two schemas, on purpose.)
+ *
+ * `partType` names the `PART_TYPES` key this shortfall's contents row is drawn from, and it is
+ * what makes the row go red. The manifest used to identify that row by `p.count === short.count`
+ * — a coincidence match on a quantity — which meant a shortfall with no `count` reddened nothing
+ * at all. That is why NOTHING WAS EVER RED ON NIGHT 1: neither the mallet nor the pier carried a
+ * `count`, so `isShort` could not be true, and §6.9's whole "red outline redraws in black with a
+ * tick" reward never happened on the night that teaches it.
  */
 const SHORTFALLS = {
   1: [
-    { id: 'mallet', name: 'Mallet', type: 'tool', tier: 1, material: 'metal', cue: 'hardware_tick_steel',
-      at: { x: -26, z: -18 }, landmark: 'fallen log', dist: 31.6, bearing: 'NW', hintable: true,
+    // Announced by NOBODY at t = 0 — `BuildSystem.SHORTFALLS[1]` marks the mallet `silent`, and
+    // it is `type: 'tool'`, so it has no contents row here either. §17 at 2:40 and STORY §6 both
+    // depend on the player not knowing it was gone. It is found because it is lying at the log.
+    { id: 'mallet', name: 'Mallet', type: 'tool', tier: 1, material: 'metal', cue: null,
+      at: { x: -26, z: -18 }, landmark: 'fallen log', dist: 31.6, bearing: 'NW', hintable: false,
       indignity: 'You did not know you were missing it. You had been using your hands.' },
-    { id: 'pier_06', name: 'Pier block, 6 of 6', type: 'part', tier: 1, material: 'stone', cue: null,
-      at: { x: -26, z: -18 }, landmark: 'fallen log', dist: 31.6, bearing: 'NW', hintable: true,
+    // THE PREMISE. Six chalk marks, five blocks. §17 at 2:05: "the core comedy, in the first
+    // three minutes." `partType: 'pier'` is what puts the contents row in the manual's red.
+    { id: 'pier_06', name: 'Pier block, 6 of 6', type: 'part', partType: 'pier', tier: 1, material: 'stone', cue: null,
+      at: { x: -26, z: -18 }, landmark: 'fallen log', dist: 31.6, bearing: 'NW', hintable: true, count: 6, supplied: 5,
       indignity: 'Five blocks were supplied for six squares.' },
     { id: 'shim_plate_1961', name: 'Shim', type: 'consumable', tier: 1, material: 'stone', cue: null,
       at: { x: -26, z: -18 }, landmark: 'fallen log', dist: 31.6, bearing: 'NW', hintable: true,
       indignity: 'Pier D sits 11 mm low. The fix panel is a rectangle. It does not care what the rectangle is.' },
   ],
   2: [
-    { id: 'bracket_H', name: 'L-bracket H', type: 'hardware', tier: 2, material: 'metal', cue: 'hardware_tick_steel',
+    { id: 'bracket_H', name: 'L-bracket H', type: 'hardware', partType: 'bracket', tier: 2, material: 'metal', cue: 'hardware_tick_steel',
       at: { x: -36, z: 46 }, landmark: 'woodpile', dist: 58.4, bearing: 'SW', hintable: true, count: 4, supplied: 3,
       indignity: 'Four are drawn, evenly, numbered H-1 to H-4. Three are in the pile.' },
   ],
   3: [
-    { id: 'gusset_plate', name: 'Gusset plate', type: 'hardware', tier: 2, material: 'metal', cue: 'hardware_tick_steel',
+    { id: 'gusset_plate', name: 'Gusset plate', type: 'hardware', partType: 'gusset', tier: 2, material: 'metal', cue: 'hardware_tick_steel',
       at: { x: 86, z: -52 }, landmark: 'boathouse eave', dist: 100.5, bearing: 'ENE', hintable: true, count: 8, supplied: 6,
       indignity: 'The bag icon says eight. The drawing shows six. Two are behind the geometry.' },
   ],
   4: [
-    { id: 'hinge_set_brass', name: 'Hinge set, brass', type: 'hardware', tier: 3, material: 'metal', cue: 'hardware_tick_steel',
+    { id: 'hinge_set_brass', name: 'Hinge set, brass', type: 'hardware', partType: 'hinge', tier: 3, material: 'metal', cue: 'hardware_tick_steel',
       at: { x: 86, z: -52 }, landmark: 'boathouse door', dist: 100.5, bearing: 'ENE', hintable: true, count: 3, supplied: 0,
       indignity: 'They are drawn in situ, screwed to a door that belongs to somebody else.' },
     { id: 'brace_tool', name: 'Brace and bit', type: 'tool', tier: 3, material: 'metal', cue: 'hardware_tick_steel',
@@ -3394,7 +3410,27 @@ const RENDERERS = {
     const cols = Math.max(1, Math.min(3, parts.length));
     const rows = Math.max(1, Math.ceil(parts.length / cols));
     const cw = box.w / cols, ch = Math.min(150, (box.h - 130) / rows);
-    const short = this.def.shortfalls.find((s) => !s.phantom && !s.found);
+
+    /*
+     * WHICH SHORTFALL THIS PAGE IS ABOUT, and which contents row wears the red.
+     *
+     * `partType` is an exact match against the row's `PART_TYPES` key; the `p.count === s.count`
+     * arm is the old coincidence-match, kept so a row without a `partType` behaves as before.
+     *
+     * Two things were wrong here. (1) Night 1's rows carried no `count`, so `isShort` was never
+     * true and the manual never went red on the night whose entire lesson is the red outline.
+     * (2) `find(s => !s.found)` picked whichever unfound shortfall came first — on Night 1 the
+     * mallet, which has no contents row at all — and once every shortfall was found it returned
+     * `undefined` and the inset VANISHED, when §6.9's reward is that it redraws in black with a
+     * tick. So: prefer an unfound shortfall the contents list actually draws, then any unfound
+     * one (for the inset alone), then the first — which is the found state, and stays on the page.
+     */
+    const drawnAs = (s, p) => !!s && (s.partType ? s.partType === p.type : (!!s.count && p.count === s.count));
+    const shorts = this.def.shortfalls.filter((s) => s && !s.phantom);
+    const short = shorts.find((s) => !s.found && parts.some((p) => drawnAs(s, p)))
+      ?? shorts.find((s) => !s.found)
+      ?? shorts[0]
+      ?? null;
 
     // The parts bracket — a square bracket around the whole contents list.
     strokePoly(c, [[box.x + 6, box.y + 4], [box.x - 2, box.y + 4], [box.x - 2, box.y + ch * rows + 26], [box.x + 6, box.y + ch * rows + 26]],
@@ -3405,7 +3441,7 @@ const RENDERERS = {
     parts.forEach((p, i) => {
       const x = box.x + cw * (i % cols) + cw / 2;
       const y = box.y + 34 + ch * Math.floor(i / cols) + ch / 2;
-      const isShort = !!short && !short.found && !!short.count && p.count === short.count;
+      const isShort = !!short && !short.found && drawnAs(short, p);
       this._part(c, p.type, x, y, cw * 0.54, {
         hand, seed: panel.seed + 100 + i * 9, fitH: ch * 0.50,
         color: isShort ? this._accent() : PALETTE.ink,

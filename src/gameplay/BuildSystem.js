@@ -42,7 +42,16 @@
  *     canonical `drop` noise. It is not a free lunch — you threw hardware you are short of, and
  *     the stage manifest still counts it.
  *  4. `PIER`. §6.1's part table has no entry for Night 1's six stone piers. One is added here
- *     (`pier`, 31 kg, carry class C, drop noise 0.62). Marked EXT in PART_TYPES.
+ *     (`pier`, 31 kg, carry class C, drop noise 0.62). Marked EXT in PART_TYPES. `MALLET` is the
+ *     second EXT row, for the same reason: §6.1's Tool row names six tools and gives none of them
+ *     a `partId`, so no tool could exist as a world object and the mallet §17 spends its 2:40 beat
+ *     on was a string in the constructor. Carry class T, tool belt, zero part slots.
+ *  4b. NIGHT 1 IS SHORT A PIER, NOT JUST A SHIM. §6.9's table says "Night 1: shortfalls 1 — one
+ *     shim", and §17 at 2:05 says the pallet supplies five blocks for six chalk marks and fires
+ *     `tool:missing { toolId: 'pier_06' }`. STORY §6.0 settles it: Night 1's named missing part is
+ *     "the **mallet** (+ pier 6)", and STORY §4.2 line 643 puts all three at one landmark — "One
+ *     trip, three finds, the joke lands three times." So `SHORTFALLS[1]` carries three rows, and
+ *     §6.9's "1" is read as one *manifest* shortfall (the shim's fix panel), not one object.
  *  5. HARDWARE. §6.6 gives fasteners a pocket and a count. Night 2's bracket H and Night 6's
  *     article `0000-000` are hardware, not pocket fasteners, so `Slot.hardware = { id, count }`
  *     is added and folded into the SAME `held / required` ratio §6.4 uses for Under-fastened.
@@ -61,6 +70,10 @@
  *   ghostValid    ghostBlock         snapDistance       (see GHOST_BLOCK — WHY it refuses)
  *   available     installedCount     slotCount  creakRisk  creakDebt   seating
  *   pocket        toolBelt           shortfalls repairIntent  carryClass  carryMass
+ *   // `seating` is what HUD polls (HUD.js:1556). `active`, `showMeter`, `p`, `lo`, `hi` are the
+ *   // fields it reads; `ramp` and `firstTime` are ours, for §17's first-time-only affordance.
+ *   // `toolBelt` is rebuilt every `beginNight` from `toolBeltBase` minus the night's withheld
+ *   // tools — it is NOT a constructor constant, or the mallet can never be missing.
  *   carrySpeedMultiplier  carryTurnMultiplier  canCrouch  canSprint  blocksView
  *   footstepNoiseMultiplier  maskWindowRemaining  nextStrikeIn  maskLevel
  *   plot          map                (the world frame — see MAP_DEF)
@@ -123,6 +136,10 @@ export const TUNING = Object.freeze({
   rampSeconds: 3.00,            // T_ramp. LINEAR.
   bandCentre: 0.80,
   bandHalfWidth: { story: 0.150, standard: 0.075, gristle: 0.055, nightmare: 0.055 },
+  // §17 at 1:02 — the first seating check of a RUN only: band at 2x width, ramp at 0.6x, and the
+  // meter forced visible whatever the difficulty. "The torque check, in a safe room."
+  firstSeatBandScale: 2.00,
+  firstSeatRampScale: 0.60,
   overTorqueCeiling: 0.96,      // p above this splits the wood
   torqueUnder: 0.90,            // multiplier on p when released below the band
   torqueOver: 0.80,             // stored torque for an over-torqued (dimpled) join
@@ -345,6 +362,16 @@ export const PART_TYPES = Object.freeze({
   SISTERING: { id: 'SISTERING', type: 'board', length: 1.20, mass: 7, cls: 'C', drop: 0.36, dims: [1.20, 0.03, 0.18], mat: 'lumber', read: 'a short plank' },
   // EXT — §6.1 has no row for Night 1's six stone piers. See conflict note 4 in the header.
   PIER: { id: 'PIER', type: 'pier', length: 0.52, mass: 31, cls: 'C', drop: 0.62, dims: [0.52, 0.40, 0.52], mat: 'granite', read: 'a squared boulder', ext: true },
+  /*
+   * §6.1's Tool row, made real. It had no `PART_TYPES` entry, so no mallet object could exist in
+   * the world; `this.toolBelt` simply began the game with the string 'mallet' in it, which meant
+   * the item §17 spends its 2:40 beat on could never be missed and never be found.
+   *
+   * Carry class T: zero part slots (§6.2 — "the tool roll is not a carry slot"), goes to the
+   * belt on pickup. Nothing anywhere in `src/` reads `toolBelt`, and that is the point: losing
+   * the mallet costs the player nothing at all, which is exactly why they do not notice.
+   */
+  MALLET: { id: 'MALLET', type: 'tool', length: 0.34, mass: 3.2, cls: 'T', drop: 0.25, dims: [0.12, 0.34, 0.12], mat: 'plank', read: 'held-item glint', shape: 'mallet', ext: true },
   GUSSET: { id: 'GUSSET', type: 'bracket', length: 0.30, mass: 1.6, cls: 'B', drop: 0.30, dims: [0.30, 0.26, 0.04], mat: 'bracket', read: 'a black nothing until lantern-lit', shape: 'bracket' },
 });
 
@@ -414,14 +441,67 @@ export const NIGHT_TABLE = Object.freeze([
 const MAP_DEF = Object.freeze({
   // ---- plot frame (§3.3 verbatim). Tier 1 and Tier 2 — the build and scavenge ring.
   plot: ['plot', 0, 0, 'plot'],
-  palletA: ['plot', 4, 12],            // 12 m — the tutorial haul. §17's opening shot.
+  /*
+   * 4.72 m, IN FRONT OF THE PLAYER AND INSIDE THE LANTERN'S POOL. §17's "12 m" is knowingly given
+   * up here, and the three positions it cost are all worth recording, because two of them look
+   * right on paper and fail for reasons paper does not show.
+   *
+   * THE DEFECT. `Player.SPAWN_OFFSET` is (0, +9) and the spawn yaw faces the plot centre, i.e.
+   * down −Z. The old anchor sat at plot+(4, +12) — 3 m BEHIND the player's shoulder — so at t = 0
+   * not one pier block was on screen. This game has no tutorial text, no objective marker and no
+   * crosshair; the opening frame IS the instruction. A blind playtester read the idle camera sway
+   * as a cutscene and stood still for 40 seconds.
+   *
+   * ATTEMPT 1 — why 12 m is unreachable in front. To sit inside the spawn cone the anchor needs
+   * |dx| <= (9 − dz) · tan(halfFovH); at 4:3 that half-angle is 44°, so a safe 35° gives
+   * |dx| <= 0.70 · (9 − dz). Solved against "12 m from the plot" there is NO solution with
+   * dz > 0 — in front of the player and in frame caps out at 6.3 m from the plot centre.
+   *
+   * ATTEMPT 2 — plot+(9, −8), MEASURED AND REJECTED. 12.04 m from the centre, past the plot
+   * rather than short of it, 27.9° off axis: in frame arithmetically and useless in practice.
+   * Captured at `?shot=opening&build=0`, the five piers projected to px 817–939 at 17.5–21.1 m
+   * and rendered as indistinguishable grey specks. The opening is lit by a hand lantern whose
+   * pool ends around 10–12 m; past that Night 1 is fog and blue-black. FOV was never the binding
+   * constraint. THROW WAS, and only a capture says so.
+   *
+   * ATTEMPT 3 — plot+(3, +5), REJECTED WITHOUT A CAPTURE, because the pile scatter can be solved
+   * exactly. `_spawnPile` seeds `new Rand((hash2(night, 977) * 1e9) | 0)` — note it does NOT mix
+   * in `settings.seed`, so the five pier positions are the same in every run of every save, and
+   * replaying that RNG offline is exact rather than indicative. Replayed against every camera in
+   * `Shots.SHOTS`, plot+(3, 5) drops a pier **1.18 m from the `site-close` lens at 3.9° off
+   * axis** — dead centre of the luminance-gated review shot HANDOFF records as passing at
+   * meanY 0.02712, with a granite block a metre from a lit lantern. Mirroring to the west clears
+   * it: nothing else in the frame changes and the review cameras get their subject back.
+   *
+   * SO: plot+(−2.5, +4). 4.9 m from the spawn eye, 4.72 m from the plot centre; 5/5 piers in the
+   * spawn frame at 16:9 and 4/5 at 4:3; nearest pier 5.89 m from the `site-close` camera and
+   * 7.41 m from `manual`'s; none inside the chalked footprint. The player sees the six marks and
+   * the five stones in one frame and walks past the stones to reach the marks.
+   *
+   * There is no pallet MESH anywhere in the build (`palletA` is a spawn anchor here plus a
+   * last-resort entry in `NightManager.ANCHORS` that nothing reads), so moving it desyncs nothing.
+   *
+   * WHAT THIS COSTS, stated so nobody has to rediscover it: the haul is now 2.5–8.0 m (mean 5.3)
+   * against §17's ~12, so §6.2's class-C "two per trip" economy is a weaker lesson than the
+   * script intends, and §6.2's "the map puts pallets at 12–26 m" no longer holds for pallet A.
+   * That is a deliberate trade of a pacing number for the one frame in the game that has to teach
+   * without words. `palletB` (18 m) and `apron` (26 m) are untouched and still carry the class-D
+   * sills, which is where the 12–26 m rationale actually bites. If the haul has to come back,
+   * the lever is `Player.SPAWN_OFFSET`, not this row: stand the player further back and the cone
+   * widens with the distance.
+   */
+  palletA: ['plot', -2.5, 4],
   palletB: ['plot', -9, 16],           // 18 m
   apron: ['plot', 11, 24],             // 26 m
   woodpile: ['plot', 33, 32],          // 46 m
   stump: ['plot', 29, -5],             // 30 m
   ridge: ['plot', -58, 4],             // 58 m
   sinkProp: ['plot', -48, -35],        // 59 m
-  fallenLog: ['plot', -22, -23],       // 32 m — Night 1's shim, down the slope
+  // 31.6 m NW — the fallen log. Night 1's pier 6, mallet and 1961 plate all lie here (§17 at
+  // 2:40). STORY §4.2 landmark 6 is the single source of truth for the number and says (−26, −18);
+  // `Props.js:3372` builds the log mesh at exactly `S + (−26, −18)`. This row used to say
+  // (−22, −23), which dropped the shim 6.4 m short of the log it is described as lying under.
+  fallenLog: ['plot', -26, -18],
   // ---- dock frame. §3.3 calls these 84-108 m; in the world they hang off Terrain.dock.
   dock: ['dock', 0, 0, 'dock'],
   boathouse: ['dock', -13, 5],
@@ -441,9 +521,41 @@ const PLOT_FALLBACK = Object.freeze({ x: -140, z: 128 });
 const CAMP_FALLBACK = Object.freeze({ x: 124, z: -18 });
 const DOCK_FALLBACK = Object.freeze({ x: 106, z: -72 });
 
-/** §6.9 — the missing-hardware comedy engine, per night. `toolId`s match `Script.beats` triggers. */
+/**
+ * §6.9 — the missing-hardware comedy engine, per night. `toolId`s match `Script.beats` triggers.
+ *
+ * `count` is how many of `partId` are WITHHELD from the pile and re-spawned at `at` (default 1).
+ * It is not the manifest quantity — `Blueprint.SHORTFALLS` uses `count`/`supplied` for that, and
+ * the two tables are deliberately separate schemas.
+ *
+ * `silent: true` records the shortfall (so `tool:found` can fire on pickup) WITHOUT emitting
+ * `tool:missing`. Exactly one row uses it and it is the whole Night 1 joke: §17 at 2:40 and
+ * STORY §6's Night One both turn on the player not knowing the mallet was missing, "because they
+ * had been using their hands." Announcing it at t = 0 — a red manifest row and AudioEngine's
+ * `ui.deny` — is the one thing that cannot happen if that gag is to land.
+ */
 const SHORTFALLS = Object.freeze({
-  1: [{ toolId: 'shim_plate_1961', partId: 'SHIM', at: 'fallenLog', material: 'stone', hintable: false }],
+  /*
+   * NIGHT 1 IS THE PREMISE, STATED THROUGH PLAY. Six chalk marks, five blocks supplied. §17 calls
+   * 2:05 "the core comedy, in the first three minutes"; the whole game is "always one bracket
+   * short" and this is the beat that says so without a word.
+   *
+   * It did not happen: this key held ONE row, a shim, so `_spawnPile` computed 6 − 0 = six piers,
+   * nothing was missing, nothing was hunted, and `tool:missing { toolId: 'pier_06' }` had no
+   * emitter that could ever reach it.
+   *
+   * All three items lie at the same fallen log, 31.6 m NW — STORY §4.2 line 643: "One trip, three
+   * finds, the joke lands three times." Both stone rows are `hintable: false` and `material:
+   * 'stone'`, which §6.9's cue table requires: stone does not move in wind, so Night 1 gets no
+   * audio hint at any point and is found by reading the manual's contour inset. That is the
+   * lesson, and a metallic tick on the mallet would undercut it, so the mallet carries no
+   * material either.
+   */
+  1: [
+    { toolId: 'pier_06', partId: 'PIER', at: 'fallenLog', offset: [-1.05, -0.60], material: 'stone', hintable: false, forSlot: 'P-06' },
+    { toolId: 'shim_plate_1961', partId: 'SHIM', at: 'fallenLog', offset: [-1.60, -1.15], material: 'stone', hintable: false },
+    { toolId: 'mallet', partId: 'MALLET', at: 'fallenLog', offset: [-0.55, -1.25], material: null, hintable: false, silent: true },
+  ],
   2: [{ toolId: 'bracket_H', partId: 'BRACKET', at: 'woodpile', material: 'metal', hintable: true, forSlot: 'B-04' }],
   3: [{ toolId: 'gusset_plate', partId: 'GUSSET', at: 'boathouse', material: 'metal', hintable: true, forSlot: 'TR-06' }],
   4: [{ toolId: 'hinge_set_brass', partId: 'HINGE', at: 'boathouse', material: 'metal', hintable: true, forSlot: 'H-03', count: 3 }],
@@ -783,7 +895,16 @@ export class BuildSystem {
     /** @type {Array} what is in the hands. One class D, or two class C, or four class B. */
     this.heldParts = [];
     this.pocket = { fasteners: 0, shims: 0, tallow: 0, felt: 0, boards: 0 };
-    this.toolBelt = ['mallet', 'wrench', 'brace', 'plumb-bob', 'drawknife', 'handsaw'];
+    /**
+     * The belt you START a night with. `beginNight` rebuilds it from this, minus whatever that
+     * night withholds as a shortfall — which on Night 1 is the mallet (§17 at 2:40).
+     *
+     * Setting the live belt in the constructor and never clearing it was what made the mallet
+     * fake: it was on the belt from frame 1 of every run, so the item the opening is built around
+     * could not be absent and therefore could not be found.
+     */
+    this.toolBeltBase = Object.freeze(['mallet', 'wrench', 'brace', 'plumb-bob', 'drawknife', 'handsaw']);
+    this.toolBelt = [...this.toolBeltBase];
     this.shortfalls = [];
 
     // --- placement
@@ -803,7 +924,9 @@ export class BuildSystem {
     // --- the seating check (§6.5)
     this.seating = {
       active: false, slotId: null, p: 0, lo: 0.725, hi: 0.875, centre: TUNING.bandCentre,
-      showMeter: false, startedAt: 0,
+      // `ramp` and `firstTime` are per-instance: §17's first-time affordance runs the ramp at
+      // 0.6x. HUD reads `active`, `showMeter`, `p`, `lo`, `hi` and needs no change for either.
+      showMeter: false, startedAt: 0, ramp: TUNING.rampSeconds, firstTime: false,
     };
 
     // --- creaks
@@ -1103,6 +1226,7 @@ export class BuildSystem {
     this._weather.rain = def?.weatherProfile?.rain ?? row.rain;
     this._weather.wind = def?.weatherProfile?.wind ?? row.wind;
 
+    this._resetToolBelt(night);
     this._clearParts();
     this._spawnPile(night);
     this._announceShortfalls(night);
@@ -1259,6 +1383,30 @@ export class BuildSystem {
   // ------------------------------------------------------------------------------- the pile
 
   /**
+   * Rebuild the tool belt for the night: the full roll, minus any tool this night withholds as a
+   * shortfall and that the player has not already picked up.
+   *
+   * On Night 1 that is the mallet, and its absence is load-bearing comedy rather than a mechanic
+   * — nothing in `src/` reads `toolBelt`, so the player hammers six piers home with their hands
+   * and never once notices, which is precisely the joke STORY §6 and §17 at 2:40 are telling.
+   * `GameState.resetNight()` clears `toolsFound`, so this is scoped to the night that names the
+   * tool: from Night 2 on it is simply on the belt, because you went and got it.
+   */
+  _resetToolBelt(night) {
+    const belt = this.toolBeltBase.slice();
+    const short = SHORTFALLS[night] || [];
+    const found = this.ctx?.state?.toolsFound;
+    for (let i = 0; i < short.length; i++) {
+      const sh = short[i];
+      if (PART_TYPES[sh.partId]?.type !== 'tool') continue;
+      if (Array.isArray(found) && found.includes(sh.toolId)) continue;
+      const k = belt.indexOf(sh.toolId);
+      if (k >= 0) belt.splice(k, 1);
+    }
+    this.toolBelt = belt;
+  }
+
+  /**
    * Spawn exactly the parts the night's manifest consumes (§11.1: "exactly N required — they are
    * the puzzle"), plus the consumables, minus the shortfall. Positions are seeded per §3.3, so
    * two runs of the same seed put the same beam in the same place.
@@ -1310,13 +1458,24 @@ export class BuildSystem {
       if (ridge) { ridge.length = 5.14; ridge.sawProgress = 0; ridge.sawPasses = TUNING.ridgePasses; }
     }
 
-    // The shortfall items themselves, out where §6.9 puts them.
+    /*
+     * The shortfall items themselves, out where §6.9 puts them.
+     *
+     * An optional `offset: [dx, dz]` places the item DETERMINISTICALLY relative to its anchor,
+     * used where the item has to sit in a specific relationship to a mesh somebody else built.
+     * Night 1's three all lie at the fallen log, and `Props.js:3374` lays that log along
+     * (−0.498, 0, 0.867) with a ~0.54 m trunk radius; the offsets below put them just past its
+     * far flank — "behind a fallen log" (§17 at 2:40), not inside it, and identical every run so
+     * a scripted opening beat stays scripted. Without an offset the old ±2 m scatter applies.
+     */
     for (let i = 0; i < short.length; i++) {
       const sh = short[i];
       if (!sh.partId || !sh.at) continue;
       const anchor = this.map[sh.at] || this.map.woodpile;
       for (let c = 0; c < (sh.count || 1); c++) {
-        const p = this._makePart(sh.partId, anchor[0] + rnd.range(-2, 2), anchor[1] + rnd.range(-2, 2), rnd);
+        const dx = sh.offset ? sh.offset[0] + c * 0.34 : rnd.range(-2, 2);
+        const dz = sh.offset ? sh.offset[1] + c * 0.20 : rnd.range(-2, 2);
+        const p = this._makePart(sh.partId, anchor[0] + dx, anchor[1] + dz, rnd);
         if (p) { p.shortfallOf = sh.toolId; p.isShortfall = true; }
       }
     }
@@ -1352,10 +1511,22 @@ export class BuildSystem {
     return part;
   }
 
-  /** Prefer CabinSite's generator; otherwise build the silhouette here. */
+  /**
+   * Prefer CabinSite's generator; otherwise build the silhouette here.
+   *
+   * ONE EXCEPTION, and it is narrow on purpose. `CabinSite._buildPart` ends in a `default:` case
+   * that emits a plain 0.40 x 0.20 x 0.20 lumber box for any partId it does not know, and it does
+   * not know `MALLET` — so asking it for a tool returns a generic block. §6.1's Tool row reads
+   * "held, distinctive", and the mallet is an object the player has to spot half-buried at a log
+   * in the dark; a nondescript block is the one thing it must not look like. So tools use the
+   * local generator (`_geometryFor`'s `mallet` shape) and everything else still defers.
+   *
+   * DELETE THIS BRANCH the day `CabinSite._buildPart` grows a `case 'MALLET'` — CabinSite owns
+   * the plot's look and should win the moment it has an opinion.
+   */
   _makeMesh(part) {
     const site = this.ctx?.systems?.get?.('CabinSite');
-    if (site && typeof site.partMesh === 'function') {
+    if (site && typeof site.partMesh === 'function' && part.type !== 'tool') {
       try {
         const m = site.partMesh(part.partId, part);
         if (m && m.isObject3D) return m;
@@ -1414,6 +1585,17 @@ export class BuildSystem {
       case 'pipe':
         g = new THREE.CylinderGeometry(dx * 0.5, dx * 0.5, dy, 8, 1);
         break;
+      case 'mallet': {
+        // A haft with a head across it. §6.1's tool row reads "held, distinctive" — the crossed
+        // silhouette is the only T-shape in the part library, which is how it is found half-buried.
+        const haft = new THREE.CylinderGeometry(0.022, 0.026, dy, 6, 1).translate(0, -dy * 0.10, 0);
+        const head = new THREE.CylinderGeometry(dx * 0.42, dx * 0.42, 0.20, 8, 1);
+        head.rotateZ(Math.PI * 0.5);
+        head.translate(0, dy * 0.42, 0);
+        g = mergeGeometries([haft, head]);
+        haft.dispose(); head.dispose();
+        break;
+      }
       case 'pin':
         g = new THREE.CylinderGeometry(dx * 0.5, dx * 0.4, dy, 6, 1);
         break;
@@ -1944,28 +2126,62 @@ export class BuildSystem {
     this.seating.p = 0;
   }
 
+  /**
+   * §17 at 1:02: "The seating check opens automatically **the first time only**, with the band
+   * drawn at 2× width and time at 0.6× for this one instance." — "The torque check, in a safe
+   * room."
+   *
+   * None of that existed. `showMeter` was gated on `difficulty === 'story' || puzzleHints`, and
+   * `Settings.js` defaults those to `standard` / `false`, so on a DEFAULT first playthrough
+   * `HUD.js:1559` drew no arc at all and the player's only feedback on the game's central verb
+   * was a 12-step ratchet pitch. No instance counter existed anywhere: difficulty and
+   * `rampSeconds: 3.00` were read unconditionally.
+   *
+   * The counter lives on `ctx.state.stats` rather than on this instance, because "first time" is
+   * per RUN, not per night: `GameState.reset()` clears stats on a new game, `resetNight()` does
+   * not, and the count rides the save file. It counts CHECKS OPENED, which is what §17 says.
+   *
+   * `hi` is clamped just under 1.0 so the widened band cannot swallow `overTorqueCeiling` (at
+   * `story`, 0.80 + 2 × 0.150 = 1.10 would make the split outcome unreachable) and so the HUD's
+   * `hi` tick, which it places by angle, stays on the arc.
+   */
   _beginSeating(slot, part) {
     const diff = this.ctx?.settings?.get?.('difficulty') ?? 'standard';
-    const h = TUNING.bandHalfWidth[diff] ?? TUNING.bandHalfWidth.standard;
+    const stats = this.ctx?.state?.stats ?? null;
+    const first = ((stats?.seatingChecks) | 0) === 0;
+    if (stats) stats.seatingChecks = ((stats.seatingChecks) | 0) + 1;
+
+    const h = (TUNING.bandHalfWidth[diff] ?? TUNING.bandHalfWidth.standard)
+      * (first ? TUNING.firstSeatBandScale : 1);
     const s = this.seating;
     s.active = true;
     s.slotId = slot.id;
     s.partId = part.id;
     s.p = 0;
     s.centre = TUNING.bandCentre;
-    s.lo = TUNING.bandCentre - h;
-    s.hi = TUNING.bandCentre + h;
-    s.showMeter = diff === 'story' || !!this.ctx?.settings?.get?.('puzzleHints');
+    s.lo = clamp01(TUNING.bandCentre - h);
+    s.hi = Math.min(TUNING.bandCentre + h, 0.99);
+    s.ramp = TUNING.rampSeconds * (first ? TUNING.firstSeatRampScale : 1);
+    s.firstTime = first;
+    // The one instance the game teaches on is visible whatever the difficulty. After that the
+    // arc is back to being an accessibility affordance and the ratchet is the channel.
+    s.showMeter = first || diff === 'story' || !!this.ctx?.settings?.get?.('puzzleHints');
     s.startedAt = this._lmbDownAt > 0 ? this._lmbDownAt : now();
     this._sfx('screw.torque', slot, 0.5, 1.0);
     return true;
+  }
+
+  /** The ramp for the check now open. Per-instance since §17's first-time affordance shortens it. */
+  _ramp() {
+    const r = this.seating.ramp;
+    return Number.isFinite(r) && r > 0.05 ? r : TUNING.rampSeconds;
   }
 
   _updateSeating() {
     const s = this.seating;
     if (!s.active) return;
     const t = ((this._lmb ? now() : this._lmbUpAt) - s.startedAt) / 1000;
-    s.p = clamp01(t / TUNING.rampSeconds);
+    s.p = clamp01(t / this._ramp());
     // The ratchet climbs with p. This is the whole feedback channel above `story` difficulty.
     if (s.p > 0 && Math.floor(s.p * 12) !== this._lastRatchet) {
       this._lastRatchet = Math.floor(s.p * 12);
@@ -1982,7 +2198,7 @@ export class BuildSystem {
     const part = this.heldParts.find((p) => p.id === s.partId) ?? this.heldPart;
     // Release time comes from the mouseup EVENT, not this frame. §4.1's 120 ms budget.
     const t = ((this._lmbUpAt || now()) - s.startedAt) / 1000;
-    const p = clamp01(t / TUNING.rampSeconds);
+    const p = clamp01(t / this._ramp());
     s.active = false;
     s.p = p;
     if (!slot || !part) return;
@@ -2078,6 +2294,13 @@ export class BuildSystem {
       } else if (part.type === 'shim') this.pocket.shims++;
       else if (part.type === 'tallow') this.pocket.tallow++;
       else if (part.type === 'felt') this.pocket.felt++;
+      else if (part.type === 'tool') {
+        // §6.2: "The tool roll is not a carry slot." §17 at 2:48: "The mallet goes to the TOOL
+        // BELT, not a carry slot." Class T is already `slots: 0`, so it lands here with the
+        // pocket consumables and simply joins the belt.
+        const id = part.shortfallOf ?? String(part.partId).toLowerCase();
+        if (!this.toolBelt.includes(id)) this.toolBelt.push(id);
+      }
       this._consume(part);
       this._onPickup(part);
       return true;
@@ -3254,11 +3477,16 @@ export class BuildSystem {
         material: d.material,          // drives §6.9's material-appropriate 1.8 s cue
         hintable: !!d.hintable,        // false = it is not in the world and never was
         forSlot: d.forSlot ?? null,
+        silent: !!d.silent,            // recorded, but never announced — see SHORTFALLS' header
         found: false,
         announcedAt: this._t,
       };
       this.shortfalls.push(rec);
-      this.bus?.emit('tool:missing', { toolId: d.toolId });
+      // A `silent` row still lives in `this.shortfalls`, so `_onPickup` can still ring the bell
+      // and fire `tool:found` — it is only the t = 0 announcement that is withheld. The mallet is
+      // the one row that uses it: a red manifest entry for a tool you were not told about is the
+      // one thing that would spoil §17's 2:40.
+      if (!d.silent) this.bus?.emit('tool:missing', { toolId: d.toolId });
     }
   }
 
