@@ -28,7 +28,7 @@ real and named below.
 
 ---
 
-## THE MOST IMPORTANT THING: measurement on this project has lied eight times
+## THE MOST IMPORTANT THING: measurement on this project has lied nine times
 
 Every one of these produced *confident, precise, wrong numbers*. Several sent real work backwards;
 one caused a committed regression. Two were inside the tool built to prevent the others.
@@ -73,6 +73,14 @@ one caused a committed regression. Two were inside the tool built to prevent the
    events carrying the correct `code` on `document`, or drive the system directly — and **say
    which method you used for every result you report.** The agents that got real playtests done
    here (the P-01 run, the pry loop) used trusted CDP `Input.dispatchKeyEvent`.
+
+9. **`?shot=opening` was never showing the opening.** `CabinSite._applyPreview()` defaulted that
+   framing to `build=4`, so the one canonical shot documented as *"Night 1 as the player first
+   sees it"* has always rendered a **roofed cabin standing on the six chalk marks the shot exists
+   to show.** Every visual review of the game's opening frame on this project — every score, every
+   comparison against the key art — was looking at a built cabin. It is how the chalk being
+   *darker than the ground it is drawn on* survived months of review. *Fixed: defaults to
+   `build=0`.* **If you hold an `opening` baseline from before this, it is void.**
 
 ### The rules that came out of it
 
