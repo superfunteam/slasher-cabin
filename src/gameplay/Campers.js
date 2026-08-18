@@ -33,6 +33,8 @@
  *   camp.spawnRoster(night)                 rebuild the roster (night:begin does this for you)
  *   camp.setScripted(id, opts)              NightManager takes control: { path, look, exit, hold }
  *   camp.releaseScripted(id)
+ *   camp.investigate(id, pos, opts)         §17's authored beats: "he heard that." Starts a real
+ *                                           Search at a §9.8 error-disc guess. Returns bool.
  *   camp.remove(id, reason)                 the grab, §13.4. Returns false for essential campers.
  *   camp.canGrab(id)                        the three §13.3 conditions, evaluated honestly
  *   camp.registerBody(object3D, concealment)  §13.5 discovery participates from this call on
@@ -146,6 +148,16 @@ export const CAMPER_TUNING = {
   formingAt: 0.35,
   buildingAt: 0.75,
   holdStillAt: 0.75,            // "camper stops walking"
+
+  // --- §12.2 / §17 t=2:55 — THE TUTORIAL NIGHT IS THEATRE, AND THIS IS WHAT MAKES IT TRUE.
+  // NightManager has written `state.tutorialSafe = (night === 1)` since it was first authored and
+  // NOTHING has ever read it, so §12.2's "this is theatre and it is safe" was a comment rather
+  // than a guarantee: a player who still had lamp fuel at 4:39 could be detected, Alerted,
+  // reported and lose Night 1. The ceiling sits ABOVE `buildingAt` on purpose — he still stops,
+  // still holds the torch on you, still searches, still terrifies. He simply cannot complete the
+  // meter, so `_meterEvents`' `detection >= 1.0` branch — the only door into Alerted, and from
+  // there into the report ladder — is unreachable on the tutorial night and on no other night.
+  tutorialDetectionCeil: 0.92,
 
   // --- FSM timers, §9.7
   noticingTime: 4.0,
@@ -700,6 +712,9 @@ export class Campers {
     this._shareAt = -1e3;
     this._pairAt = -1e3;
     this._flashPrev = 0;
+    /** §12.2 — 1.0 on every night except the tutorial. Refreshed once per update(), never per agent. */
+    this._detectionCeil = 1.0;
+    this._tutorialSafe = false;
     this._voCampAt = -1e3;
     this._spottedActive = false;
     this._routeTaken = new Map();
@@ -991,6 +1006,10 @@ export class Campers {
     const d = clamp(dt || 0, 0, 0.1);
     this._t += d;
     const now = this._t;
+
+    // §12.2's theatre guarantee, read once a frame rather than once per agent per sense.
+    this._tutorialSafe = this.ctx?.state?.tutorialSafe === true;
+    this._detectionCeil = this._tutorialSafe ? CAMPER_TUNING.tutorialDetectionCeil : 1.0;
 
     if (--this._resolveRetry <= 0) { this._resolveRetry = 90; this._resolveSystems(); }
 
@@ -1335,7 +1354,8 @@ export class Campers {
 
     if (rate > 0) {
       a.graceT = 0;
-      a.detection = clamp01(a.detection + rate * dt);
+      // The ceiling is 1.0 on every night but the tutorial (§12.2). See `tutorialDetectionCeil`.
+      a.detection = Math.min(this._detectionCeil, clamp01(a.detection + rate * dt));
       if (a.detection > a.detectionPeak) { a.detectionPeak = a.detection; a.peakAt = now; }
     } else {
       a.graceT += dt;
@@ -1784,6 +1804,23 @@ export class Campers {
 
   _beginAlert(a, now) {
     if (a.scripted) return;
+
+    // §12.2 — the tutorial night has no Alerted state, so it has no report, no rung and no
+    // `night:failed`. The detection ceiling above already makes the meter route unreachable; this
+    // is the belt to that pair of braces, because Alerted has three other doors (a found body,
+    // a report that lost its plan, a shared alarm) and one of them opening on Night 1 would end
+    // a run the design promises cannot be lost. He searches instead: visibly rattled, harmless.
+    if (this._tutorialSafe) {
+      Log.once('camp:tutorialsafe', 'Campers: Night 1 is theatre (§12.2) — Alerted refused; searching instead.');
+      if (a.state !== 'Searching') {
+        // Without a noise to go to, `_beginSearch` would walk him to a stale point (worst case
+        // the world origin). Search where he is standing.
+        if (!a.hasNoise) { a.lastNoisePos.copy(a.position); a.lastNoiseAt = now; a.hasNoise = true; }
+        this._beginSearch(a, now);
+      }
+      return;
+    }
+
     a.setState('Alerted', now);
     a.hasGoal = false;
     a.pathLen = 0;
@@ -2119,6 +2156,71 @@ export class Campers {
       this.agents.push(a);
     }
     return true;
+  }
+
+  /**
+   * AUTHORED INVESTIGATION — "that person heard that, right now." The director's verb, for the
+   * beats GAME_DESIGN scripts by hand rather than leaving to the noise field.
+   *
+   * WHY THIS EXISTS AND WHY IT IS NOT A CHEAT. §17 t=4:39 is the thesis of the game: the first
+   * creak, and "the torch turns toward the plot and starts walking." Walking is `Searching`, and
+   * `_noiseHit` only escalates to Searching above `0.35 - 0.12*(curiosity - 0.5)` — 0.368 for
+   * Dale. A severity-0.45 creak cannot reach 0.368 beyond about 4 m, and its audible radius at a
+   * counselor's 0.11 threshold is 21.0 m in open air, so no creak the build system can produce
+   * makes a counselor WALK from any distance the player can see him at. One creak buys `Curious`
+   * — a turn and a stare — and nothing else, forever. §12.2 says the Night 1 creak "is scripted";
+   * this is the other half of that sentence.
+   *
+   * It changes no behaviour: the guess point comes from NoiseSystem's own §9.8 error disc, and
+   * everything after the call is the ordinary `_beginSearch` the senses would have run — travel,
+   * look around, check cover, widen, shrug, Idle. `setScripted` is deliberately NOT the tool for
+   * this: `_tickTorch` treats 'Scripted' exactly like 'Idle' (the calm ±34° sweep, capped at
+   * 0.90 rad/s), and the whole visual tell of §17 is the beam going to `sweepSearchRate` 3.60.
+   *
+   * @param {string} id
+   * @param {THREE.Vector3} position where the sound actually came from
+   * @param {object} [opts] `heard` 0..1 (drives the §9.8 error radius; defaults to the camper's
+   *                        own threshold), `errorRadius` to override that radius in metres,
+   *                        `say` true to let this file pick a 'heard' line. It defaults to FALSE:
+   *                        an authored beat names its own line (§17 says DAL_HEAR_01, not "a
+   *                        line of that category, about 40% of the time"), and `_say`'s camp and
+   *                        agent gaps would otherwise stack a second voice on top of it.
+   * @returns {boolean} true if he is now Searching.
+   */
+  investigate(id, position, opts = null) {
+    const a = this.agent(id);
+    if (!a?.alive || !position || !isNum(position.x)) return false;
+    // Somebody already past Searching is not made calmer by being told again.
+    if (a.state === 'Alerted' || a.state === 'Panic' || a.state === 'Reporting') return false;
+    if (a.scripted) this.releaseScripted(id);
+
+    const now = this._t;
+    const heard = clamp01(isNum(opts?.heard) ? opts.heard : a.hearingThreshold);
+
+    // §9.8 owns the error radius, so an authored investigation guesses exactly as wrongly as a
+    // heard one does. errorRadiusFor(0.45) = 11.7 m, which is §17's "a point 12 m off".
+    const ns = this._noise;
+    if (isNum(opts?.errorRadius)) {
+      const ang = a.rand.next() * Math.PI * 2;
+      const rad = Math.max(0, opts.errorRadius) * Math.sqrt(a.rand.next());
+      a.lastNoisePos.set(position.x + Math.cos(ang) * rad, position.y, position.z + Math.sin(ang) * rad);
+      a.lastNoisePos.y = this._groundAt(a.lastNoisePos.x, a.lastNoisePos.z);
+    } else if (ns?.investigationPoint) {
+      ns.investigationPoint(position, heard, a.rand, a.lastNoisePos, a.index);
+    } else {
+      a.lastNoisePos.copy(position);
+    }
+
+    a.lastNoiseAt = now;
+    a.lastNoiseHeard = heard;
+    a.hasNoise = true;
+    a.hitTimes[a.hitCount % 2] = now;
+    a.hitCount++;
+    if (a.state === 'Searching') { a.searchStage = 0; a.stateT = 0; }
+    else { this._beginSearch(a, now); this.noiseInvestigations++; }
+    if (opts?.say === true) this._say(a, 'heard', now, 0.5);
+    this._checkRung1();
+    return a.state === 'Searching';
   }
 
   releaseScripted(id) {

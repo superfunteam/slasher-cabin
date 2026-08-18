@@ -151,6 +151,19 @@ export const TUNING = Object.freeze({
   // --- the first five minutes (§17). Night 1 only; every other night is 0.
   openingHoldSeconds: 300.0, // s — the rubber band stays off the scripted opening (§17 t=4:52)
 
+  // --- §17 t=2:55 and t=4:39 — THE THESIS BEAT, AUTHORED. See `_daleWalksIn` / `_firstCreak`.
+  daleWalkAt: 10.0,          // s — he sets off after §17 t=0:07's laugh, while still "far off"
+  daleStagingMetres: 90.0,   // m from the plot — the closest point the navmesh can actually path
+  daleStandoffMetres: 46.0,  // m — §17 t=2:55's "crosses the return path at 45 m"
+  daleApproachDeg: 18.0,     // ° swung off the plot→camp bearing so the last leg crosses the view
+  daleApproachSpeed: 1.40,   // m/s — a counselor with somewhere to be. walkSpeed is 1.10.
+  firstCreakAt: 279.0,       // s — §17 t=4:39
+  firstCreakSeverity: 0.45,  // §17. BuildSystem's radius curve is 14 + 46*severity = 34.7 m.
+  firstCreakRadius: 34.7,
+  firstCreakRange: 55.0,     // m — hold the beat until he is near enough for the search to land
+  firstCreakLatest: 180.0,   // s past `firstCreakAt` before the creak fires regardless
+  creakReactionDelay: 0.90,  // s — creak, a beat, "Huh.", the torch comes round. Loon at +1.2.
+
   // --- night-end (§5.1 "Dawn: No clock, 0:50 card")
   closingImageHold: 6.0,     // s — the last stage lands, then the closing image, then the card
   nightEndAuto: 50.0,        // s — if Menu is absent, advance ourselves rather than stalling
@@ -374,6 +387,9 @@ export class NightManager {
     this._scripted = null;      // { id, seconds, t }
     this._onboard = [];         // night 1 only; [{ t, done, fn }]
     this._loonAt = -1;
+    this._firstCreakDone = false;   // §17 t=4:39 fires exactly once a night
+    this._authoredCreak = false;    // true only inside the authored emit, so the loon knows
+    this._daleHearAt = -1;          // s — when the man reacts to the creak we just made
 
     // --- save -----------------------------------------------------------------------------
     this._autosaveT = 0;
@@ -571,6 +587,9 @@ export class NightManager {
     this._chaseClear = 0;
     this._scripted = null;
     this._loonAt = -1;
+    this._firstCreakDone = false;
+    this._authoredCreak = false;
+    this._daleHearAt = -1;
     this._beatsFired = 0;
     this._scoreAt = -1e9;
     this._resetScore();
@@ -1914,9 +1933,23 @@ export class NightManager {
 
     // t=0:07 — one distant laugh, 140 m NE, occluded. The world before the interface.
     push(6.0, () => this._sayAt('DAL_IDLE_01', 140, 0.7));
+    // t=0:10 — he sets off. It takes him about three minutes to get where §17 needs him, which
+    // is why this is here and not at 2:55. He is still "far off" for §17 t=0:34.
+    push(TUNING.daleWalkAt, () => this._daleWalksIn());
     // Around pier 3-4 the player starts hammering casually. A distant voice reacts. Nothing else
     // happens. The hammering is heard: bank it.
     push(90.0, () => this._sayAt('DAL_HEAR_01', 150, 0.6), () => this._hammerCount >= 6);
+    // t=4:39 — THE FIRST CREAK, and the make-or-break moment of the whole game. Gated on the
+    // build having reached the sill beams (§17 t=4:30 is where the rotated beam goes in) and on
+    // Dale actually being close enough for the search that follows to arrive — a search is 30 s
+    // long and he covers ~2.16 m/s, so from beyond ~55 m he would give up before he got there
+    // and the player would see a torch turn and then nothing. An unmet gate just defers the
+    // step; `_updateOnboarding` re-tests it every frame.
+    push(TUNING.firstCreakAt, () => this._firstCreak(),
+      () => this.stage >= 2 && this._daleIsInPosition());
+    // ...but the sound itself is the thesis and must happen even if the player is slow or he is
+    // still walking. `_firstCreak` is idempotent, so this is a backstop, not a second creak.
+    push(TUNING.firstCreakAt + TUNING.firstCreakLatest, () => this._firstCreak(), null);
     // The first class-D lift, then the first creak, are BuildSystem's. We answer the creak.
     // t=4:52 — every verb in §9.6 is now motivated, so the director stops holding the floor.
     // This step used to only set a story flag nothing reads, which made it a no-op; the floor
@@ -1936,6 +1969,10 @@ export class NightManager {
       // A loon answers the first creak from across the water, on the same fundamental.
       this._emitAt('audio:sfx', 'loon_answer', 'lake', 0.75);
     }
+    if (this._daleHearAt >= 0 && this._buildSeconds >= this._daleHearAt) {
+      this._daleHearAt = -1;
+      this._daleAnswersTheCreak();
+    }
     if (!this._onboard.length) return;
     for (const e of this._onboard) {
       if (e.done || this._buildSeconds < e.t) continue;
@@ -1950,11 +1987,140 @@ export class NightManager {
     if (!this._anchor('plot', _v0)) _v0.set(0, 0, 0);
     // North-east of the plot, per §17.
     _v1.set(_v0.x + metres * 0.707, _v0.y, _v0.z - metres * 0.707);
+    this._sayAtPoint(id, _v1, volume);
+  }
+
+  /** The same, but from a real position — a person the player can see, not a bearing. */
+  _sayAtPoint(id, pos, volume) {
     const vb = this._vo();
     if (vb && typeof vb.say === 'function') {
-      try { vb.say(id, _v1, { volume }); return; } catch { /* fall through */ }
+      try { vb.say(id, pos, { volume }); return; } catch { /* fall through */ }
     }
-    this._emit('audio:vo', { id, position: _v1.clone() });
+    this._emit('audio:vo', { id, position: pos.clone() });
+  }
+
+  // -------------------------------------------------------------- §17's thesis beat, authored
+  /**
+   * §17 t=2:55: "Dale's loop crosses the return path at 45 m. The player sees the torch."
+   *
+   * MEASURED, this never happened. Night 1's roster is `dale` alone, he spawns at the camp, and
+   * the camp resolves 302 m from the plot on the terrain the game actually generates (Navmesh's
+   * own header documents that divergence from GAME_DESIGN §3.3). Every live route's closest
+   * approach on Night 1 is 183 m, and the two waypoints authored to come nearer — `plot-approach`
+   * at 26 m and `plot-watch` at 12 m — are silently dropped by `_validateWaypoint`, because the
+   * build site is a 491-cell island in the navmesh (the forest around it rasterises solid) while
+   * the main region is elsewhere. So he was not merely inaudible at 4:39. He was off-screen, and
+   * had been all night.
+   *
+   * This walks him in on the director's own lane. Two legs: the first ends at the closest point
+   * the navmesh can genuinely path to, the second crosses the last stretch on steering alone,
+   * ending at §17's 46 m — outside a counselor's 24 m sight range, so proximity costs the player
+   * nothing until the creak. While `Scripted` he cannot take a noise hit or alert; `_tickTorch`
+   * gives him the calm ±34° sweep, which is exactly the read §17 wants here.
+   */
+  _daleWalksIn() {
+    const c = this._campers();
+    if (typeof c?.setScripted !== 'function') return;
+    if (!c.agent?.('dale')) return;
+    if (!this._anchor('plot', _v0) || !this._anchor('camp', _v1)) return;
+
+    let bx = _v1.x - _v0.x, bz = _v1.z - _v0.z;
+    const len = Math.hypot(bx, bz);
+    if (!(len > TUNING.daleStagingMetres)) return;    // already close; nothing to walk
+    bx /= len; bz /= len;
+
+    const staging = this._pointFromPlot(_v0, bx, bz, TUNING.daleStagingMetres, 0);
+    const standoff = this._pointFromPlot(_v0, bx, bz, TUNING.daleStandoffMetres, TUNING.daleApproachDeg);
+
+    const ok = c.setScripted('dale', {
+      path: [staging, standoff],
+      speed: TUNING.daleApproachSpeed,
+      look: _v0.clone(),
+      hold: 0,                       // he stays put until the creak releases him
+      exit: 'Idle',
+    });
+    Log.debug(`§17 t=2:55 — dale walks in toward the plot (${ok ? 'scripted' : 'refused'}), `
+      + `staging ${TUNING.daleStagingMetres} m, standoff ${TUNING.daleStandoffMetres} m.`);
+  }
+
+  /** A world point `metres` from `plot`, on the given unit bearing swung by `deg`. Allocates. */
+  _pointFromPlot(plot, bx, bz, metres, deg) {
+    const r = deg * Math.PI / 180;
+    const cs = Math.cos(r), sn = Math.sin(r);
+    const x = plot.x + (bx * cs - bz * sn) * metres;
+    const z = plot.z + (bx * sn + bz * cs) * metres;
+    const terr = this._terrain();
+    let y = plot.y;
+    if (typeof terr?.heightAt === 'function') { try { y = finite(terr.heightAt(x, z), plot.y); } catch { y = plot.y; } }
+    return new THREE.Vector3(x, y, z);
+  }
+
+  _daleIsInPosition() {
+    const a = this._campers()?.agent?.('dale');
+    if (!a?.alive || !this._anchor('plot', _v0)) return false;
+    return Math.hypot(a.position.x - _v0.x, a.position.z - _v0.z) <= TUNING.firstCreakRange;
+  }
+
+  /**
+   * §17 t=4:39 — "The first creak. Severity ~0.45, radius 35 m. A long, wet groan."
+   *
+   * §12.2 says outright that "the one creak in the night is scripted", and §7.1's own severity
+   * formula agrees: `0.25 + 0.55w + 0.30s + 0.20*min(L,1.5)` only reaches 0.45 at w = s = 0,
+   * which is a join whose creak probability is zero. The 4:39 creak cannot be emergent. So the
+   * director makes it, using the canonical trio `BuildSystem._fireCreak` emits, in §7.1's fixed
+   * order, at the plot. No new event names: `build:creak` is normally BuildSystem's, and this is
+   * the one authored exception, flagged in the log so a reader of the trace can tell them apart.
+   */
+  _firstCreak() {
+    if (this._firstCreakDone) return;
+    if (!this._anchor('plot', _v0)) return;
+    this._firstCreakDone = true;
+
+    const severity = TUNING.firstCreakSeverity;
+    const pos = _v0.clone();
+    this._authoredCreak = true;
+    try {
+      this._emit('build:creak', { position: pos, severity });
+      this._emit('noise:emit', {
+        position: pos.clone(), radius: TUNING.firstCreakRadius, intensity: severity, kind: 'creak',
+      });
+      this._emit('audio:sfx', {
+        id: severity > 0.7 ? 'creak_groan' : 'creak_tick',
+        position: pos.clone(), rate: 0.8 + 0.5 * (1 - severity),
+      });
+    } finally {
+      this._authoredCreak = false;
+    }
+
+    this._daleHearAt = this._buildSeconds + TUNING.creakReactionDelay;
+    Log.debug(`§17 t=4:39 — the first creak, authored. severity ${severity}, radius ${TUNING.firstCreakRadius} m.`);
+  }
+
+  /**
+   * "Then DAL_HEAR_01 again — and this time the torch turns toward the plot and starts walking."
+   *
+   * The line comes from the man, not from `_sayAt`'s synthetic bearing 150 m north-east, because
+   * the player is looking straight at him. Then `Campers.investigate` starts a real Search:
+   * everything after this call is the ordinary §9.7 machine — travel to a guess ~11.7 m off (§9.8
+   * error radius at heard 0.45, which is §17's "a point 12 m off"), look around, check cover,
+   * widen, shrug at 30 s, Idle. Nothing here can reach the player: Alerted is refused all night
+   * by `state.tutorialSafe` (§12.2), which Campers now reads.
+   */
+  _daleAnswersTheCreak() {
+    const c = this._campers();
+    const a = c?.agent?.('dale');
+    if (!a?.alive) return;
+
+    try { c.releaseScripted?.('dale'); } catch (e) { Log.once('nm:release', 'NightManager: releaseScripted failed', e); }
+    this._sayAtPoint('DAL_HEAR_01', a.position, 0.85);
+
+    let searching = false;
+    if (typeof c.investigate === 'function' && this._anchor('plot', _v0)) {
+      searching = c.investigate('dale', _v0, { heard: TUNING.firstCreakSeverity }) === true;
+    }
+    const d = this._anchor('plot', _v1) ? Math.hypot(a.position.x - _v1.x, a.position.z - _v1.z) : -1;
+    Log.debug(`§17 t=4:39 — dale answers: state ${a.state}, ${d.toFixed(1)} m from the plot `
+      + `(${searching ? 'searching' : 'NOT searching'}).`);
   }
 
   _emitAt(event, id, anchorName, volume) {
@@ -2009,7 +2175,11 @@ export class NightManager {
       case 'build:creak': {
         this._creaksThisNight++;
         this._creakMemory = clamp01(this._creakMemory + 1 / TUNING.creakWeightFull);
-        if (this.night === 1 && this._loonAt < 0 && this._creaksThisNight === 1) {
+        // §12.2: "a loon answers it from across the water." The answer belongs to the AUTHORED
+        // creak, so an emergent one earlier in the night cannot spend it — `_creaksThisNight === 1`
+        // alone would hand the loon to whichever creak happened to be first.
+        if (this.night === 1 && this._loonAt < 0
+          && (this._authoredCreak || this._creaksThisNight === 1)) {
           this._loonAt = this._buildSeconds + 1.2;   // §17 t=4:39, and the loon answers it
         }
         break;
