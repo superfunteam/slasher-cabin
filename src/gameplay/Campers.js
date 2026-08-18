@@ -148,16 +148,43 @@ export const CAMPER_TUNING = {
   formingAt: 0.35,
   buildingAt: 0.75,
   holdStillAt: 0.75,            // "camper stops walking"
+  // How far the meter must climb before `player:spotted` is published again for the same camper.
+  // See `_emitSpotted` — without it the forming band re-emitted at frame rate.
+  spottedRepublishStep: 0.10,
 
   // --- §12.2 / §17 t=2:55 — THE TUTORIAL NIGHT IS THEATRE, AND THIS IS WHAT MAKES IT TRUE.
   // NightManager has written `state.tutorialSafe = (night === 1)` since it was first authored and
   // NOTHING has ever read it, so §12.2's "this is theatre and it is safe" was a comment rather
   // than a guarantee: a player who still had lamp fuel at 4:39 could be detected, Alerted,
-  // reported and lose Night 1. The ceiling sits ABOVE `buildingAt` on purpose — he still stops,
-  // still holds the torch on you, still searches, still terrifies. He simply cannot complete the
-  // meter, so `_meterEvents`' `detection >= 1.0` branch — the only door into Alerted, and from
-  // there into the report ladder — is unreachable on the tutorial night and on no other night.
-  tutorialDetectionCeil: 0.92,
+  // reported and lose Night 1. The ceiling is what makes it true.
+  //
+  // THE VALUE IS §17's OWN NUMBER, not a chosen one. §17 t=3:20: "If they don't [crouch]:
+  // detection reaches ~0.30 and decays." That is the design telling us what the tutorial night's
+  // detection meter is allowed to do, and 0.30 satisfies four separate constraints at once:
+  //   < formingAt 0.35    `_meterEvents` never emits `player:spotted` on Night 1, so
+  //                       `NightManager.notifySpotted` -> `_escalate('rung2')` -> `enterChase`,
+  //                       `Postprocessing.setPanic(1)` and the AudioEngine held-breath mix are all
+  //                       unreachable. The Alerted door was already shut; this shuts the OTHER one.
+  //   < holdStillAt 0.75  `_tickSearch`'s "camper stops walking" early-out cannot latch, so §17
+  //                       t=4:39's "and starts walking" actually happens. The previous 0.92 ceiling
+  //                       froze him solid for the whole 30 s search — the lamp's own flame percept
+  //                       (§9.4, range 180 m) pins detection at the ceiling from 46 m in ~6 s.
+  //   < 1.00              `detection >= 1.0` -> `_fireSpotted` -> `_beginAlert` stays unreachable.
+  //   0.62 below NightManager's TUNING.chaseEnterDetection 0.92, which the previous value was
+  //   BIT-IDENTICAL to — pinning `detection >= chaseEnterDetection` permanently TRUE on Night 1.
+  //   A ceiling must never sit on a threshold; this one is clear of every threshold in the file.
+  // He still stops, still swings the torch onto you, still searches, still terrifies. The HUD's
+  // "forming" smear (§9.3, 0.01-0.35, 8% opacity, no icon, no number) is exactly the feedback
+  // §17 t=3:20 describes, and it is the most the tutorial night is ever allowed to show.
+  tutorialDetectionCeil: 0.30,
+
+  // §12.2 "He CANNOT reach the plot." The detection ceiling makes him harmless; this makes him
+  // unable to stand on the player, which is a different promise and needs its own number. Only
+  // Searching can carry a camper toward the player on Night 1 (patrol routes hold at 183 m,
+  // `plotWatchMinNight` is 2, and the scripted walk-in ends at the standoff), so the floor is
+  // enforced there. 6.0 m is §9.7's own "the player is on top of him" radius — the distance that
+  // would trip Alerted -> Panic on any other night.
+  tutorialKeepOut: 6.0,
 
   // --- FSM timers, §9.7
   noticingTime: 4.0,
@@ -509,6 +536,8 @@ export class CamperAgent {
     this.fovSens = 0;
     this.flashExposeUntil = -1e3;
     this.spottedFired = false;
+    /** Level last published on `player:spotted`. -1 = nothing published. See `_emitSpotted`. */
+    this.spottedLevel = -1;
     this.reportedThisNight = false;
 
     // Hearing / knowledge
@@ -637,6 +666,7 @@ export class CamperAgent {
   resetForNight() {
     this.detection = 0; this.detectionPeak = 0; this.peakAt = -1e3; this.graceT = 0;
     this.rate = 0; this.seesPlayer = false; this.spottedFired = false;
+    this.spottedLevel = -1;
     this.reportedThisNight = false; this.report = null; this.interceptT = 0;
     this.hasNoise = false; this.lastSeq = -1; this.hitCount = 0; this.investigations = 0;
     this.hitTimes[0] = -1e3; this.hitTimes[1] = -1e3;
@@ -1365,7 +1395,7 @@ export class Campers {
         const remembered = (now - a.peakAt < T.peakMemory) ? T.peakFloorMul * a.detectionPeak : 0;
         if (next < remembered) next = remembered;
         a.detection = Math.max(0, next);
-        if (a.detection <= 0) { a.detectionPeak = 0; a.spottedFired = false; }
+        if (a.detection <= 0) { a.detectionPeak = 0; a.spottedFired = false; a.spottedLevel = -1; }
       }
     }
   }
@@ -1420,7 +1450,7 @@ export class Campers {
 
     if (escalate) {
       if (a.state !== 'Searching') { this._beginSearch(a, now); this.noiseInvestigations++; }
-      else { a.searchStage = 0; a.stateT = 0; }        // a fresh hit restarts the sweep
+      else this._restartSweep(a);                      // a fresh hit restarts the sweep, not the clock
       this._say(a, 'heard', now, 0.5);
     } else if (a.state === 'Idle' || a.state === 'Noticing') {
       a.setState('Curious', now);
@@ -1617,13 +1647,48 @@ export class Campers {
     }
   }
 
+  /**
+   * `player:spotted { camper, level }` — ARCHITECTURE §5's payload, GAME_DESIGN §9.3's meaning.
+   *
+   * TWO RULES LIVE HERE, both measured rather than assumed.
+   *
+   * 1. NIGHT 1 DOES NOT PUBLISH IT AT ALL. `tutorialDetectionCeil` 0.30 already sits below
+   *    `formingAt`, so on the authored path this branch is never reached on the tutorial night —
+   *    but `_fireSpotted` and a future caller are other doors, and §12.2's promise is worth a
+   *    lock rather than an arithmetic coincidence. `NightManager.notifySpotted` routes this event
+   *    straight into `_escalate('rung2')` and `enterChase('spotted')`, and `Postprocessing` binds
+   *    it to `setPanic(1)` with no level test at all. Night 1 is theatre (§12.2); theatre has no
+   *    chase phase.
+   *
+   * 2. IT IS EDGE-TRIGGERED, NOT LEVEL-TRIGGERED. `_meterEvents`' forming branch (0.35..0.75) has
+   *    no latch — `spottedFired` is only ever set at detection 1.0 — so it re-emitted on EVERY
+   *    frame the meter spent in that band: ~60 Hz of `player:spotted` into a director that counts
+   *    `_spottedThisNight++`, a post chain that re-arms full panic, and a Player that re-spikes
+   *    fear. Publishing only on a material rise (or a band change) preserves every listener's
+   *    behaviour — HUD's arc is driven by `setDetection` every frame regardless, and AudioEngine
+   *    latches its own held-breath mix — and costs the bus nothing.
+   */
   _emitSpotted(a, level) {
+    if (this._tutorialSafe) return;
+    const lvl = clamp01(level);
+    if (a.spottedLevel >= 0 && lvl < a.spottedLevel + CAMPER_TUNING.spottedRepublishStep
+      && !(lvl >= 1 && a.spottedLevel < 1)) return;
+    a.spottedLevel = lvl;
     this._spottedActive = true;
-    this.bus?.emit?.('player:spotted', { camper: a, level: clamp01(level) });
+    this.bus?.emit?.('player:spotted', { camper: a, level: lvl });
   }
 
   _fireSpotted(a, now) {
     a.spottedFired = true;
+    // §12.2. The ceiling already makes `detection >= 1.0` unreachable on Night 1 and `_beginAlert`
+    // refuses the other doors, so this should never run there — but it writes `state.spotted`
+    // (which makes `NightManager._maxDetection()` return 1 until `player:hidden`) and arms rung 2
+    // with a camp-wide suspicion of +0.25. Those are the two things §12.2 promises cannot happen
+    // on the tutorial night, so they get the guard rather than relying on arithmetic upstream.
+    if (this._tutorialSafe) {
+      Log.once('camp:tutorialspot', 'Campers: Night 1 is theatre (§12.2) — no sighting, no rung 2.');
+      return;
+    }
     this._emitSpotted(a, 1.0);
     if (this.ctx?.state) this.ctx.state.spotted = true;
     this._say(a, 'call', now, 1.0);
@@ -1681,6 +1746,24 @@ export class Campers {
     this._focusSearch(a);
   }
 
+  /**
+   * A fresh noise hit while already Searching restarts the SWEEP — stage 0, travel to the new
+   * guess — and deliberately does NOT restart `stateT`.
+   *
+   * It used to do both, and that made §9.7's "→ Idle after **30 s total**" unreachable by anyone
+   * making noise faster than once every 30 s. Measured with a severity-1.0 creak every 5 s: the
+   * camper closed 9.5 m → 0.8 m and never gave up, because the give-up clock was reset before it
+   * could ever expire. `searchTotal` is a budget for one investigation, not for one quiet spell.
+   * When it runs out he shrugs and goes Idle; a later noise starts a NEW investigation, which is
+   * §9.7's intent and is also the only reading under which the word "total" means anything.
+   */
+  _restartSweep(a) {
+    a.searchStage = 0;
+    a.searchIdx = 0;
+    a.searchDwell = 0;
+    a._widened = false;
+  }
+
   /** Navmesh.setCostModifier so other searchers converge on the same place sensibly. */
   _focusSearch(a) {
     const nav = this._navmesh;
@@ -1699,6 +1782,20 @@ export class Campers {
       return;
     }
     if (a.detection >= T.holdStillAt) { a.speed = 0; a.hasGoal = false; return; }
+
+    // §12.2's second promise, and the only place on Night 1 that can break it. The guess point is
+    // a §9.8 error disc around a noise the player made, so it can land on the player; a repeated
+    // creak restarts the sweep onto a fresh disc that is a little nearer every time. On the
+    // tutorial night he stops at `tutorialKeepOut` and stands there with the beam on you for the
+    // rest of the search — which is more frightening than arriving, and provably cannot end with
+    // him standing on the player. Every other night is untouched: Searching closes as it always did.
+    if (this._tutorialSafe && a.distanceToPlayer <= T.tutorialKeepOut) {
+      a.speed = 0;
+      a.hasGoal = false;
+      if (this._player) this._lookAt(a, this._player.position, dt, 2.4);
+      else if (a.hasNoise) this._lookAt(a, a.lastNoisePos, dt, 2.4);
+      return;
+    }
 
     switch (a.searchStage) {
       case 0: {                                    // travel to the guess (or to the buddy)
@@ -2137,6 +2234,14 @@ export class Campers {
    * @param {string} id
    * @param {object} opts { path: Vector3[]|null, look: Vector3|null, speed: number,
    *                        hold: seconds, exit: 'Idle'|'Curious'|... }
+   *
+   * `hold` is seconds STANDING AT THE END OF THE PATH, not seconds since the beat started. It
+   * used to be measured from `setScripted`, which meant any beat whose walk was longer than its
+   * hold released the instant the last waypoint landed, and `hold: 0` — the obvious way to write
+   * "stand there until I say otherwise" — meant "stand there forever", with no way for the beat
+   * to end on its own if the director's release never came. Night 1's walk-in was written with
+   * `hold: 0` and would have left a man staring at the plot for the remaining six minutes of the
+   * night if the creak deferred. `hold <= 0` still means "hold until released", explicitly.
    */
   setScripted(id, opts) {
     const a = this.agent(id);
@@ -2149,6 +2254,7 @@ export class Campers {
       hold: isNum(opts?.hold) ? opts.hold : 0,
       exit: typeof opts?.exit === 'string' ? opts.exit : 'Idle',
       t: 0,
+      holdT: 0,                    // seconds standing at the end of the path
     };
     a.setState('Scripted', this._t);
     if (this.agents.indexOf(a) < 0 && a.alive) {
@@ -2216,7 +2322,7 @@ export class Campers {
     a.hasNoise = true;
     a.hitTimes[a.hitCount % 2] = now;
     a.hitCount++;
-    if (a.state === 'Searching') { a.searchStage = 0; a.stateT = 0; }
+    if (a.state === 'Searching') this._restartSweep(a);
     else { this._beginSearch(a, now); this.noiseInvestigations++; }
     if (opts?.say === true) this._say(a, 'heard', now, 0.5);
     this._checkRung1();
@@ -2242,8 +2348,9 @@ export class Campers {
     } else {
       a.speed = 0;
       a.hasGoal = false;
+      s.holdT += dt;
       if (s.look) this._lookAt(a, s.look, dt, 2.0);
-      if (s.hold > 0 && s.t > s.hold) this.releaseScripted(a.id);
+      if (s.hold > 0 && s.holdT > s.hold) this.releaseScripted(a.id);
     }
   }
 

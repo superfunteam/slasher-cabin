@@ -154,15 +154,40 @@ export const TUNING = Object.freeze({
   // --- §17 t=2:55 and t=4:39 — THE THESIS BEAT, AUTHORED. See `_daleWalksIn` / `_firstCreak`.
   daleWalkAt: 10.0,          // s — he sets off after §17 t=0:07's laugh, while still "far off"
   daleStagingMetres: 90.0,   // m from the plot — the closest point the navmesh can actually path
-  daleStandoffMetres: 46.0,  // m — §17 t=2:55's "crosses the return path at 45 m"
-  daleApproachDeg: 18.0,     // ° swung off the plot→camp bearing so the last leg crosses the view
+  // §17 says 45 m at t=2:55, and the beat was built at 46 m. MEASURED at 46 m, the entire visible
+  // difference between torch-on and torch-off is a warm lozenge ~120x45 px in a 1280x720 frame —
+  // 0.6% of frame area, no legible human figure — because the lantern SpotLight throws 18 m and
+  // FogExp2 at density 0.02119 mixes 61% to fog colour at 46 m. §17's 45 m belongs to the t=2:55
+  // CROSSING, which the player reads on the return from the stump; t=4:39 states no distance at
+  // all, only that the torch turns and starts walking. So the beat gets a distance it can be SEEN
+  // at: 30 m is 33% fog instead of 61% and 1.53x the apparent size, and it is still 6 m outside a
+  // counselor's R=24 sight range, so standing at the plot costs the player nothing.
+  daleStandoffMetres: 30.0,
+  // ° swung off the bearing the player is looking along, AWAY from the camp he is walking out of
+  // (`_daleWalksIn` picks the sign). Away, because that makes his last leg cross the frame rather
+  // than arrive straight down the player's own sightline — §17 t=2:55's "Dale's loop crosses the
+  // return path" — and because it keeps his approach lane out from between the player and the
+  // plot. MEASURED on this world (plot (-140,128), camp at bearing +61°, so the swing is -12°):
+  // 9.2° off-axis from the spawn facing, 7.5° mid-haul from the beam pallet, 11.7° standing at
+  // the plot on the haul heading. Against a 52.3° half-FOV, all three are inside a quarter of it.
+  daleApproachDeg: 12.0,
   daleApproachSpeed: 1.40,   // m/s — a counselor with somewhere to be. walkSpeed is 1.10.
+  daleStandoffHold: 240.0,   // s standing at the standoff before his loop takes him away again
   firstCreakAt: 279.0,       // s — §17 t=4:39
   firstCreakSeverity: 0.45,  // §17. BuildSystem's radius curve is 14 + 46*severity = 34.7 m.
   firstCreakRadius: 34.7,
-  firstCreakRange: 55.0,     // m — hold the beat until he is near enough for the search to land
-  firstCreakLatest: 180.0,   // s past `firstCreakAt` before the creak fires regardless
+  firstCreakRange: 40.0,     // m — hold the beat until he is near enough for the search to land
+  firstCreakLatest: 180.0,   // s past `firstCreakAt` before we start shouting about it in the log
+  daleWalkRetry: 45.0,       // s between attempts to re-stage him if he is not in position
   creakReactionDelay: 0.90,  // s — creak, a beat, "Huh.", the torch comes round. Loon at +1.2.
+  // VoiceBank.js:1086 stops every voice and gates VO for 1500 + 2000*severity ms on any
+  // `build:creak` at severity >= 0.5. §17's "~0.45" sits 0.05 under it, so the beat's own
+  // DAL_HEAR_01 survives by a margin nobody wrote down and any nudge upward would have deleted
+  // the line silently. `_firstCreak` now reads these two numbers and pushes the reply past the
+  // hold instead of losing it, so the coupling is enforced rather than hoped for.
+  voiceHoldSeverity: 0.50,
+  voiceHoldBase: 1.50,       // s
+  voiceHoldPerSeverity: 2.00,// s per unit severity
 
   // --- night-end (§5.1 "Dawn: No clock, 0:50 card")
   closingImageHold: 6.0,     // s — the last stage lands, then the closing image, then the card
@@ -390,6 +415,8 @@ export class NightManager {
     this._firstCreakDone = false;   // §17 t=4:39 fires exactly once a night
     this._authoredCreak = false;    // true only inside the authored emit, so the loon knows
     this._daleHearAt = -1;          // s — when the man reacts to the creak we just made
+    this._daleWalkAt = -1e9;        // s — last time he was sent to the standoff
+    this._daleWalkTries = 0;
 
     // --- save -----------------------------------------------------------------------------
     this._autosaveT = 0;
@@ -590,6 +617,8 @@ export class NightManager {
     this._firstCreakDone = false;
     this._authoredCreak = false;
     this._daleHearAt = -1;
+    this._daleWalkAt = -1e9;
+    this._daleWalkTries = 0;
     this._beatsFired = 0;
     this._scoreAt = -1e9;
     this._resetScore();
@@ -755,6 +784,16 @@ export class NightManager {
   enterChase(reason = 'spotted') {
     if (this._chase || this._nightOver) return false;
     if (this._phase !== 'build' && this._phase !== 'chase') return false;
+    // §12.2 / §17 t=2:55 — "This is theatre and it is safe, and the player does not know that."
+    // The tutorial night has no chase phase, by any door. Chase music, `Postprocessing.setPanic`
+    // and the AudioEngine chase mix all key off `phase === 'chase'`, so one guard here is what
+    // makes the promise structural instead of a property of whichever door happened to be shut.
+    // Measured before this: a Night 1 player standing lit in the open reached `phase 'chase'`,
+    // `_chaseT 33.7`, `_rungs ['rung2']`, tension 0.86 — on the authored path.
+    if (this._tutorialSafe()) {
+      Log.once('nm:tutorialchase', `NightManager: Night 1 is theatre (§12.2) — chase refused (${reason}).`);
+      return false;
+    }
     this._chase = true;
     this._chaseT = 0;
     this._chaseClear = 0;
@@ -1461,13 +1500,34 @@ export class NightManager {
   // ESCALATION LADDER (§13.1) — Campers' only entry points
   // ===============================================================================================
 
+  /**
+   * `player:spotted { camper, level }`.
+   *
+   * GAME_DESIGN §9.3's detection table is explicit about what this event means: it is published
+   * at **detection 1.00**, with `level: 1.0`, and that is the row that reads "camper → Alerted".
+   * 0.35-0.75 is "building — the smear brightens", 0.75-0.99 is "critical — the heartbeat"; those
+   * are feedback rows, not ladder rows. `Campers._meterEvents` publishes on all three bands, so
+   * this entry point was treating a camper forming a read at 0.35 as a completed sighting: rung 2,
+   * suspicion +0.25, `state.spotted = true` — which makes `_maxDetection()` return 1 until
+   * `player:hidden` — and a chase. Grading on `level` restores §9.3 exactly and leaves every
+   * other listener (HUD's arc, the AudioEngine held-breath mix, Music's silence cue) untouched,
+   * because they read the same `level` field and grade it themselves.
+   */
   notifySpotted(payload = null) {
-    void payload;
+    const level = finite(payload?.level, 1);
+    if (level < 1) return;                       // forming / building / critical: not a sighting
+    if (this._tutorialSafe()) {                  // §12.2 — belt to Campers' braces
+      Log.once('nm:tutorialspot', 'NightManager: Night 1 is theatre (§12.2) — no rung, no chase.');
+      return;
+    }
     this._spottedThisNight++;
     if (this.ctx.state) this.ctx.state.spotted = true;
     if (this._spottedThisNight === 1) this._escalate('rung2', TUNING.suspSpotted, 1);
     this.enterChase('spotted');
   }
+
+  /** §12.2 — the tutorial night. One reading of `state.tutorialSafe`, which nothing else read. */
+  _tutorialSafe() { return this.ctx?.state?.tutorialSafe === true; }
 
   /** A camper investigated a noise and found nothing. Three of those is rung 1. */
   notifyInvestigation() {
@@ -1939,17 +1999,23 @@ export class NightManager {
     // Around pier 3-4 the player starts hammering casually. A distant voice reacts. Nothing else
     // happens. The hammering is heard: bank it.
     push(90.0, () => this._sayAt('DAL_HEAR_01', 150, 0.6), () => this._hammerCount >= 6);
-    // t=4:39 — THE FIRST CREAK, and the make-or-break moment of the whole game. Gated on the
-    // build having reached the sill beams (§17 t=4:30 is where the rotated beam goes in) and on
-    // Dale actually being close enough for the search that follows to arrive — a search is 30 s
-    // long and he covers ~2.16 m/s, so from beyond ~55 m he would give up before he got there
-    // and the player would see a torch turn and then nothing. An unmet gate just defers the
-    // step; `_updateOnboarding` re-tests it every frame.
-    push(TUNING.firstCreakAt, () => this._firstCreak(),
-      () => this.stage >= 2 && this._daleIsInPosition());
-    // ...but the sound itself is the thesis and must happen even if the player is slow or he is
-    // still walking. `_firstCreak` is idempotent, so this is a backstop, not a second creak.
-    push(TUNING.firstCreakAt + TUNING.firstCreakLatest, () => this._firstCreak(), null);
+    // t=4:39 — THE FIRST CREAK, and the make-or-break moment of the whole game.
+    //
+    // ONE GATE, AND IT IS ABOUT HIM, NOT ABOUT THE BUILD. This step used to also require
+    // `this.stage >= 2` — BuildSystem's stage, on the fiction that the creak is §17 t=4:30's
+    // rotated sill beam settling. MEASURED on a clean Night 1 that stayed 1 with 0 joins for the
+    // whole night, so the step never fired and the beat fell through to a 459 s backstop that was
+    // pushed with `gate: null` — firing the creak, and therefore `Campers.investigate`, with NO
+    // position check at all. That is precisely the failure the gate existed to prevent: a torch
+    // turns 300 m away, a search starts, he covers 54 m of the 300 in his 30 s and shrugs, and the
+    // player sees nothing. §12.2 says outright that "the one creak in the night is scripted", so
+    // the player's build progress is not a precondition for it; his being in frame is.
+    //
+    // An unmet gate defers the step forever rather than expiring it — `_updateOnboarding` re-tests
+    // every frame — and `_ensureDaleInPosition` re-stages him if he is not on his way. So the
+    // beat fires the moment it can be staged correctly, and if it truly cannot be, it stays
+    // silent and says so in the log rather than playing a broken version of itself.
+    push(TUNING.firstCreakAt, () => this._firstCreak(), () => this._daleIsInPosition());
     // The first class-D lift, then the first creak, are BuildSystem's. We answer the creak.
     // t=4:52 — every verb in §9.6 is now motivated, so the director stops holding the floor.
     // This step used to only set a story flag nothing reads, which made it a no-op; the floor
@@ -1974,6 +2040,7 @@ export class NightManager {
       this._daleAnswersTheCreak();
     }
     if (!this._onboard.length) return;
+    this._ensureDaleInPosition();
     for (const e of this._onboard) {
       if (e.done || this._buildSeconds < e.t) continue;
       if (e.gate && !e.gate()) continue;
@@ -1990,13 +2057,25 @@ export class NightManager {
     this._sayAtPoint(id, _v1, volume);
   }
 
-  /** The same, but from a real position — a person the player can see, not a bearing. */
+  /**
+   * The same, but from a real position — a person the player can see, not a bearing.
+   *
+   * `VoiceBank.say()` returns null for a DENIED line as well as throwing for a broken one: an
+   * unknown id, a bank that is not `available` yet, a voice gate held by one of AUDIO_DIRECTION
+   * §8's silence rules. The old code returned unconditionally, so the `audio:vo` fallback — the
+   * canonical event AudioEngine and VoiceBank both listen to — only ever ran on an exception,
+   * never on a refusal, and a denied line was indistinguishable from a played one.
+   * @returns {boolean} true if the bank actually scheduled it.
+   */
   _sayAtPoint(id, pos, volume) {
     const vb = this._vo();
     if (vb && typeof vb.say === 'function') {
-      try { vb.say(id, pos, { volume }); return; } catch { /* fall through */ }
+      try {
+        if (vb.say(id, pos, { volume })) return true;
+      } catch (e) { Log.once(`nm:say:${id}`, `NightManager: VoiceBank.say('${id}') threw`, e); }
     }
-    this._emit('audio:vo', { id, position: pos.clone() });
+    this._emit('audio:vo', { id, position: pos.clone(), volume });
+    return false;
   }
 
   // -------------------------------------------------------------- §17's thesis beat, authored
@@ -2013,34 +2092,110 @@ export class NightManager {
    * had been all night.
    *
    * This walks him in on the director's own lane. Two legs: the first ends at the closest point
-   * the navmesh can genuinely path to, the second crosses the last stretch on steering alone,
-   * ending at §17's 46 m — outside a counselor's 24 m sight range, so proximity costs the player
-   * nothing until the creak. While `Scripted` he cannot take a noise hit or alert; `_tickTorch`
-   * gives him the calm ±34° sweep, which is exactly the read §17 wants here.
+   * the navmesh can genuinely path to, the second crosses the last stretch on steering alone.
+   * While `Scripted` he cannot take a noise hit or alert; `_tickTorch` gives him the calm ±34°
+   * sweep, which is exactly the read §17 wants here.
+   *
+   * ------------------------------------------------------------------------------------------
+   * AND THE BEARING IS THE WHOLE BEAT. This is the defect that made the first version worthless.
+   *
+   * The standoff used to be placed on the plot→CAMP bearing, which has nothing to do with where
+   * the player is looking. It resolved to 67.5° off the view axis against a 52.3° half-FOV —
+   * NDC x 1.883, fifteen degrees past the right edge of the frame — and on §17's own t=4:39
+   * staging, with the player hauling a sill beam in from pallet B, roughly 105°: behind the right
+   * shoulder. A frame captured at the instant of the beat contained no torch. The state machine
+   * worked perfectly and the player could not see it.
+   *
+   * So the bearing is derived from the player instead: he stands BEYOND the plot on the line the
+   * player is looking along, swung `daleApproachDeg` off it. Every §17 staging in the opening has
+   * the player south of the plot looking north at it — spawn is plot+(0,+9) facing the centre
+   * (`Player._applySpawn`), pallet A is plot+(4,12), pallet B is plot+(−9,+16), the staging apron
+   * is plot+(11,24) — so "past the plot, from where you are standing" is one rule that covers all
+   * of them, and it puts the torch above the chalk squares the player is working on. The two
+   * cases the beat has to survive measure 11.7° and 11.2° off-axis, either side of centre.
+   *
+   * The reference is taken once, when he sets off at t=0:10, from the player's actual position.
+   * Not continuously: a torch that tracks to stay in front of you is a spotlight, not a person.
    */
   _daleWalksIn() {
     const c = this._campers();
-    if (typeof c?.setScripted !== 'function') return;
-    if (!c.agent?.('dale')) return;
-    if (!this._anchor('plot', _v0) || !this._anchor('camp', _v1)) return;
+    if (typeof c?.setScripted !== 'function') return false;
+    if (!c.agent?.('dale')) return false;
+    if (!this._anchor('plot', _v0)) return false;
 
-    let bx = _v1.x - _v0.x, bz = _v1.z - _v0.z;
-    const len = Math.hypot(bx, bz);
-    if (!(len > TUNING.daleStagingMetres)) return;    // already close; nothing to walk
-    bx /= len; bz /= len;
+    // The bearing the player is looking along, extended past the plot. `_v0` is the plot.
+    let bx = 0, bz = -1;
+    if (this._playerPos(_v1) || this._anchor('camp', _v1)) {
+      // With a player: past the plot from where they stand. Without one (a headless harness):
+      // the far side from the camp, which is at least a bearing that exists in this world.
+      const dx = _v0.x - _v1.x, dz = _v0.z - _v1.z;
+      const d = Math.hypot(dx, dz);
+      if (d > 1.0) { bx = dx / d; bz = dz / d; }
+    }
 
-    const staging = this._pointFromPlot(_v0, bx, bz, TUNING.daleStagingMetres, 0);
-    const standoff = this._pointFromPlot(_v0, bx, bz, TUNING.daleStandoffMetres, TUNING.daleApproachDeg);
+    // Swing away from the camp. Signed angle from the view axis to the camp bearing, in
+    // `_pointFromPlot`'s own rotation convention, so the sign means the same thing in both.
+    let swing = TUNING.daleApproachDeg;
+    if (this._anchor('camp', _v1)) {
+      const cx = _v1.x - _v0.x, cz = _v1.z - _v0.z;
+      const cd = Math.hypot(cx, cz);
+      if (cd > 1.0) {
+        const s = bx * (cz / cd) - bz * (cx / cd);
+        if (s > 0) swing = -swing;
+      }
+    }
+
+    // Staging stays on the plot→camp bearing: it is the leg he walks as himself, from where he
+    // lives, and putting it on the view axis instead would send him the long way round the plot
+    // — measured 349 m against 298 m, which is most of the margin between setting off at t=0:10
+    // and being in place for t=4:39. The SECOND leg is the one that matters, and it now sweeps
+    // from the camp bearing across to the view axis: §17 t=2:55's "Dale's loop crosses".
+    let sx = bx, sz = bz;
+    if (this._anchor('camp', _v1)) {
+      const cx = _v1.x - _v0.x, cz = _v1.z - _v0.z;
+      const cd = Math.hypot(cx, cz);
+      if (cd > TUNING.daleStagingMetres) { sx = cx / cd; sz = cz / cd; }
+    }
+    const standoff = this._standoffPoint(_v0, bx, bz, TUNING.daleStandoffMetres, swing);
+    const staging = this._standoffPoint(_v0, sx, sz, TUNING.daleStagingMetres, 0);
 
     const ok = c.setScripted('dale', {
       path: [staging, standoff],
       speed: TUNING.daleApproachSpeed,
       look: _v0.clone(),
-      hold: 0,                       // he stays put until the creak releases him
+      // Seconds standing AT the standoff (Campers.setScripted). The creak normally releases him
+      // long before this; the hold exists so that if it never comes he resumes his loop instead
+      // of standing in the fog until dawn. §17 t=2:55 describes a loop that crosses, not a statue.
+      hold: TUNING.daleStandoffHold,
       exit: 'Idle',
     });
+    this._daleWalkAt = this._buildSeconds;
     Log.debug(`§17 t=2:55 — dale walks in toward the plot (${ok ? 'scripted' : 'refused'}), `
-      + `staging ${TUNING.daleStagingMetres} m, standoff ${TUNING.daleStandoffMetres} m.`);
+      + `staging ${TUNING.daleStagingMetres} m, standoff ${TUNING.daleStandoffMetres} m at `
+      + `(${standoff.x.toFixed(1)}, ${standoff.z.toFixed(1)}).`);
+    return ok;
+  }
+
+  /**
+   * A world point `metres` from `plot` on the bearing `(bx,bz)` swung by `deg`, stepped off the
+   * water if it landed in it.
+   *
+   * It deliberately does NOT ask `Navmesh.isWalkable`. MEASURED on a 24-point ring at 30 m from
+   * the plot, **two** bearings answer true: the build site is a navmesh island and the ground
+   * around it rasterises solid, which is the same artefact that silently drops the `plot-watch`
+   * and `plot-approach` waypoints. Sweeping for a walkable cell there would let a rasterisation
+   * artefact yank the torch up to 34° off the player's view axis — which is the defect this whole
+   * function exists to fix — in exchange for nothing, because `_goTo` falls back to direct
+   * steering the moment `findPath` fails, and on this last leg it always does.
+   */
+  _standoffPoint(plot, bx, bz, metres, deg) {
+    const terr = this._terrain();
+    const water = finite(terr?.waterLevel, -1e9);
+    for (let k = 0; k < 5; k++) {
+      const p = this._pointFromPlot(plot, bx, bz, metres, deg + (k % 2 ? 1 : -1) * Math.ceil(k * 0.5) * 10);
+      if (p.y > water + 0.4) return p;
+    }
+    return this._pointFromPlot(plot, bx, bz, metres, deg);
   }
 
   /** A world point `metres` from `plot`, on the given unit bearing swung by `deg`. Allocates. */
@@ -2059,6 +2214,36 @@ export class NightManager {
     const a = this._campers()?.agent?.('dale');
     if (!a?.alive || !this._anchor('plot', _v0)) return false;
     return Math.hypot(a.position.x - _v0.x, a.position.z - _v0.z) <= TUNING.firstCreakRange;
+  }
+
+  /**
+   * The watchdog behind the creak's one gate. If the beat's time has come and he is neither in
+   * position nor still walking to it — the script was refused, his hold expired, a search pulled
+   * him away and ended somewhere else — re-stage him. Bounded: at most one attempt every
+   * `daleWalkRetry` seconds, and it stops as soon as the creak has fired.
+   */
+  _ensureDaleInPosition() {
+    if (this._firstCreakDone || this.night !== 1) return;
+    if (this._buildSeconds < TUNING.firstCreakAt) return;
+    if (this._buildSeconds - this._daleWalkAt < TUNING.daleWalkRetry) return;
+    const a = this._campers()?.agent?.('dale');
+    if (!a?.alive) return;
+    if (a.scripted || this._daleIsInPosition()) { this._daleWalkAt = this._buildSeconds; return; }
+
+    this._daleWalkTries++;
+    const late = this._buildSeconds - TUNING.firstCreakAt;
+    if (late > TUNING.firstCreakLatest && this._daleWalkTries % 4 === 0) {
+      Log.warn(`§17 t=4:39 has been deferred ${late.toFixed(0)} s: dale is `
+        + `${this._daleDistanceToPlot().toFixed(0)} m from the plot and will not stage. The beat `
+        + 'stays SILENT rather than firing off-screen — fix his approach, do not remove the gate.');
+    }
+    this._daleWalksIn();
+  }
+
+  _daleDistanceToPlot() {
+    const a = this._campers()?.agent?.('dale');
+    if (!a?.alive || !this._anchor('plot', _v1)) return Infinity;
+    return Math.hypot(a.position.x - _v1.x, a.position.z - _v1.z);
   }
 
   /**
@@ -2084,16 +2269,32 @@ export class NightManager {
       this._emit('noise:emit', {
         position: pos.clone(), radius: TUNING.firstCreakRadius, intensity: severity, kind: 'creak',
       });
+      // §17: "A long, wet groan." That is the tier-3 take — `creak_groan` -> `creak.t3.s1`,
+      // 1.53 s at −12 dB. This line used to be BuildSystem's id rule (`severity > 0.7`), which at
+      // §17's own 0.45 picks `creak_tick`: `creak.t1.s1`, 0.41 s at −30 dB. Eighteen decibels and
+      // a quarter of the length below the sound the document names, on the one beat the whole
+      // game is built around. The authored creak names its own sound, exactly as it names its own
+      // severity, and severity stays at §17's 0.45 because that is what NoiseSystem, VoiceBank,
+      // Music and the QC card read.
       this._emit('audio:sfx', {
-        id: severity > 0.7 ? 'creak_groan' : 'creak_tick',
-        position: pos.clone(), rate: 0.8 + 0.5 * (1 - severity),
+        id: 'creak_groan', position: pos.clone(), rate: 0.8 + 0.5 * (1 - severity),
       });
     } finally {
       this._authoredCreak = false;
     }
 
-    this._daleHearAt = this._buildSeconds + TUNING.creakReactionDelay;
-    Log.debug(`§17 t=4:39 — the first creak, authored. severity ${severity}, radius ${TUNING.firstCreakRadius} m.`);
+    // The reply must not land inside VoiceBank's own creak silence rule. At §17's 0.45 there is
+    // no hold at all and the delay is the authored 0.90 s; if severity is ever nudged to 0.5 or
+    // above, the hold appears and this pushes DAL_HEAR_01 past it instead of losing it silently.
+    let delay = TUNING.creakReactionDelay;
+    if (severity >= TUNING.voiceHoldSeverity) {
+      delay = Math.max(delay,
+        TUNING.voiceHoldBase + TUNING.voiceHoldPerSeverity * severity + 0.15);
+    }
+    this._daleHearAt = this._buildSeconds + delay;
+    Log.debug(`§17 t=4:39 — the first creak, authored. severity ${severity}, radius `
+      + `${TUNING.firstCreakRadius} m, reply in ${delay.toFixed(2)} s, dale `
+      + `${this._daleDistanceToPlot().toFixed(1)} m from the plot.`);
   }
 
   /**
@@ -2181,6 +2382,18 @@ export class NightManager {
         if (this.night === 1 && this._loonAt < 0
           && (this._authoredCreak || this._creaksThisNight === 1)) {
           this._loonAt = this._buildSeconds + 1.2;   // §17 t=4:39, and the loon answers it
+        }
+        // BuildSystem keeps the canonical counters (`_fireCreak` writes `state.creaks` and
+        // `stats.creaksTotal`) and the authored creak bypasses BuildSystem entirely, so without
+        // this the night-end QC card's AUDIBLE FROM STRUCTURE row — `Menu.js:2887` reads
+        // `state.creaks` before it will look at anything else — under-counts the one creak the
+        // night is actually about, and `Music`'s creak term never sees it either.
+        if (this._authoredCreak) {
+          const st = this.ctx.state;
+          if (st) {
+            st.creaks = (st.creaks | 0) + 1;
+            if (st.stats) st.stats.creaksTotal = (st.stats.creaksTotal | 0) + 1;
+          }
         }
         break;
       }
