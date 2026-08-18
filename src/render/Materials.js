@@ -126,6 +126,11 @@ const PAL = {
   fern: 0x1a2a22,
   weathered: 0x6b6155,
   concrete: 0x3f4442,
+  // ART_DIRECTION.md §4.5 / §6.2 "Chalk mark". 0.6437 relative luminance — 39x mud's 0.0166,
+  // and the single highest-contrast small mark the world is allowed. It exists because a chalk
+  // line's whole job is to be LIGHTER than what it is drawn on; `concrete` (0.0574) is darker
+  // than lit dirt, which is how the build plot's six pier marks came to be invisible.
+  chalk: 0xcfd3cc,
   tarp: 0x2f4550,
   rope: 0x5a5038,
 };
@@ -1324,6 +1329,40 @@ const SPECS = {
     cavity: { contrast: 1.6, bias: 0.04 },
     triplanar: [0.55, 5.0, 0.80, 0.34],
   },
+  /**
+   * ART_DIRECTION.md §6.2 row "Chalk mark": `#cfd3cc`, rough 0.94, metal 0, emissive 0, drawn as
+   * a `polygonOffset` decal. §4.5 states the intent — "the highest-contrast small mark available
+   * in the world" — and §17 of GAME_DESIGN leans the entire wordless onboarding on it.
+   *
+   * DELIBERATELY MAP-LESS. Textures.js bakes ABSOLUTE colour into its albedo (`bark-pine` writes
+   * `#38312a` itself, not a multiplier), and GLSL_MAP does `diffuseColor *= texture2D(map, ...)`,
+   * so any texKey here would square the albedo: 0.6437 -> 0.414. On a 22-37 mm strip seen at
+   * 8-11 m there is no texel detail to win back in exchange, so `noMaps` keeps the authored value
+   * exact and drops three samplers. `detail: [1, 0]` keeps the detail normal off for the same
+   * reason: at this scale it is pure specular noise.
+   *
+   * Low porosity is an authored choice with a stated reason, not an oversight. Chalk is pigment
+   * driven INTO the surface, and a marker whose only function is contrast may not dissolve on
+   * night 1 (rain 0.15). It still darkens ~21% in a full storm, which is the honest half. Note
+   * `Script.js:1054` has the chalk washed off by night 2 — that is a night-to-night STORY event
+   * about which marks exist, not a wetness curve, and nothing here is trying to model it.
+   *
+   * NO EMISSIVE. §17 calls the squares "glowing faintly"; §6.2 says emissive 0 and ART §11 has
+   * a standing prohibition on self-lit ground marks reading as arcade markers. The glow is
+   * albedo x lantern, and the measurements say albedo is enough.
+   */
+  chalk: {
+    texKey: null,
+    color: PAL.chalk, roughness: 0.94, metalness: 0.0, normalScale: 0.2,
+    porosity: 0.55, wetScale: 0.75, family: 'stone', uv: [1, 1],
+    detail: [1, 0], breakup: [0.16, 6], ao: 0.0,
+    noCavity: true, noMaps: true,
+    // NOT `decal: true`, though §6.2's row says decal. That flag means transparent + depthWrite
+    // false + polygonOffset, which is right for blood painted ONTO a plank and wrong here:
+    // CabinSite draws chalk as extruded geometry standing 9-21 mm proud of the terrain, so there
+    // is no coplanar fight to offset, and moving it into the transparent pass would cost sorting,
+    // lose its depth write, and hand a shadow-casting merged mesh an alpha material.
+  },
   'glass-dirty': {
     texKey: 'concrete',   // grime film only; the glass itself is the material
     color: 0x141b1f, roughness: 0.18, metalness: 0.0, normalScale: 0.35,
@@ -1432,6 +1471,8 @@ const ALIASES = {
   'blood-fresh': 'blood',
   gore: 'blood',
   tarp: 'tarp-plastic',
+  'chalk-mark': 'chalk',
+  mark: 'chalk',
 };
 
 /* ====================================================================================== */

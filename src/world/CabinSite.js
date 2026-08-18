@@ -187,9 +187,42 @@ const MAT = Object.freeze({
   tin: 'corrugated-tin',
   stone: 'granite',
   concrete: 'concrete',
+  chalk: 'chalk',
   glass: 'glass-dirty',
   rope: 'rope',
 });
+
+/**
+ * Chalk line weights, in metres. The MANUAL has exactly four stroke widths and no others
+ * (ART_DIRECTION §13.2: hairline 0.75 / thin 1.5 / medium 2.5 / heavy 4.0 px). The ground is the
+ * same man's drawing, so it uses the same ratios off a 22 mm `thin`: a squaring diagonal is
+ * scratch work, the building line is a standard outline, and the six pier footprints are the
+ * thing the page is currently talking about. That hierarchy is the whole reason a site drawing
+ * is readable — you can tell what you SET OUT from what you PUT DOWN — and it is why the marks
+ * do not need a second material to read differently from the lines they sit on.
+ */
+const CHALK_HAIRLINE = 0.011;
+const CHALK_THIN = 0.022;
+const CHALK_MEDIUM = 0.037;
+/*
+ * `medium` was tested at 0.044 with the corner overshoot at 0.090 — +19% width, +64% overshoot —
+ * in case the far row simply needed more chalk. Measured at the spawn pose it bought nothing:
+ * the two far corner marks moved 0.0% and -6% (inside frame-to-frame variation), and the near
+ * mark's blown-pixel fraction went up 31%. The far row is limited by LIGHT and by sub-pixel
+ * foreshortening, not by width, so it was reverted to the ratio the manual actually uses. Widen
+ * this only with a measurement that says width is what is missing.
+ */
+
+/**
+ * Two heights, 8 mm apart. Layout lines are snapped FIRST and the pier footprints are marked ON
+ * TOP of them, which is both what actually happens on a site and what stops the two from
+ * z-fighting: every one of the six piers sits ON the building line (PIER_XZ is the line's own
+ * corners and mid-spans), so coplanar marks would overlap at all six. The previous crossed
+ * centre-marks did exactly that, sharing a face with the building line over 0.68 m at four
+ * corners. 8 mm is under half a pixel at the 8-11 m the player reads them from.
+ */
+const CHALK_Y_LAYOUT = 0.011;
+const CHALK_Y_MARK = 0.019;
 
 const CH = 0.008;           // default chamfer on dimensional lumber — 8 mm, an eased arris
 const TAU = Math.PI * 2;
@@ -1609,25 +1642,32 @@ export class CabinSite {
    */
   _gPad(k) {
     const r = new Rand(0x51a5cab ^ 0x9d1);
-    const y = 0.012;
-    const line = (x0, z0, x1, z1, w = 0.028) => {
+    /**
+     * Every mark on this pad is CHALK, not concrete.
+     *
+     * It used to be `MAT.concrete` — 0x3f4442, a dark grey-green at 0.0574 relative luminance,
+     * against lit dirt that measures 0.03-0.15 in the frame. Measured at the player's own spawn
+     * view, five of the six pier marks peaked BELOW the dirt 30 px away from them: the marks were
+     * the darkest thing on the ground they were drawn on. Chalk that is darker than its ground is
+     * not chalk, and GAME_DESIGN §17 t=0:14 — the beat the whole wordless tutorial hangs off —
+     * asks the player to look up and see six squares.
+     */
+    const line = (x0, z0, x1, z1, w = CHALK_THIN, y = CHALK_Y_LAYOUT) => {
       const len = Math.hypot(x1 - x0, z1 - z0);
       const g = chamferBox(len, 0.004, w, 0.001);
       g.rotateY(-Math.atan2(z1 - z0, x1 - x0));
       g.translate((x0 + x1) * 0.5, y, (z0 + z1) * 0.5);
-      k.push(MAT.concrete, g);
+      k.push(MAT.chalk, g);
     };
     // The building line, chalked and slightly overshot at every corner. He is not a draughtsman.
     line(-P.HX - 0.16, -P.HZ, P.HX + 0.16, -P.HZ);
     line(-P.HX - 0.16, P.HZ, P.HX + 0.16, P.HZ);
     line(-P.HX, -P.HZ - 0.16, -P.HX, P.HZ + 0.16);
     line(P.HX, -P.HZ - 0.16, P.HX, P.HZ + 0.16);
-    line(P.CAB_E, -P.HZ - 0.10, P.CAB_E, P.HZ + 0.10, 0.020);
-    line(-P.HX - 0.3, -P.HZ - 0.3, P.HX + 0.3, P.HZ + 0.3, 0.014);   // the diagonal he squared it with
-    for (const [px, pz] of PIER_XZ) {
-      line(px - 0.34, pz, px + 0.34, pz, 0.018);
-      line(px, pz - 0.34, px, pz + 0.34, 0.018);
-    }
+    line(P.CAB_E, -P.HZ - 0.10, P.CAB_E, P.HZ + 0.10, CHALK_THIN);
+    // the diagonal he squared it with — scratch work, and the lightest thing on the pad
+    line(-P.HX - 0.3, -P.HZ - 0.3, P.HX + 0.3, P.HZ + 0.3, CHALK_HAIRLINE);
+    this._gPierMarks(k, line);
     // Batter boards: two stakes and a cross-board at each corner, with string between them.
     const bb = (x, z, ry) => {
       k.box(MAT.lumber, 0.05, 0.80, 0.05, x - 0.30 * Math.cos(ry), 0.32, z - 0.30 * Math.sin(ry), 0, 0.004);
@@ -1657,6 +1697,38 @@ export class CabinSite {
     }
     // The county survey stake used to be built here. It is now its own dressing node so it can be
     // taken out of the world when the player pulls it — see `_gCountyStake()`.
+  }
+
+  /**
+   * The six pier marks: a closed chalked rectangle the size of the block that goes in it.
+   *
+   * THEY WERE CROSSES. Two 0.68 m lines through the centre — a surveyor's centre-mark, which is
+   * a real thing a real person draws, and which is not what the manual draws. `Blueprint.js`
+   * renders "the seat" as a DOTTED GHOST OF THE PART ITSELF, dimetric, at the slot it belongs
+   * in; `Script`'s caption for panel 1.3 is "a pier block descending into a chalked square on the
+   * ground... the square in the drawing is the square on the ground". GAME_DESIGN §17 states as
+   * fact that "the chalk squares literally match the drawing", and that correspondence is the
+   * entire mechanism by which a game with zero tutorial text teaches its first verb. A cross
+   * matches nothing on the page. A rectangle the size of the block matches the ghost of the
+   * block.
+   *
+   * The footprint is READ FROM THE PART, not guessed: `_gPier()` lays its base course as
+   * `P.PIER_W` square and `_n1()` hands the same `P.PIER_W` to the slot as `len`, so the outline
+   * and the thing that lands in it cannot drift apart in a later edit.
+   *
+   * No centre tick. Every pier already has the building line running through its middle — that
+   * is what PIER_XZ IS, the line's corners and mid-spans — so the surveyor read is present
+   * without adding geometry coplanar with a line that is already there.
+   */
+  _gPierMarks(k, line) {
+    const h = P.PIER_W * 0.5;     // 0.26 — the block's own half-width
+    const os = 0.055;             // he draws past the corner. Every time. See the building line.
+    for (const [px, pz] of PIER_XZ) {
+      line(px - h - os, pz - h, px + h + os, pz - h, CHALK_MEDIUM, CHALK_Y_MARK);
+      line(px - h - os, pz + h, px + h + os, pz + h, CHALK_MEDIUM, CHALK_Y_MARK);
+      line(px - h, pz - h - os, px - h, pz + h + os, CHALK_MEDIUM, CHALK_Y_MARK);
+      line(px + h, pz - h - os, px + h, pz + h + os, CHALK_MEDIUM, CHALK_Y_MARK);
+    }
   }
 
   /**
@@ -2114,8 +2186,14 @@ export class CabinSite {
       const tint = name === MAT.galv ? 0x9aa0a3 : name === MAT.rust ? 0x7a4526
         : name === MAT.tin ? 0x7d8487 : name === MAT.stone ? 0x3b464b
           : name === MAT.concrete ? 0x3f4442 : name === MAT.glass ? 0x141b1f
-            : name === MAT.weathered ? 0x6b6155 : name === MAT.rope ? 0x5a5038 : 0xa8875c;
-      fb = new THREE.MeshStandardMaterial({ color: tint, roughness: 0.72, metalness: name === MAT.galv || name === MAT.tin ? 0.9 : 0.0, name: `cabinsite-${name}` });
+            : name === MAT.chalk ? 0xcfd3cc
+              : name === MAT.weathered ? 0x6b6155 : name === MAT.rope ? 0x5a5038 : 0xa8875c;
+      fb = new THREE.MeshStandardMaterial({
+        color: tint,
+        roughness: name === MAT.chalk ? 0.94 : 0.72,
+        metalness: name === MAT.galv || name === MAT.tin ? 0.9 : 0.0,
+        name: `cabinsite-${name}`,
+      });
       this._fallbackMats.set(name, fb);
       this._ownedMat.push(fb);
     }
@@ -2127,7 +2205,12 @@ export class CabinSite {
     for (const name of Object.values(MAT)) {
       const mesh = new THREE.Mesh(new THREE.BufferGeometry(), this._mat(name));
       mesh.name = `CabinSite:${name}`;
-      mesh.castShadow = true;
+      // Chalk is the one exception, and it pays for itself. A 4 mm strip lying flat on the dirt
+      // casts nothing a human would ever see, but the shadow passes do not know that: measured
+      // at the spawn pose, the chalk mesh cost 3 draws (main + two cascades) and turning its
+      // caster off returns 2 of them. It still RECEIVES — a mark under the platform must go dark
+      // with the ground it is drawn on, or it lights up through the structure's own shadow.
+      mesh.castShadow = name !== MAT.chalk;
       mesh.receiveShadow = true;
       mesh.frustumCulled = true;
       mesh.visible = false;
@@ -2400,9 +2483,18 @@ export class CabinSite {
     const buildParam = params.get('build');
     if (!hasShot && buildParam === null) return;
 
-    let night = buildParam !== null ? clamp(parseInt(buildParam, 10) || 0, 0, 7) : 4;
-    if (!night) return;
     const shot = params.get('shot');
+    /*
+     * `opening` IS the empty pad, and it used to get the same night-4 default as every other
+     * shot. `Shots.js` describes it as "Night 1 as the player first sees it" — the §17 t=0:14
+     * beat — and every capture of it has actually framed a fully framed cabin with a roof on it,
+     * standing on top of the six chalk marks the shot exists to show. That is how a pad whose
+     * marks were drawn in dark grey went unnoticed: the canonical way of looking at it could not
+     * see the pad. An explicit `&build=n` still wins, so nothing that asked for a night loses it.
+     */
+    const defaultNight = shot === 'opening' ? 0 : 4;
+    let night = buildParam !== null ? clamp(parseInt(buildParam, 10) || 0, 0, 7) : defaultNight;
+    if (!night) return;
     if (buildParam === null && shot === 'site-wide') night = 4;
 
     // A representative run: mostly seated, with the four error states on show so a reviewer can
