@@ -130,6 +130,19 @@ giving LOD2 the impostor's crown-mass treatment with every card's long axis on +
 the target is bit-identical), and points at the concurrent `Forest.js` change. Pulling ridge down
 would push `site-close` out of spec, so this needs judgement rather than a tweak.
 
+## SCOPE, as of 2026-08-18: NIGHT 1 ONLY
+
+Clark has **shelved nights 2-7**. They are authored — night defs, camper rosters, weather
+profiles, story beats, the escalation ladder — and deliberately not being verified or polished.
+
+Prioritise by one question: **does a first-time player hit this in Night 1?** If no, it waits,
+even if it looks broken. Bugs in shared systems still get fixed when they reach Night 1 — the
+`notifySpotted` level bug armed a chase on *every* night and was worth fixing because it fired on
+Night 1 too.
+
+The quality bar is unchanged: AAA, benchmarked against `public/img/keyart-*.png`. It is simply
+aimed at one night now.
+
 ## Top gaps, in priority order
 
 1. **Draw calls 352–358 vs a 220 budget.** Nobody has attributed them by owner yet.
