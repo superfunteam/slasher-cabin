@@ -1867,9 +1867,14 @@ export class Music {
    *
    * The fix is a local rule rather than a blanket refusal, because Music genuinely runs
    * standalone (it builds its own AudioContext when AudioEngine has none) and a hard `false`
-   * would leave that configuration with no recorded score for the whole session. At the menu
-   * we hold off — that is the window the preloader is assembling the title screen in, and the
-   * title is silent until a gesture anyway. Once the game is under way, load normally.
+   * would leave that configuration with no recorded score for the whole session.
+   *
+   * The local rule has to name the title bed explicitly. A bare `phase !== 'menu'` looks like
+   * "hold off during the preloader" and is in fact "never load `music-title` at all": the only
+   * bed the menu can ever want is `title`, `_chooseBed()` returns `'title'` if and only if the
+   * phase IS `'menu'`, and by the time the phase changes `_bedWant` has moved on. So the one
+   * bed this branch appeared to defer was the one bed it permanently refused, with no path
+   * back for the rest of the session.
    *
    * A shut gate is never a failure and is never written off: the scheduler asks again on the
    * next bar, and until then the synthesized score — a complete score on its own — carries
@@ -1878,7 +1883,21 @@ export class Music {
   _mayFetchBed(id) {
     const gate = this.ctx?.systems?.get?.('Audio') ?? null;
     if (gate && typeof gate.mayFetchGenerated === 'function') return gate.mayFetchGenerated(id);
-    return (this.ctx?.state?.phase ?? 'menu') !== 'menu';
+    if ((this.ctx?.state?.phase ?? 'menu') !== 'menu') return true;
+    return id === MUSIC_BEDS.title && this._menuRevealed();
+  }
+
+  /**
+   * Standalone mirror of `AudioEngine._pollFirstScreen()`: has the preloader finished the one
+   * composition it exists to reveal? `Menu.screen` is null the whole time the boot plate is up
+   * and non-null from the mount, which is after all six preload units have completed — so a
+   * fetch started here can never be in front of anything the player is waiting on.
+   *
+   * No Menu means nothing is assembling a first screen, and nothing to wait for.
+   */
+  _menuRevealed() {
+    const menu = this.ctx?.systems?.get?.('Menu') ?? null;
+    return menu ? menu.screen != null : true;
   }
 
   /**

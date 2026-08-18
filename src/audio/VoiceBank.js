@@ -319,6 +319,7 @@ export class VoiceBank {
     this._nextConvAt = 0;
     this._globalNextAt = 0;
     this._silenceUntil = 0;           // §8 silence rules — outranks everything
+    this._pendingHoldMs = 0;          // a hold asked for before there was a clock; see holdVoice()
     this._chatterUntil = 0;           // the camp is listening — blocks priority < 3 only
     this._warmNextAt = 0;
     this._hardStopped = false;
@@ -360,9 +361,19 @@ export class VoiceBank {
    * Nothing downstream needs it synchronously. Every public entry point already gates on
    * `this.available`, which stays false until setup finishes, and no VO line can be heard
    * before the build phase — minutes later.
+   *
+   * WHAT IS NOT DEFERRED IS `_bindEvents()`. The ordering guarantee `Engine.initSystems()`
+   * gives every module is "when your `init()` resolves, your subscriptions exist"; deferring
+   * the whole of setup handed that away for two awaits, and `audio:vo` has exactly ONE
+   * subscriber in the codebase — this one. A line emitted into that hole is not an error
+   * anybody sees: `say()` answers with null, so the failure is silence. Binding first costs
+   * nothing, because every handler here is already written to survive a bank that is not
+   * ready: they read `this.actx`/`this._slots`/`this._convs`, all of which the constructor
+   * initialised, and `say()` refuses until `available`.
    */
   async init() {
     if (this._disposed) return;
+    this._bindEvents();
     this._ready = this._setup();
     // Never swallow an error in init(): if setup dies, say so loudly, with the stack.
     this._ready.catch((e) => {
@@ -404,8 +415,16 @@ export class VoiceBank {
     this._buildOutput();
     this._buildSlots();
     this._buildConversations();
-    this._bindEvents();
     this._pickUniforms();
+
+    // A silence rule that arrived before there was a clock to hang it on (see `holdVoice()`).
+    // Applied here, against the context we just acquired, so `night:begin`'s 9 s hold survives
+    // a setup that finished after the night started.
+    if (this._pendingHoldMs > 0) {
+      const ms = this._pendingHoldMs;
+      this._pendingHoldMs = 0;
+      this.holdVoice(ms, 'deferred — bound before the context existed');
+    }
 
     this._rand.seed((this.ctx?.settings?.get?.('seed') ?? 0x51a5cab) ^ 0x561ce);
     this._nextConvAt = this.actx.currentTime + 6;
@@ -610,7 +629,13 @@ export class VoiceBank {
    * VoiceBank also arms it from the canonical events it can observe on its own.
    */
   holdVoice(ms, reason) {
-    if (!this.actx) return;
+    if (!this.actx) {
+      // `init()` binds the canonical events before `_setup()` has a context, so a `night:begin`
+      // that beats the manifest off the network would otherwise lose its hold entirely. Keep
+      // the longest one asked for; `_setup()` applies it against the clock when it arrives.
+      this._pendingHoldMs = Math.max(this._pendingHoldMs, Math.max(0, ms));
+      return;
+    }
     const until = this.actx.currentTime + Math.max(0, ms) / 1000;
     if (until > this._silenceUntil) this._silenceUntil = until;
     if (reason) Log.debug(`VoiceBank: silence ${ms | 0}ms (${reason})`);

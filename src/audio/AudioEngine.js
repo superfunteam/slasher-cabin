@@ -123,20 +123,27 @@ const GEN_SECTIONS = ['beds', 'sfx', 'music'];
 // splash art does not get. The rule: FETCH WHAT THIS MOMENT NEEDS, PREFETCH WHAT THE NEXT
 // MOMENT WILL NEED, BLOCK ON NOTHING.
 //
-//   tier 0  title    the title score bed, and only once the context is actually running.
-//                    §9.4 makes the title screen silent until a gesture; a silent screen has
-//                    no use for the forest.
-//   tier 1  briefing the player pressed ASSEMBLE. Warm the score bed for BUILDING and let
-//                    the bed director reach the network for tonight's weather.
-//   tier 2  night    on demand, exactly as before.
+//   tier 0  title    the title score bed and nothing else, and only under the two conditions
+//                    in `mayFetchGenerated()`.
+//   tier 1  game     the player has committed to a night. Everything, on demand, plus the
+//                    speculative warm queue.
+//
+// THERE ARE TWO RUNGS, NOT THREE. There used to be a third, `night`, and it gated nothing:
+// every tier comparison in this file was `>= 1`, so promoting past 1 changed no behaviour
+// anywhere. It also carried a rationale about a "ladder collapse" — `game:start`
+// and `night:begin` arriving in one tick and firing "~2.8 MB in one tick" — describing a
+// stampede that the code could not produce, because tier 1 had already opened the gate for
+// every id before `night:begin` was even emitted. A constant that gates nothing is not free:
+// it is a claim, and this repo has been bitten twice by comments documenting behaviour the
+// code did not have. If a third rung ever earns a job, it can come back with a test in front
+// of it.
 //
 // A closed gate is NEVER a silence. Every caller below already falls through to the
 // procedural synthesis that is the permanent fallback (see the division of labour at the top
 // of `tools/generate-audio.mjs`), and the sample swaps itself in the moment it lands.
 const TIER_TITLE = 0;
-const TIER_BRIEFING = 1;
-const TIER_NIGHT = 2;
-const TIER_NAMES = ['title', 'briefing', 'night'];
+const TIER_GAME = 1;
+const TIER_NAMES = ['title', 'game'];
 
 /** The only generated ids the title screen may reach the network for. */
 const TIER0_IDS = ['music-title'];
@@ -145,13 +152,41 @@ const TIER0_IDS = ['music-title'];
  * How long a GEN_ONLY one-shot may arrive late and still be worth playing. Past this the
  * moment that asked for it is gone and a sound would land on nothing. See the missing-buffer
  * policy at the top of `play()`.
+ *
+ * MEASURED, not guessed — the previous 600 was a guess written in the same change that made
+ * this path unreachable, so it had never once been tested against the operation it bounds.
+ * Timed on this worktree at 127.0.0.1:5177, four cold assets, `cache: 'reload'`:
+ *
+ *   tarp-flap      49 KB   fetch->headers 238 ms   body 716 ms   decoded 929 ms
+ *   hammer-steel   33 KB                  219              747            986
+ *   twig-snap      33 KB                  108              454           1109
+ *   rain-on-tin   289 KB                  223              660            795
+ *
+ * Resource Timing puts the actual transfer for each of those at 4-13 ms. Nearly all of it is
+ * microtask scheduling and `decodeAudioData` on a busy main thread — and the moment a GEN_ONLY
+ * id is cold is exactly the moment the main thread is busiest. A budget the operation never
+ * meets is not a budget, it is the path switched off, which is where this one started.
+ *
+ * It stays a real bound: the only sound this can delay is the FIRST play of an id that has no
+ * synthesis to fall back on, the alternative to a late one is none at all, and the ids
+ * concerned are now warmed (WARM_ORDER) so in a played night it should never fire.
  */
-const LATE_PLAY_MS = 600;
+const LATE_PLAY_MS = 1200;
 
 /**
- * The order the night's audio is warmed in once the player has committed to a night, most
- * plausibly-needed first. Deliberately NOT the manifest order: this is a guess at what the
- * next few minutes of Night 1 will ask for, in the order it will ask.
+ * The late-play position snapshot. `opts.position` reaching `play()` is very often a
+ * module-scope scratch vector — ARCHITECTURE §12 REQUIRES callers to reuse one — so the late
+ * path copies the three numbers at schedule time and writes them back into this one vector at
+ * arrival. Safe to share: `play()` consumes it synchronously, and `_playBuffer()` copies it
+ * into the voice's own vector before returning.
+ */
+const _lateV = new THREE.Vector3();
+
+/**
+ * The order the night's audio is warmed in once the player has committed to a night: the ids
+ * with no fallback first, then the rest most-plausibly-needed first. Deliberately NOT the
+ * manifest order — after the first three this is a guess at what the next few minutes of
+ * Night 1 will ask for, in the order it will ask.
  *
  * Score beds are absent on purpose — `Music` keeps its own decode cache, and a 90 s stereo
  * bed is ~35 MB of Float32, so pulling a second copy into ours to hand over would cost more
@@ -161,6 +196,12 @@ const LATE_PLAY_MS = 600;
  * tick is what the tier gate exists to prevent — it just moves the stampede later.
  */
 const WARM_ORDER = [
+  // FIRST, and not by plausibility: the three GEN_ONLY ids. Every other id in this file has a
+  // procedural recipe standing behind it, so a cold one costs a slightly cheaper sound for a
+  // tick. These three have no recipe at all — cold means SILENT — which makes them the only
+  // entries here that are covering a hole rather than shaving a latency. They are also the
+  // three cheapest (33-49 KB), so putting them in front costs the rest of the queue nothing.
+  'lumber-stack', 'lantern-shutter', 'tarp-flap',
   // The bed the build phase opens on, and the two layers that sit on it from the first second.
   'forest-night-calm', 'wind-pines-light', 'crickets-dense',
   // The first sounds the player's own hands make: carry, drop, hammer, and the first bad join.
@@ -175,6 +216,15 @@ const WARM_ORDER = [
 
 /** Breathing room between speculative warms, so the queue never crowds a real request. */
 const WARM_GAP_MS = 400;
+
+/**
+ * How long to wait before re-testing the LRU's headroom, and how many times. A full cache is
+ * a WAIT, not an end: beds fade out and are evicted, the weather turns, and the room the queue
+ * needs appears. `WARM_STALL_MS * WARM_STALL_MAX` is a full minute of asking before it stands
+ * down, which is longer than any transient the cache has.
+ */
+const WARM_STALL_MS = 2500;
+const WARM_STALL_MAX = 24;
 
 /** `GameState.PHASES` split by tier, for the belt-and-braces promotion in `update()`. */
 const NIGHT_PHASES = ['build', 'chase'];
@@ -424,25 +474,29 @@ export class AudioEngine {
     this._loadTier = TIER_TITLE;
     this._briefingPrefetched = false;
 
-    // ---- the two conditions tier 0 requires before it will reach the network at all.
+    // ---- the two conditions tier 0 requires before it will reach the network at all. They
+    // are two DIFFERENT questions and the whole history of this gate is people merging them.
     //
-    // `started` is NOT one of them, and that distinction is the whole point. `started` means
-    // "the context is running", which a browser that permits autoplay (returning visitor,
-    // high media-engagement score) sets during `init()` with no human involved — measured on
-    // 127.0.0.1: `started === true` at the title with no gesture, and music-title.mp3
-    // (960,515 B) on the wire at 6,491 ms against a title reveal at 9,230 ms. That is ~1 MB
-    // competing with the splash art for the 2.7 s the preloader spends assembling the one
-    // composition it exists to reveal.
+    //   this.started       CAN IT BE HEARD? — the AudioContext is running. Nothing else in
+    //                      this class means that, and it is the only thing that decides
+    //                      whether a download can turn into a sound.
+    //   _firstScreenDone   IS THE PIPE FREE? — the preloader has finished assembling the one
+    //                      composition it exists to reveal and Menu has mounted a screen.
     //
-    //   _gestured    a real pointer/key/touch event has happened. Only a gesture can make
-    //                the title screen audible (§9.4), so before one there is nothing to hear
-    //                and therefore nothing worth downloading.
-    //   _pageSettled the first screen has stopped competing for bandwidth — same signal the
-    //                background SFX sweep already waits on (`load` + 250 ms, ASSEMBLE, or a
-    //                2.5 s backstop, whichever comes first).
+    // What must NOT be in here is "has a human touched the page". A browser that permits
+    // autoplay (returning visitor, high media-engagement score) has a running context and no
+    // gesture — that is a player who can hear the title bed, and gating on a gesture handed
+    // them silence. Measured live: `started true / context running / gestured false` at the
+    // title, `mayFetchGenerated('music-title') === false`, and no score for the whole screen.
     //
-    // Both must hold. Neither is ever un-set.
-    this._gestured = false;
+    // `_pageSettled` is NOT the pipe-free signal either, and that is measured too, on this
+    // worktree at 127.0.0.1:5177: the `load` event landed at 2,640 ms, `init()` therefore
+    // marked the page settled the moment it ran (~14.7 s under load), and Menu did not stamp
+    // `title-mounted` until 32,146.7 ms. It is ~17 s EARLY, not late. It survives here only as
+    // the fallback for a configuration that has no Menu to ask. See `_pollFirstScreen()`.
+    //
+    // Both conditions must hold. Neither is ever un-set.
+    this._firstScreenDone = false;
     this._pageSettled = false;
 
     // ---- the procedural SFX bank's boot cost, measured rather than guessed. Public so the
@@ -465,6 +519,11 @@ export class AudioEngine {
     this.loadStats = {
       coldDrops: 0,   // synthesized plays dropped because the bank had not rendered them yet
       latePlays: 0,   // GEN_ONLY one-shots that arrived after their call and played anyway
+      lateDrops: 0,   // …and the ones that landed past LATE_PLAY_MS and were not played
+      // Page-relative ms the tier-0 network gate opened, so "did the title bed load before or
+      // after the reveal?" is answerable against `__MENU_TIMING__` without instrumenting
+      // anything: both are `performance.now()` and so is Resource Timing. 0 = still shut.
+      titleGateAt: 0,
     };
     this._coldNoted = new Set();   // ids already reported cold, so the log stays one-per-id
 
@@ -472,6 +531,7 @@ export class AudioEngine {
     this._warmStarted = false;
     this._warmIdx = 0;
     this._warmTimer = 0;
+    this._warmStalls = 0;
 
     // The crossfading bed player.
     this._beds = new Map();              // name → track
@@ -567,8 +627,8 @@ export class AudioEngine {
   _scheduleBankSweep() {
     if (this._sweepStarted || !this.sfx) return;
     const start = () => {
-      // The page has stopped competing whether or not the bank still needs sweeping, so the
-      // fetch gate opens on this signal even when the sweep itself bails below.
+      // The page has loaded whether or not the bank still needs sweeping, so record it even
+      // when the sweep itself bails below. It is the no-Menu fallback for the fetch gate.
       this._markPageSettled();
       if (this._sweepStarted || !this.sfx || !this.context) return;
       this._sweepStarted = true;
@@ -599,7 +659,7 @@ export class AudioEngine {
 
   // =============================================================== loading tiers
 
-  /** 0 = title, 1 = briefing, 2 = night. Read-only; promote with `setLoadTier()`. */
+  /** 0 = title, 1 = game. Read-only; promote with `setLoadTier()`. */
   get loadTier() { return this._loadTier; }
 
   /**
@@ -609,16 +669,16 @@ export class AudioEngine {
    * @returns {number} the tier now in force
    */
   setLoadTier(tier) {
-    const t = clamp(Math.round(Number(tier) || 0), TIER_TITLE, TIER_NIGHT);
+    const t = clamp(Math.round(Number(tier) || 0), TIER_TITLE, TIER_GAME);
     if (t <= this._loadTier) return this._loadTier;
     this._loadTier = t;
     Log.debug(`Audio: load tier ${t} (${TIER_NAMES[t]}).`);
     // Anything the bed director asked for while the gate was shut asked in vain and fell
     // through to synthesis. Ask again now, so the recording swaps itself in.
     this._reviveDeferred();
-    if (t >= TIER_BRIEFING) this._prefetchBriefing();
+    this._prefetchBriefing();
     // The bank sweep is night work too; if the player got here before `load` fired, run it.
-    if (t >= TIER_BRIEFING && !this._sweepStarted) this._startBankSweep?.();
+    if (!this._sweepStarted) this._startBankSweep?.();
     return this._loadTier;
   }
 
@@ -631,21 +691,14 @@ export class AudioEngine {
    * @param {string} id manifest id, e.g. `'music-title'` or `'forest-night-calm'`
    */
   mayFetchGenerated(id) {
-    if (this._loadTier >= TIER_BRIEFING) return true;
-    // Tier 0. Only the title bed, and only once a REAL gesture has happened and the first
-    // screen has stopped competing for bandwidth. See `_gestured` / `_pageSettled` in the
-    // constructor for why `this.started` is not the test it looks like.
-    return this._gestured && this._pageSettled && TIER0_IDS.indexOf(String(id)) >= 0;
+    if (this._loadTier >= TIER_GAME) return true;
+    // Tier 0. Only the title bed; only once the context is running, because a download that
+    // cannot sound is wasted; and only once the first screen is finished, because until then
+    // the pipe belongs to the splash art. See the constructor for what each one means and for
+    // the measurement behind not using a gesture or `_pageSettled` for the second one.
+    return this.started === true && this._firstScreenDone
+      && TIER0_IDS.indexOf(String(id)) >= 0;
   }
-
-  /**
-   * May a *speculative* fetch of a VO line start right now? VO is an atmosphere layer that
-   * cannot be heard before the build phase, so below tier 1 the answer is always no.
-   *
-   * This gates SPECULATION ONLY — `VoiceBank.say()` is a real request and is never refused
-   * here, because a refused line is silence and silence is the failure mode.
-   */
-  mayFetchVoice() { return this._loadTier >= TIER_BRIEFING; }
 
   /**
    * Re-drive everything that asked while a gate was shut. A refusal is never written off:
@@ -660,13 +713,43 @@ export class AudioEngine {
   }
 
   /**
-   * The first screen has stopped fighting for bandwidth. Hung off the same signal as the
-   * background SFX sweep so no new coupling to the preloader is invented (ARCHITECTURE §5
-   * forbids a bus event without a table entry, and `Menu.js` exposes no API).
+   * The page's own `load` has fired (plus a beat). This is the SFX bank sweep's signal — a
+   * CPU-scheduling heuristic for work that costs no bytes — and it is only the fetch gate's
+   * signal in a configuration with no Menu to ask. It fires far too early to stand in for the
+   * reveal; the numbers are in the constructor.
    */
   _markPageSettled() {
     if (this._pageSettled) return;
     this._pageSettled = true;
+    this._pollFirstScreen();
+  }
+
+  /**
+   * Has the first screen finished assembling? This is the tier-0 network gate.
+   *
+   * `Menu` owns the reveal, so `Menu` is what we ask. `screen` is its public "a screen is
+   * mounted" field: null for the whole time the boot plate is up, non-null from the moment
+   * `_maybeReveal()` calls `showTitle()` — which is *after* all six preload units have
+   * completed, so by construction nothing the player is waiting on is still on the wire.
+   * Menu's own 45 s failsafe reveals no matter what boot did, so this needs no timer of its
+   * own to disagree with; a timer here could only fire early and undo the point of the gate.
+   *
+   * No Menu at all (`?nomenu`, the shot harness, a failed dynamic import) means nothing is
+   * assembling a first screen, and then the page's own load event is the only honest answer
+   * there is. Those configurations also auto-start a night within 1.2 s, which promotes the
+   * tier and opens the gate anyway.
+   *
+   * Polled from `update()`'s 20 Hz slow tick rather than pushed: ARCHITECTURE §5 forbids a bus
+   * event that is not in its table, `Menu.js` is another agent's file, and a null-checked read
+   * of a sibling system is the pattern this class already uses for Music, Weather and
+   * NoiseSystem. Costs one Map lookup per 50 ms, once, and never runs again after it latches.
+   */
+  _pollFirstScreen() {
+    if (this._firstScreenDone) return;
+    const menu = this.ctx?.systems?.get?.('Menu') ?? null;
+    if (!(menu ? menu.screen != null : this._pageSettled)) return;
+    this._firstScreenDone = true;
+    this.loadStats.titleGateAt = Math.round((performance.now?.() ?? 0) * 10) / 10;
     this._reviveDeferred();
   }
 
@@ -690,8 +773,9 @@ export class AudioEngine {
    *
    * Speculative by definition, so it defers to everything: it stops below tier 1, it never
    * re-fetches what demand already pulled, and it leaves headroom in the LRU so a warm can
-   * never evict something the game is actually using. At `quality: 'low'` the entry cap is 10
-   * and the ten beds pin all of it, so the headroom test correctly warms almost nothing.
+   * never evict something the game is actually using. When there is no headroom it waits and
+   * re-tests rather than standing down — at `quality: 'low'` the entry cap is 10 and the beds
+   * can pin all of it for minutes at a time, and that is a delay, not a verdict.
    */
   _startWarmQueue() {
     if (this._warmStarted) return;
@@ -703,11 +787,26 @@ export class AudioEngine {
   _warmPump() {
     this._warmTimer = 0;
     if (!this.enabled || !this.generatedAvailable) return;
-    if (this._loadTier < TIER_BRIEFING) return;
+    if (this._loadTier < TIER_GAME) return;
+    if (this._warmIdx >= WARM_ORDER.length) return;
+
     // Headroom, not capacity: warming into the last few slots would evict on the next demand
     // load and we would have spent bandwidth to make the cache worse.
-    if (this._genCache.size >= this._genMax - 4) return;
-    if (this._genBytes >= this._genBudget * 0.6) return;
+    //
+    // A bail here is a WAIT, not an end. This used to `return` with no timer armed while
+    // `_warmStarted` barred re-entry, so one full moment — every bed the weather happened to
+    // want at the instant the night began — killed the whole 19-item list for the session, and
+    // at `quality: 'low'` (entry cap 10, ten beds) the queue could never run at all. The cache
+    // does not stay full: beds fade out and are evicted, the weather turns. Ask again.
+    if (this._genCache.size >= this._genMax - 4 || this._genBytes >= this._genBudget * 0.6) {
+      if (++this._warmStalls > WARM_STALL_MAX) {
+        Log.debug('Audio: warm queue stood down — the cache stayed full for a minute.');
+        return;
+      }
+      this._warmTimer = setTimeout(() => this._warmPump(), WARM_STALL_MS);
+      return;
+    }
+    this._warmStalls = 0;
 
     while (this._warmIdx < WARM_ORDER.length) {
       const id = WARM_ORDER[this._warmIdx++];
@@ -721,6 +820,8 @@ export class AudioEngine {
         });
       return;                                          // exactly one request in flight
     }
+    // The loop only exits here with `_warmIdx` at the end of the list, which the guard at the
+    // top of the next call turns into a silent return — so this logs exactly once.
     Log.debug('Audio: warm queue complete.');
   }
 
@@ -745,37 +846,41 @@ export class AudioEngine {
   /**
    * §9.4 — the context starts suspended; the title screen is silent and says so by being silent.
    *
-   * `fromGesture` is load-bearing, not bookkeeping. The speculative-fetch gate asks "has a
-   * human touched this page", and only a real event can answer that. The unconditional
-   * `resume()` at the bottom exists to recover a context that is ALREADY running (an autoplay
-   * -permitting browser, or a bfcache restore) — it is not evidence of a player, and a
-   * measured ~1 MB of title score used to ride on it straight into the splash art's window.
+   * The unconditional `resume()` at the bottom is what recovers a context that is ALREADY
+   * running — an autoplay-permitting browser, a bfcache restore — and that case is a real
+   * listener, not a loophole: the context is running, so anything we play can be heard. This
+   * used to be split into "gesture" and "not gesture" so the fetch gate could ask whether a
+   * human had touched the page. That question is not the one the gate needed answering, and
+   * asking it silenced the title score for every visitor who never had to click.
    */
   _installGestureResume() {
-    const resume = (fromGesture) => {
-      if (fromGesture && !this._gestured) {
-        this._gestured = true;
-        // The title bed was refused while we could not prove a listener existed. Ask again.
-        this._reviveDeferred();
-      }
+    const resume = () => {
       if (!this.context) return;
-      if (this.context.state === 'running') { this.started = true; return; }
+      if (this.context.state === 'running') { this._markStarted(); return; }
       this.context.resume().then(() => {
-        this.started = true;
+        this._markStarted();
         Log.debug('Audio: context resumed on user gesture.');
       }).catch(() => { /* still suspended; try again on the next gesture */ });
     };
-    const onGesture = () => resume(true);
-    this._resumeHandler = onGesture;
+    this._resumeHandler = resume;
     for (const ev of ['pointerdown', 'keydown', 'touchstart']) {
-      globalThis.addEventListener?.(ev, onGesture, { passive: true });
+      globalThis.addEventListener?.(ev, resume, { passive: true });
     }
     this._onVisible = () => {
-      // A resume after an interruption is the OS handing the context back, not a new gesture.
-      if (this.context && this.context.state === 'interrupted') resume(false);
+      if (this.context && this.context.state === 'interrupted') resume();
     };
     globalThis.document?.addEventListener?.('visibilitychange', this._onVisible);
-    resume(false);
+    resume();
+  }
+
+  /**
+   * The context is running: half of the tier-0 gate just became true. Re-drive everything that
+   * was refused while nothing we downloaded could have been heard.
+   */
+  _markStarted() {
+    if (this.started) return;
+    this.started = true;
+    this._reviveDeferred();
   }
 
   // --------------------------------------------------------------- the graph
@@ -1047,6 +1152,8 @@ export class AudioEngine {
     //      "drop it" means the FIRST play of the session is permanently silent — the fetch
     //      scheduled by `_genSelect` one line below always lands after this frame. That is a
     //      dead sound nobody would notice for days. We let it arrive up to LATE_PLAY_MS late.
+    //      These three are also first in WARM_ORDER, so in a played night this is a backstop
+    //      rather than the mechanism — but it is the backstop for the only ids with no floor.
     //
     // The generated sample wins when it is resident; synthesis is the fallback and the
     // first-play stand-in while the asset decodes.
@@ -1054,7 +1161,7 @@ export class AudioEngine {
     let calGain = 1;
     let buf = null;
     if (gen) { buf = _gsel.buf; calGain = _gsel.gain; }
-    else if (genOnly) return this._playWhenFetched(id, resolved, opts);   // case 2
+    else if (genOnly) return this._playWhenFetched(id, opts);             // case 2
     else {
       buf = opts.variant != null
         ? this.sfx.variant(resolved, opts.variant)
@@ -1504,16 +1611,12 @@ export class AudioEngine {
     on('tool:missing', () => this.play('ui.deny', { bus: 'sfxUI' }));
     on('tool:found', () => this.play('ui.stamp', { bus: 'sfxUI' }));
 
-    // ---- loading tiers. ASSEMBLE is the first honest signal that a night is coming; until
-    // it lands the title screen fetches the title bed and nothing else.
-    on('game:start', () => this.setLoadTier(TIER_BRIEFING));
-    // `night:begin` is NOT tier 2. NightManager emits `game:start` and `night:begin` in the
-    // same synchronous call (one `setPhase('briefing')` between them), so binding tier 2 here
-    // took the ladder 0 -> 2 in a single tick and fired every deferred request at once —
-    // measured elsewhere as ~2.8 MB in one tick on the ASSEMBLE press. The briefing rung has
-    // to last as long as the briefing actually lasts, so tier 2 is driven by the arrival of a
-    // NIGHT phase instead (see the poll in `update()`), which is the thing it really means.
-    on('night:begin', () => this.setLoadTier(TIER_BRIEFING));
+    // ---- the loading tier. ASSEMBLE is the first honest signal that a night is coming; until
+    // it lands the title screen fetches the title bed and nothing else. Both events promote to
+    // the same rung and `setLoadTier()` is monotonic and idempotent, so it does not matter that
+    // NightManager emits them in one synchronous call.
+    on('game:start', () => this.setLoadTier(TIER_GAME));
+    on('night:begin', () => this.setLoadTier(TIER_GAME));
 
     on('night:begin', () => this._firstBreathOfTheNight());
     on('night:complete', () => { this._restoreMix(2200); this._setBreath('calm'); });
@@ -2285,23 +2388,43 @@ export class AudioEngine {
    *
    * Bounded on every axis a retry can run away on: one attempt only (`_late`), never for a
    * play the caller scheduled to an explicit time, and nothing at all once LATE_PLAY_MS has
-   * passed — a tarp flap 600 ms after the wind gust is a sound landing on nothing.
+   * passed — a tarp flap arriving well after the wind gust is a sound landing on nothing.
+   *
+   * TWO IDS, AND THEY ARE NOT THE SAME STRING. `play()` is called with OUR id (`lumber.stack`,
+   * dotted); `_genIndex`, `loadGenerated()` and `mayFetchGenerated()` all speak MANIFEST ids
+   * (`lumber-stack`, hyphenated), and `GEN_SFX` is the only translation between them. Testing
+   * the dotted id against the hyphenated map made every line below unreachable: `has()` was
+   * false for all three ids, so this returned null on its third statement, always, and
+   * `latePlays` could not leave zero. That is exactly the silence the whole path exists to
+   * prevent, hidden behind code that looks like it prevents it.
    * @returns {null} always — there is no voice to hand back yet, by definition.
    */
-  _playWhenFetched(id, resolved, opts) {
+  _playWhenFetched(id, opts) {
     if (opts._late) return null;                  // already the second attempt; never loop
     if (opts.when != null) return null;           // a scheduled play cannot be moved in time
-    if (!this.generatedAvailable || !this._genIndex.has(resolved)) return null;
-    if (!this.mayFetchGenerated(resolved)) return null;   // gated; the fetch has not started
+    const gid = GEN_SFX[id];
+    if (!gid) return null;
+    if (!this.generatedAvailable || !this._genIndex.has(gid)) return null;
+    if (!this.mayFetchGenerated(gid)) return null;        // gated; the fetch has not started
+
+    // Snapshot the request NOW. `opts` belongs to the caller and `opts.position` is very often
+    // a module-scope scratch vector — §12 REQUIRES callers to reuse one — so by the time the
+    // download lands, up to LATE_PLAY_MS later, it can be describing a different event
+    // entirely. `Weather._updateDrips()` reuses one vector for every drip in the storm.
+    const p = opts.position;
+    const late = { ...opts, _late: true, position: p ? { x: p.x, y: p.y, z: p.z } : null };
     const deadline = performance.now() + LATE_PLAY_MS;
-    this.loadGenerated(resolved).then((buf) => {
+
+    this.loadGenerated(gid).then((buf) => {
       if (!buf || !this.enabled || !this.context) return;
       if (performance.now() > deadline) {
-        Log.debug(`Audio: '${resolved}' landed after its moment — not played.`);
+        this.loadStats.lateDrops++;
+        Log.debug(`Audio: '${gid}' landed after its moment — not played.`);
         return;
       }
+      if (late.position) late.position = _lateV.set(late.position.x, late.position.y, late.position.z);
       this.loadStats.latePlays++;
-      this.play(id, { ...opts, _late: true });
+      this.play(id, late);
     }).catch(() => { /* already logged at debug by loadGenerated */ });
     return null;
   }
@@ -3243,16 +3366,14 @@ export class AudioEngine {
       this._pollLightning(now);
       this._updateThunder(now);
       this._updateBeds(now, slow);
-      // THE tier-2 driver, not a backstop. `night:begin` cannot serve — NightManager emits it
-      // in the same tick as `game:start`, which would collapse the briefing rung to nothing —
-      // so being IN a night phase is what unlocks the night's audio, at this 20 Hz tick.
-      // It doubles as the belt-and-braces path `Menu._startGame()` documents: NightManager may
+      // Belt and braces on the tier gate. `Menu._startGame()` documents that NightManager may
       // start a night through its own API without the canonical events, and a loaded save
-      // arrives already in a phase.
-      if (this._loadTier < TIER_NIGHT) {
+      // arrives already in a phase — either way, being IN a night unlocks the night's audio.
+      if (this._loadTier < TIER_GAME) {
         const ph = this.ctx?.state?.phase;
-        if (NIGHT_PHASES.indexOf(ph) >= 0) this.setLoadTier(TIER_NIGHT);
-        else if (ph === BRIEFING_PHASE) this.setLoadTier(TIER_BRIEFING);
+        if (NIGHT_PHASES.indexOf(ph) >= 0 || ph === BRIEFING_PHASE) this.setLoadTier(TIER_GAME);
+        // Only while tier 0 can the title bed still be waiting on the reveal.
+        else this._pollFirstScreen();
       }
     }
     void elapsed;
@@ -3427,6 +3548,7 @@ export class AudioEngine {
     this._startBankSweep = null;
     if (this._warmTimer) { clearTimeout(this._warmTimer); this._warmTimer = 0; }
     this._warmIdx = WARM_ORDER.length;     // an in-flight warm resolves into a finished queue
+    this._warmStalls = WARM_STALL_MAX + 1; // …and a stalled one stands down instead of re-arming
     this._coldNoted.clear();
 
     for (const ev of ['pointerdown', 'keydown', 'touchstart']) {
