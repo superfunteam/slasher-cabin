@@ -143,6 +143,42 @@ Night 1 too.
 The quality bar is unchanged: AAA, benchmarked against `public/img/keyart-*.png`. It is simply
 aimed at one night now.
 
+## OPEN: first-person camera shake, reported 2026-08-18
+
+Clark: *"the camera has bad shake... looking with the mouse works great, walking and running feels
+good, but there is crazy first-person jitter"* — and on follow-up, **it shakes even when standing
+still.** That second detail is the most useful constraint anyone has on this bug.
+
+**One cause is fixed and proven** (see the springs commit): both camera springs used semi-implicit
+Euler, unstable above dt 46 ms, diverging to 86 m at 20 fps and 1.3e21 at 10 fps, with a reset test
+that was a floor and therefore unreachable once diverged. It rang forever afterwards, at rest as
+much as in motion. Now substepped at 1/240 with ceiling guards that fire and log.
+
+**It is NOT confirmed that this was Clark's shake.** If it persists, these are the remaining
+candidates, in the order I would test them:
+
+1. **TAA jitter not being resolved.** `Postprocessing._renderScene` offsets the projection matrix
+   by Halton(2,3) *every frame* (`uJitter` verified at runtime as exactly `(0, -1/6)` texels). That
+   is correct only if the TAA resolve reconstructs it. If history is not accumulating, you see the
+   raw jittered image each frame — **the whole picture shakes while the camera is perfectly
+   still**, which fits the report better than anything in `Player.js`. TAA is on only at tier >= 2
+   (`Postprocessing.js:2726`), so ask what quality tier the reporter is running. Note
+   `uParams.w` is *sharpen*, not feedback — the tier gate at :2754 is a red herring; the history
+   blend is `uParams.x/y` (feedbackMin/Max).
+2. **The 1/f micro-tremor is stepped on the FIXED clock and sampled on the RENDER clock.**
+   `Player.js:741` calls `_tremorYaw.step(fdt)` inside the fixed-step loop; `:1906` reads `.value`
+   once per frame. When the accumulator delivers 2 substeps one frame and 1 the next, the noise
+   advances unevenly. Spec is +/-0.09 deg RMS, which should be invisible — **measure its actual
+   RMS in play** rather than trusting `PinkTremor.calibrate()`.
+3. **The same fixed-vs-render mismatch on `_bobPhase`** (`:1004` advances it by distance inside the
+   fixed loop, `:1873` samples it per frame, and the vertical term is `sin(2p)` so any phase error
+   is doubled). This one cannot explain shake at rest — sway is gated by `clamp01(speed / 0.45)` —
+   but it may be a second, motion-only artifact worth removing while in there.
+
+**Do not "fix" this by damping the handheld model.** `ART_DIRECTION §9.2`'s breathing, tremor,
+figure-8 sway and landing dip are deliberate and Clark likes how walking feels. The goal is to
+remove judder, not life. A trace that goes flat means the feel was deleted.
+
 ## Top gaps, in priority order
 
 1. **Draw calls 352–358 vs a 220 budget.** Nobody has attributed them by owner yet.
