@@ -1842,17 +1842,49 @@ export class Player {
     this.eyePosition.copy(_v);
 
     // -------------------------------------------------- springs
-    // Landing dip: ζ 0.56 / ω 17 → one 12% overshoot, ~0.42 s recovery (ART §9.2).
+    //
+    // Both springs are integrated with SEMI-IMPLICIT EULER, which is only conditionally stable:
+    // it needs omega*dt < 2*zeta, i.e. dt < 46 ms at stepSmoothW 18. `Engine.MAX_FRAME_DT` allows
+    // dt = 100 ms, where the eigenvalue is -5.33 PER FRAME. An evaluator measured the result:
+    // _stepSmooth 1560 m, _stepSmoothVel 18679 m/s, camera.position.y swinging +41,847 -> -7,189.
+    //
+    // It was also UNRECOVERABLE, because the reset below only fires BELOW 1e-4 — a test a diverged
+    // spring can never satisfy. So one slow frame while stepping over anything left the camera
+    // ringing for the rest of the session, including while standing perfectly still. And because
+    // `BuildSystem._eye()` reads this camera, pickup and placement silently stopped working while
+    // the world still rendered normally.
+    //
+    // Fixed by substepping at a bound the integrator is always stable at, rather than by clamping
+    // the frame. At SPRING_DT the worst case is omega*dt = 18/240 = 0.075, three orders inside the
+    // limit, and at 60 fps the result is within rounding of the old path — the feel is unchanged.
+    const SPRING_DT = 1 / 240;
+    const nSub = Math.min(64, Math.max(1, Math.ceil(dt / SPRING_DT)));
+    const sdt = dt / nSub;
     const lw = T.landSpringW, lz = T.landSpringZ;
-    this._landVel += (-lw * lw * this._landImpulse - 2 * lz * lw * this._landVel) * dt;
-    this._landImpulse += this._landVel * dt;
-    if (Math.abs(this._landImpulse) < 1e-4 && Math.abs(this._landVel) < 1e-4) { this._landImpulse = 0; this._landVel = 0; }
-
-    // Step-up: absorb the lift, then give it back.
     const sw = T.stepSmoothW;
-    this._stepSmoothVel += (-sw * sw * this._stepSmooth - 2 * sw * this._stepSmoothVel) * dt;
-    this._stepSmooth += this._stepSmoothVel * dt;
+    for (let i = 0; i < nSub; i++) {
+      // Landing dip: ζ 0.56 / ω 17 → one 12% overshoot, ~0.42 s recovery (ART §9.2).
+      this._landVel += (-lw * lw * this._landImpulse - 2 * lz * lw * this._landVel) * sdt;
+      this._landImpulse += this._landVel * sdt;
+      // Step-up: absorb the lift, then give it back.
+      this._stepSmoothVel += (-sw * sw * this._stepSmooth - 2 * sw * this._stepSmoothVel) * sdt;
+      this._stepSmooth += this._stepSmoothVel * sdt;
+    }
+    if (Math.abs(this._landImpulse) < 1e-4 && Math.abs(this._landVel) < 1e-4) { this._landImpulse = 0; this._landVel = 0; }
     if (Math.abs(this._stepSmooth) < 1e-4) { this._stepSmooth = 0; this._stepSmoothVel = 0; }
+
+    // A guard that CAN fire. The two tests above are floors, so they are unreachable once a spring
+    // has run away; these are ceilings. _landImpulse is built from clamp01 and _stepSmooth from
+    // min(rise, stepHeight 0.45), so neither has any business exceeding these bounds — reaching
+    // one means the integrator has gone unstable and the camera is unusable until it is reset.
+    if (!Number.isFinite(this._landImpulse) || !Number.isFinite(this._landVel) || Math.abs(this._landImpulse) > 4) {
+      Log.once('player:land-spring', 'Player: landing spring diverged — reset. Report the frame rate this happened at.');
+      this._landImpulse = 0; this._landVel = 0;
+    }
+    if (!Number.isFinite(this._stepSmooth) || !Number.isFinite(this._stepSmoothVel) || Math.abs(this._stepSmooth) > 2) {
+      Log.once('player:step-spring', 'Player: step-up spring diverged — reset. Report the frame rate this happened at.');
+      this._stepSmooth = 0; this._stepSmoothVel = 0;
+    }
 
     // -------------------------------------------------- footstep sway (the figure-8)
     const cls = this.carryClass;
