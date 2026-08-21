@@ -3516,6 +3516,20 @@ export class BuildSystem {
           offsetMm: join.outcome === OUTCOMES.ROTATED ? TUNING.rotatedOffsetMm : 0,
           candidate: join.candidate,
         });
+        // CabinSite now OWNS this slot's visual — it rebuilds the installed part into its own
+        // merged geometry. The loose mesh we were carrying has to go, or the player sees the block
+        // seat into the slot AND a second copy left frozen in mid-air at the hand anchor. Reported
+        // from play as "it places the block there AND leaves it frozen in the air where you were
+        // holding it", and it is a duplicate, not a ghost.
+        //
+        // The fallback path below never had this bug because it MOVES the carried mesh into the
+        // slot instead of drawing a new one. Only the CabinSite branch returns early, and it
+        // returned without ever hiding the original.
+        //
+        // `removeJoin()` already sets `object3D.visible = true` when a join is pried back out, so
+        // "hidden while installed" was always the intended contract — this is the half that was
+        // never written. Keep the two in step: hide here, show there.
+        if (join.part?.object3D) join.part.object3D.visible = false;
         return;
       } catch (e) { Log.once('bs:setinstalled', 'CabinSite.setInstalled threw; seating locally.', e); }
     }
