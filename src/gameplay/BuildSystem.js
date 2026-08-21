@@ -117,6 +117,24 @@ import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
 // else. Section references are load-bearing: they are how the next agent audits a change.
 // =================================================================================================
 
+// --- part markers: the manual's glyph over anything still pick-up-able. See _updateMarkers().
+const MARKER_INK    = 0xcfd3cc;  // PAL.chalk -- the same ink as the ground marks, deliberately
+const MARKER_SIZE   = 0.30;      // m, at the near edge of the readable band
+const MARKER_LIFT   = 0.42;      // m above the part's top face
+const MARKER_ALPHA  = 0.58;      // I first set 0.82 and blamed it for the frame's p99.9 of 0.98.
+                                 // ABLATED AND WRONG: 0.82 -> 0.58 moved p99.9 by 0.006, so the
+                                 // near-white is the LANTERN CORE, which is deliberate (site-close
+                                 // reads 0.9496 for the same reason). Kept 0.58 anyway, on eyes
+                                 // rather than numbers: at 38 m the glyph is still unmistakable,
+                                 // and it sits IN the fog instead of floating on top of it.
+const MARKER_HIDE   = 1.8;       // m -- fully gone this close; you are picking it up in a moment
+const MARKER_NEAR   = 4.5;       // m -- fully faded in by here
+const MARKER_FAR    = 38.0;      // m -- start dropping out
+const MARKER_FADE   = 12.0;      // m -- ...and gone by FAR + FADE
+const MARKER_GROW   = 0.018;     // per metre past NEAR, to hold apparent size at range
+const MARKER_BOB    = 0.055;     // m of travel
+const MARKER_BOB_HZ = 1.35;      // rad/s
+
 export const TUNING = Object.freeze({
   // --- snapping and placement (§6.3, §6.4)
   snapRadius: 0.65,             // m — inside it the carried part ghosts into the slot
@@ -979,6 +997,7 @@ export class BuildSystem {
     this._ownedGeo = [];
     this._ownedMat = [];
     this._handAnchor = null;
+    this._markerT = 0;
 
     this._unsubs = [];
     this._disposed = false;
@@ -1501,6 +1520,7 @@ export class BuildSystem {
       object3D: null, home: { x, y, z },
     };
     part.object3D = this._makeMesh(part);
+    this._attachMarker(part);
     if (part.object3D) {
       part.object3D.position.set(x, y + spec.dims[1] * 0.5, z);
       part.object3D.rotation.y = part.yaw;
@@ -1524,6 +1544,136 @@ export class BuildSystem {
    * DELETE THIS BRANCH the day `CabinSite._buildPart` grows a `case 'MALLET'` — CabinSite owns
    * the plot's look and should win the moment it has an opinion.
    */
+  /**
+   * PART MARKERS — the manual's own pier glyph, floating over anything you can still pick up.
+   *
+   * Reported from play: "the blocks are very hard to see." They are 0.5 m stones on dark dirt at
+   * night, and the lantern pool ends at 10-12 m, so beyond that they are a silhouette against a
+   * silhouette. A player who cannot find the parts cannot start the game.
+   *
+   * ART_DIRECTION §13.8 forbids an OBJECTIVE MARKER, and this is deliberately not one: it does not
+   * point at a goal, it does not path anywhere, and it says nothing about what to do. It marks an
+   * object as pick-up-able, in the manual's own ink, which is the same argument §17 makes for the
+   * chalk — the drawing and the world use one visual language. It is drawn in PAL.chalk, the same
+   * colour as the ground marks, so the glyph and the square it belongs in read as one system.
+   *
+   * Deliberate properties:
+   *   - depth-tested, so a tree in front of the stone hides it. It is IN the world, not on the HUD.
+   *   - fades in past 4 m and out again past 45 m, so it never competes with a stone you can
+   *     already plainly see, and never litters the horizon.
+   *   - bobs on summed time-based sine, never Math.random(), with a per-part phase hashed from the
+   *     id so a pallet does not pulse in unison. Deterministic, so screenshot regression still
+   *     reproduces, and frozen entirely while `Shots.active` poses a capture.
+   *   - toneMapped false, so auto-exposure cannot dim it out of existence in a dark frame.
+   */
+  _markerTexture() {
+    if (BuildSystem._markerTex) return BuildSystem._markerTex;
+    const S = 128;
+    const c = globalThis.document?.createElement?.('canvas');
+    if (!c) return null;
+    c.width = S; c.height = S;
+    const g = c.getContext('2d');
+    if (!g) return null;
+    // The manual's line weights (ART §13.2): a heavy outline, a thin interior fold.
+    g.clearRect(0, 0, S, S);
+    g.strokeStyle = '#ffffff';
+    g.lineJoin = 'round';
+    g.lineCap = 'round';
+    // an isometric block, the same figure the manual draws at panel 1.3
+    const cx = S * 0.5, top = S * 0.30, w = S * 0.26, h = S * 0.17, d = S * 0.20;
+    g.lineWidth = S * 0.055;
+    g.beginPath();                       // top face
+    g.moveTo(cx, top); g.lineTo(cx + w, top + h); g.lineTo(cx, top + h * 2); g.lineTo(cx - w, top + h); g.closePath();
+    g.stroke();
+    g.beginPath();                       // left and right walls
+    g.moveTo(cx - w, top + h); g.lineTo(cx - w, top + h + d); g.lineTo(cx, top + h * 2 + d); g.lineTo(cx, top + h * 2);
+    g.moveTo(cx + w, top + h); g.lineTo(cx + w, top + h + d); g.lineTo(cx, top + h * 2 + d);
+    g.stroke();
+    g.lineWidth = S * 0.038;             // the manual's downward arrow: "this goes in the square"
+    g.beginPath();
+    g.moveTo(cx, top + h * 2 + d + S * 0.06); g.lineTo(cx, S * 0.93);
+    g.moveTo(cx - S * 0.06, S * 0.86); g.lineTo(cx, S * 0.93); g.lineTo(cx + S * 0.06, S * 0.86);
+    g.stroke();
+    const tex = new THREE.CanvasTexture(c);
+    tex.colorSpace = THREE.SRGBColorSpace;
+    tex.generateMipmaps = true;
+    tex.minFilter = THREE.LinearMipmapLinearFilter;
+    BuildSystem._markerTex = tex;
+    return tex;
+  }
+
+  _attachMarker(part) {
+    if (!part?.object3D || part.type === 'tool') return;
+    const tex = this._markerTexture();
+    if (!tex) return;
+    try {
+      const mat = new THREE.SpriteMaterial({
+        map: tex,
+        color: MARKER_INK,
+        transparent: true,
+        opacity: 0,
+        depthTest: true,
+        depthWrite: false,
+        toneMapped: false,
+        fog: true,
+      });
+      const sp = new THREE.Sprite(mat);
+      const dims = part.dims || [0.5, 0.4, 0.5];
+      sp.scale.setScalar(MARKER_SIZE);
+      sp.position.set(0, (dims[1] ?? 0.4) * 0.5 + MARKER_LIFT, 0);
+      sp.name = `marker:${part.id}`;
+      sp.renderOrder = 2;
+      sp.frustumCulled = true;
+      part.object3D.add(sp);
+      part.marker = sp;
+      // Deterministic per-part bob phase — hashed from the id, never Math.random().
+      let hsh = 0;
+      const id = String(part.id ?? '');
+      for (let i = 0; i < id.length; i++) hsh = (hsh * 31 + id.charCodeAt(i)) | 0;
+      part.markerPhase = (Math.abs(hsh) % 628) / 100;
+    } catch (e) {
+      Log.once('bs:marker', 'BuildSystem: part marker could not be created.', e);
+    }
+  }
+
+  _updateMarkers(dt) {
+    const shots = this.ctx?.systems?.get?.('Shots');
+    // Held at a fixed phase under a posed capture, for the same reason the lantern's fuel is
+    // (HANDOFF measurement failure #4): a moving element makes every luma number irreproducible.
+    if (!(shots && shots.active)) this._markerT += Math.min(dt || 0, 0.1);
+    const t = this._markerT;
+    const cam = this.ctx?.camera;
+    if (!cam) return;
+    const parts = this.available;
+    for (let i = 0; i < parts.length; i++) {
+      const part = parts[i];
+      const sp = part?.marker;
+      if (!sp) continue;
+      // Only something you can actually walk up to and take.
+      const takeable = !part.playerHeld && part.state !== 'held' && part.state !== 'placed';
+      if (!takeable) { if (sp.visible) sp.visible = false; continue; }
+      const o = part.object3D;
+      if (!o || !o.visible) { if (sp.visible) sp.visible = false; continue; }
+      const dx = o.position.x - cam.position.x;
+      const dy = o.position.y - cam.position.y;
+      const dz = o.position.z - cam.position.z;
+      const dist = Math.sqrt(dx * dx + dy * dy + dz * dz);
+      // Near fade: you can already see the stone. Far fade: do not litter the horizon.
+      let a = 1;
+      if (dist < MARKER_NEAR) a = Math.max(0, (dist - MARKER_HIDE) / (MARKER_NEAR - MARKER_HIDE));
+      else if (dist > MARKER_FAR) a = Math.max(0, 1 - (dist - MARKER_FAR) / MARKER_FADE);
+      if (a <= 0.001) { if (sp.visible) sp.visible = false; continue; }
+      sp.visible = true;
+      sp.material.opacity = a * MARKER_ALPHA;
+      const dims = part.dims || [0.5, 0.4, 0.5];
+      sp.position.y = (dims[1] ?? 0.4) * 0.5 + MARKER_LIFT
+        + Math.sin(t * MARKER_BOB_HZ + part.markerPhase) * MARKER_BOB;
+      // Hold a constant on-screen size past the near band so it stays readable at 40 m.
+      const s = MARKER_SIZE * (1 + Math.max(0, dist - MARKER_NEAR) * MARKER_GROW);
+      if (sp.scale.x !== s) sp.scale.setScalar(s);
+    }
+  }
+
   _makeMesh(part) {
     const site = this.ctx?.systems?.get?.('CabinSite');
     if (site && typeof site.partMesh === 'function' && part.type !== 'tool') {
@@ -1700,6 +1850,8 @@ export class BuildSystem {
     this._updateTaps(d);
     this._updateFuses(d);
     this._updateRig(d);
+
+    this._updateMarkers(d);
 
     if (building) this._updateCreaks(d);
 
