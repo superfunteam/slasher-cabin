@@ -11,7 +11,10 @@ export const QUALITY_ORDER = ['low', 'medium', 'high', 'ultra'];
 
 export const DEFAULTS = {
   seed: DEFAULT_SEED,
-  quality: 'ultra',
+  // Only a fallback: the constructor replaces this with Settings.detectQuality() on a first
+  // visit. It was 'ultra', which allocated ~724 MB before the first frame and crashed a
+  // reporter's browser during load. 'high' is the safe floor if detection cannot run.
+  quality: 'high',
   dprCap: 2.0,
 
   fov: 72,
@@ -41,7 +44,11 @@ export class Settings {
   constructor(bus) {
     this.bus = bus;
     this._values = { ...DEFAULTS };
-    this.load();
+    // A returning player's own choice always wins. Only guess for a machine we have never seen —
+    // see detectQuality() for why guessing at all is necessary. URL overrides run last, so
+    // `?quality=ultra` still pins the tier for the screenshot harness and every visual baseline.
+    const hadQuality = this.load();
+    if (!hadQuality) this._values.quality = Settings.detectQuality();
     this._applyUrlOverrides();
   }
 
@@ -95,17 +102,81 @@ export class Settings {
   load() {
     try {
       const raw = globalThis.localStorage?.getItem(STORAGE_KEY);
-      if (!raw) return;
+      if (!raw) return false;
       const parsed = JSON.parse(raw);
+      const hadQuality = 'quality' in parsed && QUALITY_ORDER.includes(parsed.quality);
       // Only accept keys we know about — guards against stale/hostile storage.
       for (const k of Object.keys(DEFAULTS)) {
         if (k in parsed && typeof parsed[k] === typeof DEFAULTS[k]) {
           this._values[k] = parsed[k];
         }
       }
+      return hadQuality;
     } catch (e) {
       Log.warn('Settings.load failed, using defaults:', e);
+      return false;
     }
+  }
+
+  /**
+   * Pick a starting quality tier for a machine we have never seen.
+   *
+   * WHY THIS EXISTS. `DEFAULTS.quality` was 'ultra', so every first-time visitor booted at the
+   * most expensive tier in the game. Measured, that is:
+   *
+   *     procedural texture bake   455 MB   (23 materials x 3 MRT attachments, hero at 2048^2)
+   *     framebuffer chain         269 MB   (3840x2160 because dprCap 2.0 on a 4K monitor)
+   *     ------------------------------------------------------------------
+   *     ~724 MB of GPU memory allocated BEFORE THE FIRST FRAME IS DRAWN
+   *
+   * A reporter's browser died during load on a fast gaming PC and merely crawled on a Mac — the
+   * gaming PC was WORSE precisely because its monitor is bigger, so the framebuffers were bigger.
+   * The download is 22 MB and was never the problem.
+   *
+   * The same table one tier down (`high`) is 114 MB + 151 MB, i.e. 2.7x less, and two tiers down
+   * (`medium`) is 28 MB. So the cost of guessing low is a softer image; the cost of guessing high
+   * is a tab that never opens. This guesses low on purpose, and NEVER auto-selects ultra — ultra
+   * remains reachable from the settings menu and from `?quality=ultra`, which is what the
+   * screenshot harness and every visual baseline use.
+   *
+   * The signals are weak and deliberately treated as such: `deviceMemory` is Chromium-only and
+   * bucketed, `hardwareConcurrency` says nothing about the GPU, and neither is available in
+   * Safari. When we know nothing we choose 'high', not 'ultra'.
+   */
+  static detectQuality() {
+    const nav = globalThis.navigator ?? {};
+    const step = (q, by) => QUALITY_ORDER[Math.max(0, Math.min(QUALITY_ORDER.length - 1,
+      QUALITY_ORDER.indexOf(q) + by))];
+
+    let q = 'high';
+    const reasons = [];
+
+    // Bucketed to 0.25/0.5/1/2/4/8 and capped at 8 by the spec, so treat it as a floor, not a
+    // measurement. Absent entirely in Safari and Firefox.
+    const mem = Number(nav.deviceMemory);
+    if (Number.isFinite(mem) && mem > 0) {
+      if (mem <= 2) { q = 'low'; reasons.push(`deviceMemory ${mem}GB`); }
+      else if (mem <= 4) { q = 'medium'; reasons.push(`deviceMemory ${mem}GB`); }
+    }
+
+    // A weak proxy for "this is a phone or a very old laptop". Says nothing about the GPU.
+    const cores = Number(nav.hardwareConcurrency);
+    if (Number.isFinite(cores) && cores > 0 && cores <= 4) {
+      q = step(q, -1); reasons.push(`${cores} cores`);
+    }
+
+    // The one signal that actually predicts our cost, because every post target is sized from it.
+    // A 4K panel at dpr 2 is 8.3 Mpx, which is 4x the framebuffer of a 1080p panel at dpr 1.
+    const dpr = Math.min(globalThis.devicePixelRatio || 1, 2);
+    const w = globalThis.innerWidth || 1280;
+    const h = globalThis.innerHeight || 720;
+    const mpx = (w * dpr * h * dpr) / 1e6;
+    if (mpx > 5) { q = step(q, -1); reasons.push(`${mpx.toFixed(1)} Mpx framebuffer`); }
+
+    Log.info(`Settings: auto quality '${q}'`
+      + (reasons.length ? ` (${reasons.join(', ')})` : ' (no device hints available)')
+      + '. Change it in Settings, or force one with ?quality=<low|medium|high|ultra>.');
+    return q;
   }
 
   save() {
