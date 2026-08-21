@@ -16,7 +16,7 @@ torque 1.0, and `build:stage-complete {stage:1}` fired.
 |---|---|
 | Modules | 36/36, **0 fatal**, clean production build |
 | Frame cost | ~3 ms at 720p (an earlier "9 fps" was browser contention, not cost) |
-| Draw calls | **352–358 — over the 220 budget in ARCHITECTURE §10.** Unresolved. |
+| Draw calls | **343 at `high`, over ARCHITECTURE §10's 220.** Now attributed — see the performance section. |
 | Visual, honest | ~5/10 mean over 13 shots; `site-close`/`opening` reach 7; lightning now lands |
 | Assets | 14 generated images, 33 audio beds/SFX/score, 90 VO lines |
 | First load | `dist` **22 MB** on disk (from 59). **On the wire, the title screen fetches ~20 KB of audio, not 17 MB** — audio is on-demand. |
@@ -178,6 +178,55 @@ candidates, in the order I would test them:
 **Do not "fix" this by damping the handheld model.** `ART_DIRECTION §9.2`'s breathing, tremor,
 figure-8 sway and landing dip are deliberate and Clark likes how walking feels. The goal is to
 remove judder, not life. A trace that goes flat means the feel was deleted.
+
+## PERFORMANCE: the load crash is fixed; the frame rate is not
+
+**Reported 2026-08-18:** slow on a Mac, and on a fast gaming PC *the browser crashed during load,
+before the scene appeared.*
+
+**Cause, and it was neither file size nor lighting.** `DEFAULTS.quality` was `'ultra'`, so every
+first-time visitor booted the most expensive tier. Measured in the running game by walking and
+summing every scene texture:
+
+| tier | scene textures | hero size | effectiveDpr |
+|---|---|---|---|
+| `ultra` | **269.6 MB** | 2048² | 2.0 |
+| `high` | **68.0 MB** | 1024² | 1.5 |
+
+Plus a framebuffer chain sized from dpr — on a 4K panel, ultra allocated a 3840×2160 scene MRT, a
+32F depth buffer and two TAA history buffers, ~269 MB. **Roughly 540 MB → 220 MB before the first
+frame.** That is also why the *gaming PC was worse than the Mac*: framebuffer cost scales with the
+panel, not the GPU. *Fixed: `Settings.detectQuality()` picks a tier from `deviceMemory`,
+`hardwareConcurrency` and projected megapixels, and **never auto-selects ultra**. `?quality=ultra`
+still pins it, so the screenshot harness and every visual baseline are unaffected.*
+
+**The texture bake was NOT the problem** and was not touched — it already yields with
+`await _nextTick()` per material, deliberately `setTimeout` rather than `rAF` because a hidden tab
+throttles rAF to 1 Hz. This was memory exhaustion, not a main-thread stall.
+
+### Draw-call attribution — gap #1, finally measured
+
+At `high`, 343 calls / 1.788 M triangles / **241 compiled programs**, by top-level scene group:
+
+| group | meshes | ktris |
+|---|---|---|
+| **Forest** | **74** | **759** |
+| `sc-props` | 38 | 76 |
+| **BuildSystem** | **30** | **2** |
+| Terrain | 29 | 97 |
+| Campers | 14 | 14 |
+| lantern | 8 | 2 |
+| CabinSite | 7 | 2 |
+
+Two targets stand out, and neither has been touched:
+1. **Forest is 42% of all triangles and 74 draw calls.** Instancing or merging by material is the
+   single biggest frame-rate win available.
+2. **BuildSystem spends 30 draw calls on 2 k triangles.** That is 30 calls for essentially no
+   geometry — a batching problem, not a geometry problem, and the cheapest call reduction here.
+
+Listed meshes sum to ~205 against 343 calls; the difference is shadow passes re-drawing casters
+plus the post chain. **241 shader programs is also a real load cost** on drivers slower to compile
+than Apple's, and nobody has looked at where the permutations come from.
 
 ## Top gaps, in priority order
 
