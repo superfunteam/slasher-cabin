@@ -2723,7 +2723,9 @@ export class Postprocessing {
   _applyTier() {
     const t = this._tier;
     const s = this._settings;
-    const taa = t >= 2;
+    // Tier gates it, but an explicit setting can still force it off — TAA jitters the
+    // projection every frame, so it is the first thing to eliminate when a still frame shimmers.
+    const taa = t >= 2 && (s?.get?.('taa') ?? true) !== false;
 
     this.setRenderScale();          // tier default; ultra is 1.0, so ultra is bit-identical
 

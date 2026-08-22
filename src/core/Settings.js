@@ -32,6 +32,11 @@ export const DEFAULTS = {
   chromaticAberration: true,
   vignette: true,
   headBob: true,
+  // The two TEMPORAL accumulators. Both are real quality settings and both are the usual
+  // suspects when the image shimmers in a scene that is not moving, so they are individually
+  // switchable from the URL (?taa=0, ?vfog=0) to bisect that in two refreshes.
+  taa: true,
+  volumetricFog: true,
 
   difficulty: 'standard',   // 'story' | 'standard' | 'nightmare'
   puzzleHints: false,
@@ -213,6 +218,8 @@ export class Settings {
         const f = parseFloat(p.get('fov'));
         if (Number.isFinite(f)) this._values.fov = Math.max(50, Math.min(110, f));
       }
+      if (p.has('taa')) this._values.taa = p.get('taa') !== '0' && p.get('taa') !== 'false';
+      if (p.has('vfog')) this._values.volumetricFog = p.get('vfog') !== '0' && p.get('vfog') !== 'false';
       if (p.has('mute')) this.patch({ masterVolume: 0 });
     } catch { /* non-browser */ }
   }

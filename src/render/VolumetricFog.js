@@ -771,6 +771,16 @@ export class VolumetricFog {
   async init() {
     const ctx = this.ctx;
     const renderer = ctx.renderer;
+
+    // An explicit off switch, honoured before anything is allocated. This pass reprojects
+    // temporally, so it is one of exactly two systems that can make a STILL frame shimmer (TAA is
+    // the other) — `?vfog=0` exists so the two can be bisected in a refresh instead of a rebuild.
+    if ((ctx.settings?.get?.('volumetricFog') ?? true) === false) {
+      Log.info('VolumetricFog: disabled by settings (volumetricFog=false).');
+      this.enabled = false;
+      return;
+    }
+
     if (!renderer) {
       Log.warn('VolumetricFog: no ctx.renderer — disabled.');
       this.enabled = false;
