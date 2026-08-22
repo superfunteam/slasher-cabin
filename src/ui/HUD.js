@@ -112,6 +112,12 @@ const C = {
 // =================================================================================================
 
 const G = {
+  // --- site plan (the radar). See _buildSitePlan.
+  planBox: 168,              // px on screen, bottom-right
+  planInset: 26,             // px in from the corner — matches edgeInset
+  planR: 96,                 // viewBox radius; the disc
+  planRange: 55,             // m mapped to the rim. Past this a mark becomes a bearing arrow
+  planPool: 28,              // pre-allocated marks; nothing is created per frame
   edgeInset: 26,             // px in from the viewport edge — the detection ellipse
   maskInset: 11,             // px further in for the thunder arc, so the two never touch
   maskROffset: 15,           // px outside the detection ring
@@ -600,6 +606,9 @@ export class HUD {
     this._disposed = false;
     this._unsubs = [];
     this._root = null;
+    this._planEl = null;
+    this._planMarks = null;
+    this._planT = 0;
     this._style = null;
 
     // --- viewport. `ctx.width/height` are 1×1 until Engine's first resize, and Engine's resize
@@ -1031,6 +1040,10 @@ export class HUD {
     }
     root.appendChild(toasts);
 
+    // The site plan is built last so it layers over the edge SVG but under toasts.
+    try { this._buildSitePlan(root); }
+    catch (e) { Log.error('HUD: site plan could not be built.', e); }
+
     doc.body.appendChild(root);
   }
 
@@ -1226,6 +1239,191 @@ export class HUD {
   // FRAME
   // ===============================================================================================
 
+
+  // ===============================================================================================
+  // SITE PLAN (the radar)
+  //
+  // ART_DIRECTION §13.8 forbids a minimap by name, and the header of this file repeats it. This is
+  // a deliberate, owner-authorised override, granted after a player hit two walls the wordless
+  // design was meant to prevent: "I still can't tell what to do" and "the blocks are very hard to
+  // see." The prohibition assumed spatial reading would be TAUGHT. Until it is, it was only
+  // withholding.
+  //
+  // So it is drawn as the thing this character would actually carry: a SURVEYOR'S SITE PLAN, in
+  // the manual's ink on the manual's paper, at the manual's line weights (§13.2). Not a glowing
+  // radar. Everything on it is a mark the manual could plausibly print.
+  //
+  // NOT a second camera. The usual Three.js minimap renders the scene top-down into a render
+  // target; that is a whole extra scene pass, and this project is already at 343 draw calls
+  // against §10's budget of 220. A plan does not need to RENDER the world, only to plot a dozen
+  // positions, so this is SVG and costs one transform write per visible mark.
+  //
+  // Forward is UP. A north-up plan makes the player do a mental rotation every glance, which is
+  // the exact skill they are struggling with.
+  // ===============================================================================================
+
+  _buildSitePlan(root) {
+    const R = G.planR;
+    const s = svg('svg', {
+      class: 'sc-plan',
+      viewBox: `${-R - 6} ${-R - 6} ${(R + 6) * 2} ${(R + 6) * 2}`,
+      'aria-hidden': 'true',
+    });
+    const st = s.style;
+    st.position = 'absolute';
+    st.right = `${G.planInset}px`;
+    st.bottom = `${G.planInset}px`;
+    st.width = `${G.planBox}px`;
+    st.height = `${G.planBox}px`;
+    st.pointerEvents = 'none';
+    st.opacity = '0';
+    st.transition = 'opacity 260ms ease';
+
+    // paper disc, then the rim and two range rings in the manual's weights
+    s.appendChild(svg('circle', { r: R, cx: 0, cy: 0, fill: C.paper, 'fill-opacity': '0.055' }));
+    s.appendChild(svg('circle', {
+      r: R, cx: 0, cy: 0, fill: 'none',
+      stroke: `rgba(${C.warm}, 0.42)`, 'stroke-width': 1.6,
+    }));
+    for (const f of [0.34, 0.67]) {
+      s.appendChild(svg('circle', {
+        r: R * f, cx: 0, cy: 0, fill: 'none',
+        stroke: `rgba(${C.warm}, 0.14)`, 'stroke-width': 0.8,
+        'stroke-dasharray': '3 5',
+      }));
+    }
+    // the forward tick — a surveyor's north mark, pointing where you are looking
+    s.appendChild(svg('path', {
+      d: `M 0 ${-R - 4} l 3.4 6 l -6.8 0 z`,
+      fill: `rgba(${C.warm}, 0.55)`,
+    }));
+
+    // the killer, dead centre, facing up
+    s.appendChild(svg('path', {
+      d: 'M 0 -6.5 L 4.6 5.2 L 0 2.6 L -4.6 5.2 Z',
+      fill: `rgba(${C.warm}, 0.92)`,
+    }));
+
+    // pooled marks — never allocated per frame
+    this._planMarks = [];
+    for (let i = 0; i < G.planPool; i++) {
+      const g = svg('g', { opacity: '0' });
+      const part = svg('rect', { x: -3.4, y: -3.4, width: 6.8, height: 6.8, fill: 'none', 'stroke-width': 1.5 });
+      const threat = svg('path', { d: 'M 0 -5 L 4.4 4 L -4.4 4 Z', 'fill-opacity': '0.85' });
+      const edge = svg('path', { d: 'M 0 -5.6 L 4.2 2.4 L 0 0.4 L -4.2 2.4 Z' });
+      g.appendChild(part); g.appendChild(threat); g.appendChild(edge);
+      s.appendChild(g);
+      this._planMarks.push({ g, part, threat, edge, kind: null, shown: false });
+    }
+    root.appendChild(s);
+    this._planEl = s;
+    this._planT = 0;
+    return s;
+  }
+
+  /**
+   * Plot everything the player could walk to or be caught by.
+   *
+   * Bearings: the camera's yaw is a rotation about +Y with forward down -Z (Player composes
+   * `cam.rotation.set(pitch, yaw, roll)` in YXZ order), so a world offset (dx, dz) sits at
+   * `atan2(dx, -dz)` in world terms and at that minus the yaw once forward is up.
+   */
+  _updateSitePlan(dt) {
+    const el = this._planEl;
+    if (!el) return;
+    const marks = this._planMarks;
+    const show = this._phase === 'build' || this._phase === 'chase';
+    if (!show) {
+      if (el.style.opacity !== '0') el.style.opacity = '0';
+      return;
+    }
+    if (el.style.opacity !== '1') el.style.opacity = '1';
+
+    const shots = this.ctx?.systems?.get?.('Shots');
+    // Frozen under a posed capture for the same reason the lantern's fuel is — a blinking element
+    // makes every luma number irreproducible (see HANDOFF measurement failure #4).
+    if (!(shots && shots.active)) this._planT += clamp(dt, 0, 0.1);
+    const t = this._planT;
+
+    const cam = this.ctx?.camera;
+    const pl = this.ctx?.systems?.get?.('Player');
+    if (!cam || !pl) return;
+    const px = pl.position?.x ?? cam.position.x;
+    const pz = pl.position?.z ?? cam.position.z;
+    const yaw = pl.viewYaw ?? cam.rotation.y ?? 0;
+    const R = G.planR;
+    const range = G.planRange;
+
+    let n = 0;
+    const plot = (wx, wz, kind) => {
+      if (n >= marks.length) return;
+      const dx = wx - px, dz = wz - pz;
+      const dist = Math.hypot(dx, dz);
+      const rel = Math.atan2(dx, -dz) - yaw;
+      const sn = Math.sin(rel), cs = Math.cos(rel);
+      const off = dist > range;
+      // Inside: true position. Outside: pinned to the rim as a bearing arrow, which is the
+      // "point me at the thing I cannot see" case the player asked for.
+      // Compressed, not linear. Measured against the night's real distances: the pallet is ~5 m,
+      // the fallen log 31.6 m, the sill apron 26.4 m. On a linear 55 m scale the five piers you
+      // are standing next to collapse into one dot at r=8 of 96 — useless exactly when you need
+      // it. A 0.62 power curve puts 5 m at r=20 and 31 m at r=60, so near clutter separates and
+      // the far landmark still reads.
+      const rr = off ? R - 7 : Math.pow(dist / range, 0.62) * (R - 9);
+      const x = sn * rr, y = -cs * rr;
+      const m = marks[n++];
+      if (m.kind !== kind || m.off !== off) {
+        m.part.style.display = (!off && kind === 'part') ? '' : 'none';
+        m.threat.style.display = (!off && kind === 'threat') ? '' : 'none';
+        m.edge.style.display = off ? '' : 'none';
+        const col = kind === 'threat' ? C.accent : `rgba(${C.warm}, 0.95)`;
+        m.part.setAttribute('stroke', col);
+        m.threat.setAttribute('fill', col);
+        m.edge.setAttribute('fill', col);
+        m.kind = kind; m.off = off;
+      }
+      // A part pulses so the eye finds it; a threat does not — a blinking threat reads as a
+      // videogame, and a steady one reads as a person with a torch.
+      const pulse = kind === 'part' ? 0.62 + 0.38 * (0.5 + 0.5 * Math.sin(t * 3.1)) : 0.94;
+      const fade = off ? 0.75 : 1;
+      const a = pulse * fade;
+      if (m.a !== a) { m.g.setAttribute('opacity', a.toFixed(2)); m.a = a; }
+      // Marks keep their up-vector; only an off-range arrow turns to point outward.
+      const rot = off ? (Math.atan2(sn, -cs) * 180) / Math.PI : 0;
+      m.g.setAttribute('transform', `translate(${x.toFixed(1)} ${y.toFixed(1)}) rotate(${rot.toFixed(1)})`);
+      if (!m.shown) { m.g.style.display = ''; m.shown = true; }
+    };
+
+    // 1. everything you can still pick up
+    const bs = this.ctx?.systems?.get?.('BuildSystem');
+    const avail = bs?.available;
+    if (Array.isArray(avail)) {
+      for (let i = 0; i < avail.length && n < marks.length; i++) {
+        const part = avail[i];
+        if (!part || part.playerHeld || part.state === 'held' || part.state === 'placed') continue;
+        const o = part.object3D;
+        if (!o || !o.visible) continue;
+        plot(o.position.x, o.position.z, 'part');
+      }
+    }
+
+    // 2. anyone who could catch you
+    const camp = this.ctx?.systems?.get?.('Campers');
+    const agents = camp?.agents;
+    if (Array.isArray(agents)) {
+      for (let i = 0; i < agents.length && n < marks.length; i++) {
+        const a = agents[i];
+        if (!a || a.alive === false || !a.position) continue;
+        plot(a.position.x, a.position.z, 'threat');
+      }
+    }
+
+    for (let i = n; i < marks.length; i++) {
+      const m = marks[i];
+      if (m.shown) { m.g.style.display = 'none'; m.shown = false; }
+    }
+  }
+
   update(dt, elapsed) {
     if (!this._built || this._disposed) return;
     this._t = Number.isFinite(elapsed) ? elapsed : this._t + dt;
@@ -1241,6 +1439,7 @@ export class HUD {
       this._updateNoise(d);
       this._updateMask(d);
       this._updateWayfind(d);
+      this._updateSitePlan(d);
       this._updateReticle(d);
       this._updatePrompt(d);
       this._updateCarry(d);
